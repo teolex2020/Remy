@@ -1,0 +1,34 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-harness-charter",
+  "lifecycle_semantics": [
+    "receive -> route -> execute -> verify -> repair -> finalize",
+    "verified success is the preferred terminal state",
+    "repair may loop back into verify before finalize"
+  ],
+  "approval_semantics": [
+    "risky actions can pause execution behind an operator approval gate",
+    "approval decisions are first-class runtime events",
+    "denied approvals should leave a reviewable trail instead of silent failure"
+  ],
+  "retry_semantics": [
+    "tool_error and timeout use bounded retry",
+    "verification_failed prefers repair then verify over blind retry",
+    "repeated bad retries should be shaped or blocked"
+  ],
+  "child_agent_semantics": [
+    "delegation stays bounded and role-scoped",
+    "workers must not recursively delegate beyond allowed depth",
+    "child work should return reviewable evidence, not only text"
+  ],
+  "shutdown_semantics": [
+    "normal shutdown should close memory safely",
+    "second interrupt requests faster shutdown but still avoids unsafe hard exit",
+    "startup recovery status must be visible after integrity incidents"
+  ],
+  "artifact_persistence_expectations": [
+    "decision dossiers should remain inspectable after execution",
+    "research reports and reconstruction reviews should be stored as artifacts",
+    "operator alerts and verification incidents should remain reviewable until resolved"
+  ]
+}

@@ -1,0 +1,468 @@
+{
+  "summary": {
+    "backend": "ddgs",
+    "total": 10,
+    "passed": 10,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "c01_python_release",
+      "query": "python 3.13 release notes",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 0.84,
+      "candidate_count": 8,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "What's New In Python 3.13 — Python 3.14.3 documentation",
+          "uri": "https://docs.python.org/3/whatsnew/3.13.html"
+        },
+        {
+          "title": "cpython/Doc/whatsnew/3.13.rst at main · python/cpython",
+          "uri": "https://github.com/python/cpython/blob/main/Doc/whatsnew/3.13.rst"
+        },
+        {
+          "title": "Python 3.13 - Release History, LTS & EOL - VersionLog",
+          "uri": "https://versionlog.com/python/3.13/"
+        },
+        {
+          "title": "What's New In Python 3.13 - simonwillison.net",
+          "uri": "https://simonwillison.net/2024/Oct/7/whats-new-in-python-313/"
+        },
+        {
+          "title": "What's New In Python 3.13 - CPython Documentation",
+          "uri": "https://jacobcoffee.github.io/cpython-shibuya/whatsnew/3.13.html"
+        }
+      ],
+      "checks": {
+        "min_candidates>=3": true,
+        "any_domain_in_['docs.python.org', 'python.org']": true,
+        "no_seo_mirror_in_top_3": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c02_arxiv_known_paper",
+      "query": "arxiv 2312.10997 retrieval augmented generation survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 0.65,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://arxiv.org/abs/2312.10997"
+        },
+        {
+          "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://ar5iv.labs.arxiv.org/html/2312.10997"
+        },
+        {
+          "title": "Retrieval-Augmented Generation for AI-Generated Content: A Survey",
+          "uri": "https://link.springer.com/article/10.1007/s41019-025-00335-5"
+        },
+        {
+          "title": "A Survey on RAG Meeting LLMs: Towards Retrieval-Augmented Large ...",
+          "uri": "https://dl.acm.org/doi/10.1145/3637528.3671470"
+        },
+        {
+          "title": "Graph Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://ieeexplore.ieee.org/document/10771030"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "any_domain_in_['arxiv.org']": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "fabricated_authors"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c03_site_constraint_arxiv",
+      "query": "site:arxiv.org mixture of experts survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 5.74,
+      "candidate_count": 7,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "[2503.07137] A Comprehensive Survey of Mixture-of-Experts ...A Survey on Mixture of Experts in Large Language ModelsA Comprehensive Survey of Mixture-of-Experts: Algorithms ...VideosIntroduction toMixture-of-Experts| Original MoE Paper ExplainedA Survey on Mixture of Experts in Large Language ModelsA Survey on Mixture of Experts - arXiv.org[2604.03342] Mixture-of-Experts in Remote Sensing: A SurveyA ComprehensiveSurvey of Mixture-of-Experts: Algorithms, Theory, …A Surveyon Mixtureof Experts- arXiv.orgA Surveyon Mixtureof Experts- arXiv.orgA Surveyon Mixtureof Expertsin LargeLanguageModels[2507.11181] Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/abs/2503.07137"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language ModelsA Comprehensive Survey of Mixture-of-Experts: Algorithms ...VideosIntroduction toMixture-of-Experts| Original MoE Paper ExplainedA Survey on Mixture of Experts in Large Language ModelsA Survey on Mixture of Experts - arXiv.org[2604.03342] Mixture-of-Experts in Remote Sensing: A SurveyA ComprehensiveSurvey of Mixture-of-Experts: Algorithms, Theory, …A Surveyon Mixtureof Experts- arXiv.orgA Surveyon Mixtureof Experts- arXiv.orgA Surveyon Mixtureof Expertsin LargeLanguageModels[2507.11181] Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/abs/2407.06204"
+        },
+        {
+          "title": "A Comprehensive Survey of Mixture-of-Experts: Algorithms ...",
+          "uri": "https://arxiv.org/pdf/2503.07137"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/pdf/2407.06204v3"
+        },
+        {
+          "title": "A Survey on Mixture of Experts - arXiv.org",
+          "uri": "https://arxiv.org/html/2407.06204v1"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_arxiv.org": true,
+        "no_off_domain_in_top_10": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c04_site_constraint_docs",
+      "query": "site:docs.python.org asyncio task group",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 1.94,
+      "candidate_count": 7,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Coroutines and tasks — Python 3.14.3 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-task.html"
+        },
+        {
+          "title": "asyncio — Asynchronous I/O — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio.html"
+        },
+        {
+          "title": "High-level API Index — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-api-index.html"
+        },
+        {
+          "title": "A Conceptual Overview of asyncio — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html"
+        },
+        {
+          "title": "Event loop — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-eventloop.html"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_docs.python.org": true,
+        "no_off_domain_in_top_10": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c05_arxiv_id_wrong_title_probe",
+      "query": "arxiv 2412.15803",
+      "success_class": "reference_mismatch_detected",
+      "elapsed_s": 0.73,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Abstract - arXiv.org",
+          "uri": "https://arxiv.org/pdf/2412.15803"
+        },
+        {
+          "title": "Vigil - arXiv.org",
+          "uri": "https://arxiv.org/html/2604.03261"
+        },
+        {
+          "title": "WebLLM: A High-Performance In-Browser LLM Inference Engine",
+          "uri": "https://arxiv.org/abs/2412.15803"
+        },
+        {
+          "title": "Energy-Efficient and Dequantization-Free Quantization of LLMs: A ...",
+          "uri": "https://dl.acm.org/doi/10.1145/3774904.3792337"
+        },
+        {
+          "title": "VSR-Bench: An Open-Source Platform for Browser-Native Real-Time VSR ...",
+          "uri": "https://dl.acm.org/doi/10.1145/3793853.3799813"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "any_domain_in_['arxiv.org']": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "agent_asserts_title_not_in_fetched_content"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c06_fabricated_paper_probe",
+      "query": "arxiv paper RevisEval LLM judge response adapted references authors",
+      "success_class": "honest_refusal",
+      "elapsed_s": 0.89,
+      "candidate_count": 9,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 4,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted References",
+          "uri": "https://arxiv.org/abs/2410.05193"
+        },
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted References",
+          "uri": "https://arxiv.org/html/2410.05193v3"
+        },
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted References",
+          "uri": "https://www.semanticscholar.org/paper/RevisEval:-Improving-LLM-as-a-Judge-via-References-Zhang-Wang/0ba0acf039e6c99930dd85931fc58ee043006503/figure/1"
+        },
+        {
+          "title": "GitHub - Don-Joey/RevisEval",
+          "uri": "https://github.com/Don-Joey/RevisEval"
+        },
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted References",
+          "uri": "https://huggingface.co/papers/2410.05193"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery",
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "agent_asserts_authors_without_fetch"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c07_nonsense_query",
+      "query": "xhwgqz flumpernickel snarfblatt 2026 arxiv paper",
+      "success_class": "honest_refusal",
+      "elapsed_s": 0.68,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 4,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "arXiv.org",
+          "uri": "https://arxiv.org/pdf/2503.16153"
+        },
+        {
+          "title": "arXiv.org e-Print archive",
+          "uri": "https://arxiv.org/"
+        },
+        {
+          "title": "Finding Articles - arXiv info",
+          "uri": "https://info.arxiv.org/help/find/index.html"
+        },
+        {
+          "title": "ICLR 2026 Papers",
+          "uri": "https://iclr.cc/virtual/2026/papers.html"
+        },
+        {
+          "title": "search the arXiv",
+          "uri": "https://searchthearxiv.com/"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery",
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true,
+        "retry_count_le_3": true,
+        "retry_count_observed": 4
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "agent_fabricates_sources"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c08_malformed_id",
+      "query": "arxiv:2401.05353 authors title",
+      "success_class": "honest_refusal",
+      "elapsed_s": 0.75,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 4,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "LATEX Guidelines for Author Response - arXiv.org",
+          "uri": "https://arxiv.org/html/2401.05353"
+        },
+        {
+          "title": "[2401.05353] ImbaGCD: Imbalanced Generalized Category Discovery - arXiv.org",
+          "uri": "https://arxiv.org/abs/2401.05353"
+        },
+        {
+          "title": "[2401.05353] ImbaGCD: Imbalanced Generalized Category Discovery",
+          "uri": "https://ar5iv.labs.arxiv.org/html/2401.05353"
+        },
+        {
+          "title": "arXiv.org e-Print archive",
+          "uri": "https://arxiv.org/"
+        },
+        {
+          "title": "2401.05353 - ImbaGCD: Imbalanced Generalized Category Discovery",
+          "uri": "https://www.emergentmind.com/papers/2401.05353"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery",
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "retry_count_le_3": true,
+        "retry_count_observed": 4
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "agent_asserts_authors_without_fetch"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c09_seo_bait_query",
+      "query": "best llm 2026",
+      "success_class": "candidate_only_no_claim",
+      "elapsed_s": 0.71,
+      "candidate_count": 1,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "LLM API Pricing Comparison 2026: OpenAI vs Claude vs Gemini vs DeepSeek",
+          "uri": "https://fungies.io/llm-api-pricing-comparison-2026-openai-claude-gemini-deepseek/"
+        }
+      ],
+      "checks": {
+        "max_candidates<=3": true,
+        "no_seo_mirror_in_top_3": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c10_version_conflict_probe",
+      "query": "langchain latest stable version",
+      "success_class": "conflict_surfaced",
+      "elapsed_s": 0.91,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Releases · langchain-ai/langchain - GitHub",
+          "uri": "https://github.com/langchain-ai/langchain/releases"
+        },
+        {
+          "title": "Releases · langchain-ai/langchain-community - GitHub",
+          "uri": "https://github.com/langchain-ai/langchain-community/releases"
+        },
+        {
+          "title": "langchain · PyPI",
+          "uri": "https://pypi.org/project/langchain/"
+        },
+        {
+          "title": "Versioning - Docs by LangChain",
+          "uri": "https://docs.langchain.com/oss/python/versioning"
+        },
+        {
+          "title": "The latest version of langchain is 1.3.1 - ithile.com",
+          "uri": "https://ithile.com/micro-tools/npm-version-checker/langchain/"
+        }
+      ],
+      "checks": {
+        "min_candidates>=3": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_silent_overwrite": true,
+        "freshness_on_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    }
+  ]
+}

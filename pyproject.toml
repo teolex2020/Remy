@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remy"
+version = "0.8.0"
+description = "Remy - local-first AI workflow automation with governed memory, run history, and human-approved execution"
+authors = [{ name = "AuroraSeed" }]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # --- Core runtime ---
+    # ~= allows patch updates (1.2.2 → 1.2.x) but blocks minor bumps that break APIs
+    "python-dotenv~=1.2.2",
+    "pydantic~=2.13.4",
+    "pydantic-settings~=2.14.1",
+    "PyYAML~=6.0.3",
+    "orjson~=3.11.9",
+    "tenacity~=9.1.4",
+    "psutil~=7.2.2",
+
+    # --- Google AI / LLM ---
+    # Pinned exactly — these APIs change every minor version and break agents
+    "google-genai==2.8.0",
+    "langchain-core==1.4.7",
+    "langchain-google-genai==4.2.5",
+    "langgraph==1.2.5",
+    "langgraph-checkpoint==4.1.1",
+    "langgraph-prebuilt==1.1.0",
+
+    # --- Optional LLM providers (lazy-imported, graceful fallback if absent) ---
+    # Pinned — openai/anthropic SDK break tool_call format between minor versions
+    "langchain-openai==1.3.3",
+    "langchain-anthropic==1.4.8",
+    "langchain-ollama==1.1.0",
+    "langchain-community==0.4.2",
+    "openai==2.44.0",
+    "anthropic==0.112.0",
+
+    # --- Web / API ---
+    "fastapi==0.137.1",
+    "uvicorn[standard]~=0.49.0",
+    "python-multipart~=0.0.32",
+    "websockets~=15.0.1",
+    "httpx~=0.28.1",
+    "requests~=2.34.2",
+    "aiohttp~=3.14.1",
+
+    # --- Search ---
+    # ddgs: pinned minor — backends change between minor versions
+    "ddgs==9.14.4",
+    "trafilatura~=2.1.0",
+
+    # --- Telegram ---
+    "python-telegram-bot~=22.8",
+
+    # --- Desktop UI ---
+    "pywebview~=6.2.1",
+
+    # --- Voice ---
+    "PyAudio~=0.2.14",
+
+    # --- Push notifications ---
+    "pywebpush~=2.3.0",
+
+    # --- Document generation & bulk ingestion ---
+    "reportlab~=4.5.1",
+    "python-pptx~=1.0.2",
+    "pymupdf~=1.27.2",
+    "Pillow~=12.2.0",
+    "XlsxWriter~=3.2.9",
+    "openpyxl~=3.1.5",
+    "playwright~=1.60.0",
+
+    # --- Logging ---
+    "python-json-logger~=4.1.0",
+
+    # --- Memory engine (Rust native, published on PyPI) ---
+    # A vendored wheel in vendor/ (gitignored) can override this for
+    # offline/dev installs: pip install vendor/aura_memory-*.whl
+    "aura-memory~=1.5.5",
+]
+
+[project.scripts]
+remy = "remy.main:main"
+
+[project.gui-scripts]
+remy-app = "remy.desktop_entry:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
+markers = [
+    "e2e: end-to-end browser tests (run separately with: pytest tests/e2e/)",
+    "real_sync: test needs real _sync_to_knowledge (not mocked by autouse fixture)",
+]
+
+
+[tool.ruff]
+select = ["E", "F", "I"]
+line-length = 100
+
+[tool.setuptools.package-data]
+"remy" = ["web/static/**/*", "sandbox/manifest.json", "sandbox/*.py"]
+

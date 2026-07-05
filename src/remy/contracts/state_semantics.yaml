@@ -1,0 +1,51 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-state-semantics",
+  "states": [
+    {
+      "id": "active_runtime_state",
+      "label": "Active runtime state",
+      "owner": "Remy runtime",
+      "persistence": "ephemeral",
+      "lifecycle": "current session or loop only",
+      "examples": ["current goal", "current role", "pending approval", "loop control flags"],
+      "recovery_source": "recomputed from runtime snapshot"
+    },
+    {
+      "id": "durable_cognitive_memory",
+      "label": "Durable cognitive memory",
+      "owner": "AuraSDK",
+      "persistence": "durable",
+      "lifecycle": "cross-session",
+      "examples": ["memory records", "beliefs", "salience", "contradiction state"],
+      "recovery_source": "brain store and history replay"
+    },
+    {
+      "id": "replay_recovery_journal",
+      "label": "Replay and recovery journal",
+      "owner": "Remy",
+      "persistence": "durable",
+      "lifecycle": "append-only operational history",
+      "examples": ["history sessions", "tool calls", "reconstruction candidates"],
+      "recovery_source": "history directory"
+    },
+    {
+      "id": "operator_artifacts",
+      "label": "Operator artifacts",
+      "owner": "Remy and operator surfaces",
+      "persistence": "durable",
+      "lifecycle": "reviewable until replaced or resolved",
+      "examples": ["decision dossier", "research report", "operator alerts", "maintenance digest"],
+      "recovery_source": "brain records and operator stores"
+    },
+    {
+      "id": "temporary_reasoning_state",
+      "label": "Temporary reasoning state",
+      "owner": "LLM call boundary",
+      "persistence": "transient",
+      "lifecycle": "single reasoning turn",
+      "examples": ["scratch reasoning", "tool selection draft", "intermediate prompt assembly"],
+      "recovery_source": "not recovered directly"
+    }
+  ]
+}

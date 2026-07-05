@@ -1,0 +1,22 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-harness-migration-manifest",
+  "artifacts": [
+    {"id": "runtime_contract", "version": "2026-03-30.v1"},
+    {"id": "role_contracts", "version": "2026-03-30.v1"},
+    {"id": "state_semantics", "version": "2026-03-30.v1"},
+    {"id": "harness_charter", "version": "2026-03-30.v1"},
+    {"id": "script_adapter_registry", "version": "2026-03-30.v1"}
+  ],
+  "runtime_behavior_changes": [
+    "verify-before-success is enforced for reports, research completion, and reconstruction",
+    "verification incidents are operator-visible and auto-resolve when artifacts later verify cleanly",
+    "roles, state classes, and deterministic adapters are explicit runtime artifacts",
+    "startup integrity and recovery status are exposed in the system surface"
+  ],
+  "migration_notes": [
+    "Treat harness artifact version changes as reviewable runtime changes, not silent refactors.",
+    "If a new artifact version changes verification or recovery semantics, update tests and operator-facing wording together.",
+    "Prefer additive migration notes over implicit behavior drift."
+  ]
+}

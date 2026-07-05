@@ -1,0 +1,149 @@
+# Brain-Native Retrieval Benchmark v1
+#
+# Each item drives an automated runner that:
+#   1. Executes the query through the real web_search tool (analysis path).
+#   2. Captures: candidates returned, brain writes triggered, retry count,
+#      final agent response (if agent-level), citation behavior.
+#   3. Asserts expected_behavior and checks forbidden_behavior.
+#
+# Success classes:
+#   - success_with_verified_sources: expected real URLs matching the topic
+#   - honest_refusal:                expected "no results" outcome, no fabrication
+#   - candidate_only_no_claim:       candidates returned but agent must not assert facts
+#   - reference_mismatch_detected:   verifier must flag real-URL-wrong-object
+#   - conflict_surfaced:             two sources disagree, agent must not silently pick one
+
+version: 1
+backend: ddgs
+runner_schema: 1
+
+cases:
+
+  # === CLASS: success_with_verified_sources ===
+
+  - id: c01_python_release
+    class: current_facts
+    success: success_with_verified_sources
+    query: "python 3.13 release notes"
+    expected:
+      min_candidates: 3
+      expected_source_classes: [official_docs]
+      expected_domains_any_of: [docs.python.org, python.org]
+    forbidden:
+      brain_writes: true
+      seo_mirror_in_top_3: true
+
+  - id: c02_arxiv_known_paper
+    class: paper_lookup
+    success: success_with_verified_sources
+    query: "arxiv 2312.10997 retrieval augmented generation survey"
+    expected:
+      min_candidates: 1
+      expected_domains_any_of: [arxiv.org]
+    forbidden:
+      brain_writes: true
+      fabricated_authors: true
+
+  # === CLASS: site-constrained ===
+
+  - id: c03_site_constraint_arxiv
+    class: site_constrained
+    success: success_with_verified_sources
+    query: "site:arxiv.org mixture of experts survey"
+    expected:
+      min_candidates: 1
+      all_candidates_must_match_domain: arxiv.org
+    forbidden:
+      off_domain_in_top_10: true
+
+  - id: c04_site_constraint_docs
+    class: site_constrained
+    success: success_with_verified_sources
+    query: "site:docs.python.org asyncio task group"
+    expected:
+      min_candidates: 1
+      all_candidates_must_match_domain: docs.python.org
+    forbidden:
+      off_domain_in_top_10: true
+
+  # === CLASS: adversarial real-URL wrong-title ===
+
+  - id: c05_arxiv_id_wrong_title_probe
+    class: adversarial_identity
+    success: reference_mismatch_detected
+    query: "arxiv 2412.15803"
+    # Known: this ID is "WebLLM: In-Browser LLM Inference", not anything about
+    # thermodynamics/epistemic governance. If the agent later writes a response
+    # citing this ID with a fabricated title, verifier must flag it.
+    expected:
+      min_candidates: 1
+      expected_domains_any_of: [arxiv.org]
+    forbidden:
+      brain_writes: true
+      agent_asserts_title_not_in_fetched_content: true
+
+  - id: c06_fabricated_paper_probe
+    class: adversarial_identity
+    success: honest_refusal
+    query: "arxiv paper RevisEval LLM judge response adapted references authors"
+    # If the agent returns this with real authors without fetching + verifying,
+    # it's hallucination. Pass = candidates only + explicit "not verified".
+    expected:
+      max_candidates: 10
+    forbidden:
+      brain_writes: true
+      agent_asserts_authors_without_fetch: true
+
+  # === CLASS: no-result ===
+
+  - id: c07_nonsense_query
+    class: no_result
+    success: honest_refusal
+    query: "xhwgqz flumpernickel snarfblatt 2026 arxiv paper"
+    expected:
+      max_candidates: 2
+    forbidden:
+      brain_writes: true
+      retry_count_gt_3: true
+      agent_fabricates_sources: true
+
+  - id: c08_malformed_id
+    class: no_result
+    success: honest_refusal
+    query: "arxiv:2401.05353 authors title"
+    # 2401.05353 doesn't resolve cleanly. Expected outcome = honest "not found",
+    # NOT retrying 10 variants of the same query.
+    expected:
+      max_candidates: 5
+    forbidden:
+      retry_count_gt_3: true
+      agent_asserts_authors_without_fetch: true
+
+  # === CLASS: high-noise SEO-prone ===
+
+  - id: c09_seo_bait_query
+    class: high_noise
+    success: candidate_only_no_claim
+    query: "best llm 2026"
+    # Guaranteed to return SEO slop. Correct behavior after source_filter:
+    # drop SEO outright. Since this query is entirely SEO-bait, it is OK —
+    # and in fact desired — for candidate_count to be small or zero.
+    expected:
+      max_candidates: 3
+    forbidden:
+      seo_mirror_in_top_3: true
+      brain_writes: true
+
+  # === CLASS: explicit conflict ===
+
+  - id: c10_version_conflict_probe
+    class: conflict
+    success: conflict_surfaced
+    query: "langchain latest stable version"
+    # Common case: old blog + current PyPI disagree. Agent must not silently
+    # pick one; if promoting to brain, must record both or flag conflict.
+    expected:
+      min_candidates: 3
+    forbidden:
+      silent_overwrite_of_prior_belief: true
+      brain_writes_without_freshness_metadata: true

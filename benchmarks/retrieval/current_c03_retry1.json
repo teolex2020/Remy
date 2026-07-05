@@ -1,0 +1,49 @@
+{
+  "summary": {
+    "backend": "ddgs",
+    "total": 1,
+    "passed": 1,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "c03_site_constraint_arxiv",
+      "query": "site:arxiv.org mixture of experts survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 2.83,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "A Comprehensive Survey of Mixture-of-Experts: Algorithms, Theory, and ...",
+          "uri": "https://arxiv.org/abs/2503.07137"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/abs/2407.06204"
+        },
+        {
+          "title": "A Survey on Mixture of Experts - arXiv.org",
+          "uri": "https://arxiv.org/html/2407.06204v1"
+        },
+        {
+          "title": "A Survey on Mixture of Experts - arXiv.org",
+          "uri": "https://arxiv.org/pdf/2407.06204v1"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/pdf/2407.06204v3"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_arxiv.org": true,
+        "no_off_domain_in_top_10": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    }
+  ]
+}

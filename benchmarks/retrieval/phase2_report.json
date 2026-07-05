@@ -1,0 +1,399 @@
+{
+  "summary": {
+    "backend": "ddgs",
+    "total": 10,
+    "passed": 10,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "c01_python_release",
+      "query": "python 3.13 release notes",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 3.76,
+      "candidate_count": 8,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "What's New In Python 3.13 — Python 3.14.3 documentation",
+          "uri": "https://docs.python.org/3/whatsnew/3.13.html"
+        },
+        {
+          "title": "cpython/Doc/whatsnew/3.13.rst at main · python/cpython",
+          "uri": "https://github.com/python/cpython/blob/main/Doc/whatsnew/3.13.rst"
+        },
+        {
+          "title": "Python 3.13 - Release History, LTS & EOL - VersionLog",
+          "uri": "https://versionlog.com/python/3.13/"
+        },
+        {
+          "title": "Python 3.13 - What's New in the Latest Python Release?",
+          "uri": "https://blogs.nexlyhub.com/python-3-13-whats-new-in-the-latest-python-release/"
+        },
+        {
+          "title": "What's New In Python 3.13 - CPython Documentation",
+          "uri": "https://jacobcoffee.github.io/cpython-shibuya/whatsnew/3.13.html"
+        }
+      ],
+      "checks": {
+        "min_candidates>=3": true,
+        "any_domain_in_['docs.python.org', 'python.org']": true,
+        "no_seo_mirror_in_top_3": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c02_arxiv_known_paper",
+      "query": "arxiv 2312.10997 retrieval augmented generation survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 1.77,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Retrieval-Augmented Generation: A Comprehensive Survey of",
+          "uri": "https://arxiv.org/html/2506.00054v1"
+        },
+        {
+          "title": "Evaluating the Robustness of Retrieval-Augmented Generation to",
+          "uri": "https://arxiv.org/html/2509.03787v1"
+        },
+        {
+          "title": "[2312.10997] Retrieval-Augmented Generation for Large Language",
+          "uri": "https://arxiv.org/abs/2312.10997"
+        },
+        {
+          "title": "Response Quality Assessment for Retrieval-Augmented Generation",
+          "uri": "https://arxiv.org/html/2506.20978v1"
+        },
+        {
+          "title": "Optimizing and Evaluating Enterprise Retrieval-Augmented",
+          "uri": "https://arxiv.org/html/2410.12812v1"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "any_domain_in_['arxiv.org']": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes",
+        "fabricated_authors"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c03_site_constraint_arxiv",
+      "query": "site:arxiv.org mixture of experts survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 1.24,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "A Comprehensive Survey of Mixture-of-Experts: Algorithms, Theory, and ...",
+          "uri": "https://arxiv.org/abs/2503.07137"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/abs/2407.06204"
+        },
+        {
+          "title": "[2604.03342] Mixture-of-Experts in Remote Sensing: A Survey",
+          "uri": "https://arxiv.org/abs/2604.03342"
+        },
+        {
+          "title": "A Survey on Mixture of Experts - arXiv.org",
+          "uri": "https://arxiv.org/html/2407.06204v1"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/pdf/2407.06204v3"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_arxiv.org": true,
+        "no_off_domain_in_top_10": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c04_site_constraint_docs",
+      "query": "site:docs.python.org asyncio task group",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 6.57,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Coroutines and tasks — Python 3.14.3 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-task.html"
+        },
+        {
+          "title": "High-level API Index — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-api-index.html"
+        },
+        {
+          "title": "asyncio — Asynchronous I/O — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio.html"
+        },
+        {
+          "title": "A Conceptual Overview of asyncio — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/howto/a-conceptual-overview-of-asyncio.html"
+        },
+        {
+          "title": "Event loop — Python 3.14.4 documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-eventloop.html"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_docs.python.org": true,
+        "no_off_domain_in_top_10": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [],
+      "passed": true
+    },
+    {
+      "id": "c05_arxiv_id_wrong_title_probe",
+      "query": "arxiv 2412.15803",
+      "success_class": "reference_mismatch_detected",
+      "elapsed_s": 8.67,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Abstract - arXiv.org",
+          "uri": "https://arxiv.org/pdf/2412.15803"
+        },
+        {
+          "title": "[2412.15803] WebLLM: A High-Performance In-Browser LLM ...",
+          "uri": "https://arxiv.org/abs/2412.15803"
+        },
+        {
+          "title": "arxiv.org/html/2406.05704v3",
+          "uri": "https://arxiv.org/html/2406.05704v3"
+        },
+        {
+          "title": "GitHub - mlc-ai/web-llm: High-performance In-browser LLM",
+          "uri": "https://github.com/mlc-ai/web-llm"
+        },
+        {
+          "title": "WebLLM: A High-Performance In-Browser LLM Inference Engine",
+          "uri": "https://huggingface.co/papers/2412.15803"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "any_domain_in_['arxiv.org']": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes",
+        "agent_asserts_title_not_in_fetched_content"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c06_fabricated_paper_probe",
+      "query": "arxiv paper RevisEval LLM judge response adapted references authors",
+      "success_class": "honest_refusal",
+      "elapsed_s": 3.0,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...Reviseval: Improving Llm-as-a-judge Via Response-adapted ...RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...[2410.05193]RevisEval: ImprovingLLM-as-a-JudgeviaResponse-Adap…[2410.05193]RevisEval: ImprovingLLM-as-a-JudgeviaResponse-Adap…[2410.05193]RevisEval: ImprovingLLM-as-a-JudgeviaResponse-Adap…[2410.05193]RevisEval: ImprovingLLM-as-a-JudgeviaResponse-Adap…GitHub - Don-Joey/RevisEval",
+          "uri": "https://arxiv.org/abs/2410.05193"
+        },
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted",
+          "uri": "https://arxiv.org/html/2410.05193v3"
+        },
+        {
+          "title": "LLMs-as-Judges: A Comprehensive Survey on LLM-based Evaluation",
+          "uri": "https://arxiv.org/html/2412.05579v2"
+        },
+        {
+          "title": "Small Models, Big Support: A Local LLM Framework for",
+          "uri": "https://arxiv.org/html/2506.05925v1"
+        },
+        {
+          "title": "RevisEval: Improving LLM-as-a-Judge via Response-Adapted ...",
+          "uri": "https://www.semanticscholar.org/paper/RevisEval:-Improving-LLM-as-a-Judge-via-References-Zhang-Wang/0ba0acf039e6c99930dd85931fc58ee043006503/figure/1"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery"
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes",
+        "agent_asserts_authors_without_fetch"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c07_nonsense_query",
+      "query": "xhwgqz flumpernickel snarfblatt 2026 arxiv paper",
+      "success_class": "honest_refusal",
+      "elapsed_s": 2.61,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "arXiv.org e-Print archive",
+          "uri": "https://arxiv.org/"
+        },
+        {
+          "title": "Connected Papers | Find and explore academic papers",
+          "uri": "https://www.connectedpapers.com/"
+        },
+        {
+          "title": "search the arXiv",
+          "uri": "https://searchthearxiv.com/"
+        },
+        {
+          "title": "arXiv.wiki: enriched e-Prints",
+          "uri": "https://arxiv.wiki/"
+        },
+        {
+          "title": "Arxiv Paper Tools - Advanced Research Paper Analysis",
+          "uri": "https://arxivpaperonline.com/"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery"
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes",
+        "retry_count_gt_3",
+        "agent_fabricates_sources"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c08_malformed_id",
+      "query": "arxiv:2401.05353 authors title",
+      "success_class": "honest_refusal",
+      "elapsed_s": 0.97,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "LATEX Guidelines for Author Response - arXiv.org",
+          "uri": "https://arxiv.org/html/2401.05353v1"
+        },
+        {
+          "title": "[2401.05353] ImbaGCD: Imbalanced Generalized Category Discovery - arXiv.org",
+          "uri": "https://arxiv.org/abs/2401.05353"
+        },
+        {
+          "title": "[2401.05353] ImbaGCD: Imbalanced Generalized Category Discovery",
+          "uri": "https://ar5iv.labs.arxiv.org/html/2401.05353"
+        },
+        {
+          "title": "arXiv.org e-Print archive",
+          "uri": "https://arxiv.org/"
+        },
+        {
+          "title": "Author Identifiers - arXiv info",
+          "uri": "https://info.arxiv.org/help/author_identifiers.html"
+        }
+      ],
+      "checks": {
+        "same_intent_cap_fires": true,
+        "first_call_mode": "candidate_discovery"
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "retry_count_gt_3",
+        "agent_asserts_authors_without_fetch"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c09_seo_bait_query",
+      "query": "best llm 2026",
+      "success_class": "candidate_only_no_claim",
+      "elapsed_s": 7.38,
+      "candidate_count": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Open Source LLM Comparison Table (2026) - ComputingForGeeks",
+          "uri": "https://computingforgeeks.com/open-source-llm-comparison/"
+        }
+      ],
+      "checks": {
+        "max_candidates<=3": true,
+        "no_seo_mirror_in_top_3": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "brain_writes"
+      ],
+      "passed": true
+    },
+    {
+      "id": "c10_version_conflict_probe",
+      "query": "langchain latest stable version",
+      "success_class": "conflict_surfaced",
+      "elapsed_s": 7.1,
+      "candidate_count": 10,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Releases · langchain-ai/langchain - GitHub",
+          "uri": "https://github.com/langchain-ai/langchain/releases"
+        },
+        {
+          "title": "Releases · langchain-ai/langchain-community - GitHub",
+          "uri": "https://github.com/langchain-ai/langchain-community/releases"
+        },
+        {
+          "title": "langchain · PyPI",
+          "uri": "https://pypi.org/project/langchain/"
+        },
+        {
+          "title": "Versioning - Docs by LangChain",
+          "uri": "https://docs.langchain.com/oss/python/versioning"
+        },
+        {
+          "title": "langchain package - All Versions - Pub",
+          "uri": "https://pub.dev/packages/langchain/versions"
+        }
+      ],
+      "checks": {
+        "min_candidates>=3": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "silent_overwrite_of_prior_belief",
+        "brain_writes_without_freshness_metadata"
+      ],
+      "passed": true
+    }
+  ]
+}

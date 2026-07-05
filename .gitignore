@@ -1,0 +1,141 @@
+# Health Secretary - .gitignore
+
+# ============== PYTHON ==============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============== VIRTUAL ENVIRONMENTS ==============
+.venv/
+venv/
+ENV/
+env/
+.env.local
+
+
+# ============== IDE ==============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ============== OS ==============
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ============== SECRETS & CREDENTIALS ==============
+.env
+*.env
+.env.*
+!.env.example
+credentials.json
+secrets.json
+*.pem
+*.key
+*.crt
+secrets/
+
+# ============== DATA & LOGS (runtime data, not source) ==============
+data/*
+!data/.gitkeep
+!data/evals/
+!data/evals/**
+*.log
+logs/
+
+# ============== MODELS (LARGE FILES) ==============
+# Vosk models (download separately)
+models/*/
+!models/.gitkeep
+
+# Whisper models (downloaded automatically by faster-whisper)
+*.pt
+*.bin
+
+# Piper TTS models (download separately)
+piper/models/*.onnx
+piper/models/*.onnx.json
+!piper/models/.gitkeep
+
+# Piper binaries (platform-specific, download separately)
+piper/bin/
+!piper/bin/.gitkeep
+
+# ============== TEMPORARY FILES ==============
+*.tmp
+*.temp
+*.bak
+*.backup
+*.cache
+.cache/
+tmp/
+temp/
+.tmp/
+.tmp_*/
+manual-tmp-check/
+pytest_tmp_work/
+__test/
+MagicMock/
+
+# ============== TESTING ==============
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ============== JUPYTER ==============
+.ipynb_checkpoints/
+*.ipynb
+
+# ============== BUILD ==============
+*.manifest
+*.spec
+
+# ============== AUDIO TEMP FILES ==============
+trigger_check.wav
+confirm_check.wav
+private_data_*.wav
+
+# ============== REPORTS ==============
+reports/*.pdf
+reports/*.png
+reports/*.txt
+
+# ============== SANDBOX RUNTIME ==============
+sandbox/venv/
+
+# ============== VENDOR BINARIES ==============
+vendor/*.whl
+
+# ============== GENERATED FILES ==============
+generated_password.txt

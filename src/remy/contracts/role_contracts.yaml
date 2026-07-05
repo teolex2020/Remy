@@ -1,0 +1,56 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-role-contracts",
+  "roles": [
+    {
+      "id": "planner",
+      "label": "Planner",
+      "allowed_tools": ["plan_steps", "read_memory", "search_memory", "review_history_memory_gaps"],
+      "required_output": "stepwise_action_plan",
+      "required_evidence": "decision_dossier_or_plan_notes",
+      "verification_owner": "reviewer",
+      "failure_owner": "planner",
+      "escalation_path": ["reviewer", "operator"]
+    },
+    {
+      "id": "researcher",
+      "label": "Researcher",
+      "allowed_tools": ["start_research", "store_research", "complete_research", "web_search"],
+      "required_output": "research_findings_or_report",
+      "required_evidence": "sources_and_research_report",
+      "verification_owner": "verifier",
+      "failure_owner": "researcher",
+      "escalation_path": ["verifier", "operator"]
+    },
+    {
+      "id": "verifier",
+      "label": "Verifier",
+      "allowed_tools": ["generate_report", "memory_feedback", "get_corrections", "review_history_memory_gaps"],
+      "required_output": "verification_result",
+      "required_evidence": "artifact_status_and_supporting_record_ids",
+      "verification_owner": "verifier",
+      "failure_owner": "verifier",
+      "escalation_path": ["reviewer", "operator"]
+    },
+    {
+      "id": "reviewer",
+      "label": "Reviewer",
+      "allowed_tools": ["review_history_memory_gaps", "get_corrections", "search_memory", "explain_recall"],
+      "required_output": "review_summary_or_repair_request",
+      "required_evidence": "incident_or_memory_review_artifact",
+      "verification_owner": "operator",
+      "failure_owner": "reviewer",
+      "escalation_path": ["operator"]
+    },
+    {
+      "id": "operator-facing_summarizer",
+      "label": "Operator Summarizer",
+      "allowed_tools": ["explain_recall", "generate_report", "search_memory"],
+      "required_output": "operator_readable_summary",
+      "required_evidence": "linked_artifacts_and_runtime_status",
+      "verification_owner": "reviewer",
+      "failure_owner": "operator-facing_summarizer",
+      "escalation_path": ["reviewer", "operator"]
+    }
+  ]
+}

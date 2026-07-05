@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "version": 2,
+    "last_updated": "2026-03-05",
+    "note": "Default model pricing (per 1M tokens). User overrides in data/pricing.json."
+  },
+  "models": {
+    "gemini-3-flash-preview": {
+      "input_cost_per_1m_tokens": 0.15,
+      "output_cost_per_1m_tokens": 0.60
+    },
+    "gemini-2.5-flash-preview-05-20": {
+      "input_cost_per_1m_tokens": 0.15,
+      "output_cost_per_1m_tokens": 0.60
+    },
+    "gemini-2.0-flash": {
+      "input_cost_per_1m_tokens": 0.10,
+      "output_cost_per_1m_tokens": 0.40
+    },
+    "gemini-2.0-flash-lite": {
+      "input_cost_per_1m_tokens": 0.0,
+      "output_cost_per_1m_tokens": 0.0
+    },
+    "gemini-2.5-flash-lite": {
+      "input_cost_per_1m_tokens": 0.0,
+      "output_cost_per_1m_tokens": 0.0
+    },
+    "gemini-flash-lite-latest": {
+      "input_cost_per_1m_tokens": 0.0,
+      "output_cost_per_1m_tokens": 0.0
+    },
+    "gemini-3.1-pro-preview": {
+      "input_cost_per_1m_tokens": 1.25,
+      "output_cost_per_1m_tokens": 10.00
+    },
+    "ollama/*": {
+      "input_cost_per_1m_tokens": 0.0,
+      "output_cost_per_1m_tokens": 0.0
+    },
+    "gpt-4o": {
+      "input_cost_per_1m_tokens": 2.50,
+      "output_cost_per_1m_tokens": 10.00
+    },
+    "gpt-4o-mini": {
+      "input_cost_per_1m_tokens": 0.15,
+      "output_cost_per_1m_tokens": 0.60
+    },
+    "o3-mini": {
+      "input_cost_per_1m_tokens": 1.10,
+      "output_cost_per_1m_tokens": 4.40
+    },
+    "claude-sonnet-4-6": {
+      "input_cost_per_1m_tokens": 3.00,
+      "output_cost_per_1m_tokens": 15.00
+    },
+    "claude-haiku-4-5": {
+      "input_cost_per_1m_tokens": 0.80,
+      "output_cost_per_1m_tokens": 4.00
+    },
+    "deepseek-chat": {
+      "input_cost_per_1m_tokens": 0.27,
+      "output_cost_per_1m_tokens": 1.10
+    },
+    "deepseek-reasoner": {
+      "input_cost_per_1m_tokens": 0.55,
+      "output_cost_per_1m_tokens": 2.19
+    },
+    "grok-3-mini": {
+      "input_cost_per_1m_tokens": 0.30,
+      "output_cost_per_1m_tokens": 0.50
+    },
+    "grok-3": {
+      "input_cost_per_1m_tokens": 3.00,
+      "output_cost_per_1m_tokens": 15.00
+    }
+  }
+}

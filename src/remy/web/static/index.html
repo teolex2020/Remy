@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remy</title>
+    <link rel="stylesheet" href="/css/main.css?v=1.19">
+    <script>
+        // Apply theme immediately to prevent FOUC
+        (function() {
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+        })();
+
+
+        // Unregister old Service Workers so stale cached shells do not survive rollbacks.
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.getRegistrations().then((registrations) => {
+                    registrations.forEach((registration) => registration.unregister());
+                }).catch((err) => {
+                    console.log('ServiceWorker cleanup failed:', err);
+                });
+            });
+        }
+
+        // Startup-shell resilience:
+        // if any eager module crashes before app.js installs its own splash fallback,
+        // do not leave the user on an infinite loading screen.
+        window.__remyBootStarted = Date.now();
+        window.__remyBootCompleted = false;
+
+        function _markBootFailure(message) {
+            const status = document.getElementById('startup-splash-status');
+            const splash = document.getElementById('startup-splash');
+            if (status) {
+                status.textContent = message || 'Interface startup failed. Opening partial workspace...';
+            }
+            if (splash) {
+                splash.classList.add('startup-splash--degraded');
+            }
+        }
+
+        window.addEventListener('error', (event) => {
+            const msg = event?.message || 'Script error during startup.';
+            _markBootFailure(`Startup error: ${msg}`);
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            const reason = event?.reason;
+            const msg = reason && reason.message ? reason.message : String(reason || 'Unhandled promise rejection');
+            _markBootFailure(`Startup error: ${msg}`);
+        });
+
+        window.addEventListener('DOMContentLoaded', () => {
+            window.setTimeout(() => {
+                if (window.__remyBootCompleted) return;
+                _markBootFailure('Startup is taking too long. Opening workspace anyway...');
+                document.getElementById('startup-splash')?.classList.add('is-hidden');
+            }, 7000);
+        });
+    </script>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#1e1e2e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+</head>
+<body>
+    <div id="startup-splash" class="startup-splash" aria-live="polite">
+        <div class="startup-splash__panel">
+            <div class="startup-splash__brand">Remy</div>
+            <div class="startup-splash__title">Application is starting</div>
+            <div class="startup-splash__subtitle">Connecting to memory, web UI, and live services...</div>
+            <div class="startup-splash__progress" aria-hidden="true">
+                <span class="startup-splash__progress-bar"></span>
+            </div>
+            <div id="startup-splash-status" class="startup-splash__status">Preparing interface...</div>
+        </div>
+    </div>
+    <div class="app">
+        <!-- Mobile Header (visible only on small screens) -->
+        <div class="mobile-header">
+            <button class="btn-menu" id="btn-menu" title="Menu">&#9776;</button>
+            <h1 class="logo">Remy</h1>
+        </div>
+
+        <!-- Sidebar Overlay (mobile backdrop) -->
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">Remy</h1>
+            </div>
+            <ul class="nav-list">
+                <li class="nav-item active" data-view="home">
+                    <span class="nav-icon">&#8962;</span>
+                    <span class="nav-label">Home</span>
+                </li>
+                <li class="nav-item" data-view="chat">
+                    <span class="nav-icon">&#128172;</span>
+                    <span class="nav-label">Ask</span>
+                </li>
+                <li class="nav-item" data-view="memory">
+                    <span class="nav-icon">&#128218;</span>
+                    <span class="nav-label">Memory</span>
+                </li>
+                <li class="nav-item" data-view="tasks">
+                    <span class="nav-icon">&#9745;</span>
+                    <span class="nav-label">Tasks</span>
+                </li>
+                <li class="nav-item" data-view="profile">
+                    <span class="nav-icon">&#128100;</span>
+                    <span class="nav-label">Profile</span>
+                </li>
+                <li class="nav-item" data-view="activity">
+                    <span class="nav-icon">&#9889;</span>
+                    <span class="nav-label">Activity</span>
+                </li>
+                <li class="nav-item" data-view="reliability">
+                    <span class="nav-icon">&#128737;</span>
+                    <span class="nav-label">Reliability</span>
+                </li>
+                <li class="nav-item" data-view="history">
+                    <span class="nav-icon">&#128220;</span>
+                    <span class="nav-label">History</span>
+                </li>
+                <li class="nav-group-label">Advanced</li>
+                <li class="nav-item advanced-nav" data-view="stats">
+                    <span class="nav-icon">&#128202;</span>
+                    <span class="nav-label">Stats</span>
+                </li>
+                <li class="nav-item" data-view="documents">
+                    <span class="nav-icon">&#128196;</span>
+                    <span class="nav-label">Documents</span>
+                </li>
+
+                <li class="nav-item" data-view="pipelines">
+                    <span class="nav-icon">&#128260;</span>
+                    <span class="nav-label">Pipelines</span>
+                </li>
+                <li class="nav-item" data-view="automations">
+                    <span class="nav-icon">&#9889;</span>
+                    <span class="nav-label">Automations</span>
+                </li>
+                <li class="nav-item" data-view="settings">
+                    <span class="nav-icon">&#9881;</span>
+                    <span class="nav-label">Settings</span>
+                </li>
+                <li class="nav-item advanced-nav" data-view="glass-brain">
+                    <span class="nav-icon">&#129504;</span>
+                    <span class="nav-label">Glass Brain</span>
+                </li>
+
+            </ul>
+            <div class="sidebar-footer">
+                <button id="btn-new-session" class="btn btn-outline" title="Start new session">New Session</button>
+                <div id="connection-status" class="status-indicator disconnected">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="content">
+            <!-- Home View -->
+            <div id="view-home" class="view active">
+                <div class="home-shell">
+                    <section class="home-hero">
+                        <div>
+                            <div class="home-kicker">Local AI workflows</div>
+                            <h2>Start with a template, not a blank chat.</h2>
+                            <p>Run document, memory, research, reminder, and automation workflows on this PC with dry runs, local history, and human approval before scheduled execution.</p>
+                        </div>
+                        <div class="home-safety-panel" aria-label="Local safety controls">
+                            <span>Local secrets</span>
+                            <span>Dry run first</span>
+                            <span>Human approval</span>
+                            <span>Failure auto-pause</span>
+                        </div>
+                    </section>
+
+                    <section class="home-workspace">
+                        <div class="home-main">
+                            <div class="home-section-header">
+                                <h3>Start With A Template</h3>
+                                <button id="home-open-pipelines" class="btn btn-outline btn-sm" type="button">Build Automation</button>
+                            </div>
+                            <div id="home-template-grid" class="home-template-grid" aria-label="Workflow templates"></div>
+                        </div>
+
+                        <aside class="home-run-panel">
+                            <div class="home-section-header">
+                                <h3>Run Template</h3>
+                            </div>
+                            <div id="home-selected-template" class="home-selected-template"></div>
+                            <div id="home-template-fields" class="home-template-fields"></div>
+                            <div class="home-run-actions">
+                                <button id="home-template-dry-run" class="btn btn-outline" type="button">Dry Run</button>
+                                <button id="home-template-run" class="btn btn-primary" type="button">Run Template</button>
+                            </div>
+                        </aside>
+                    </section>
+
+                    <section class="home-history-section">
+                        <div class="home-section-header">
+                            <h3>Run History</h3>
+                            <button id="home-clear-history" class="btn btn-outline btn-sm" type="button">Clear</button>
+                        </div>
+                        <div id="home-run-history" class="home-run-history"></div>
+                    </section>
+                </div>
+            </div>
+
+            <!-- Chat View -->
+            <div id="view-chat" class="view">
+                <div class="view-header">
+                    <h2>Ask</h2>
+                    <div class="chat-model-switcher">
+                        <select id="chat-model-select" class="chat-model-select" title="Active model">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <button id="btn-compare" class="btn-compare" title="Compare multiple models">⚡ Compare</button>
+                    <label class="context-reducer-toggle" title="Test the optimized mode against the normal answer">
+                        <input type="checkbox" id="context-reducer-compare">
+                        <span>Test Optimization</span>
+                    </label>
+                    <label class="context-reducer-toggle" title="Use optimized mode for replies when safe">
+                        <input type="checkbox" id="context-reducer-apply">
+                        <span>Use Optimization</span>
+                    </label>
+                    <button id="btn-context-reducer-lab" class="btn btn-outline btn-sm advanced-control" title="Open optimization report">Optimization Report</button>
+                    <label class="tts-toggle" title="Read responses aloud">
+                        <input type="checkbox" id="tts-enabled">
+                        <span class="tts-label">&#128266; TTS</span>
+                    </label>
+                </div>
+                <div id="connection-banner" class="connection-banner hidden">
+                    <span id="banner-text">Connection lost</span>
+                    <button id="btn-reconnect" class="btn-reconnect">Reconnect</button>
+                </div>
+                <div id="llm-banner" class="llm-banner hidden">
+                    <span id="llm-banner-text">LLM unavailable. You can still browse memory, tasks, and knowledge.</span>
+                    <span id="llm-banner-countdown"></span>
+                    <button id="btn-llm-dismiss" class="btn-llm-dismiss">Dismiss</button>
+                </div>
+                <!-- Compare mode panel -->
+                <div id="compare-panel" class="compare-panel hidden">
+                    <div class="compare-panel-title">Select models to compare</div>
+                    <div id="compare-model-list" class="compare-model-list"></div>
+                    <div class="compare-panel-actions">
+                        <button id="btn-compare-cancel" class="btn btn-outline btn-sm">Cancel</button>
+                    </div>
+                </div>
+                <section id="context-reducer-lab" class="context-reducer-lab hidden" aria-label="Optimization report">
+                    <div class="crl-header">
+                        <div>
+                            <div class="crl-title">Optimization Report</div>
+                            <div class="crl-subtitle">See prompt reduction, saved model calls, saved answers, and safety checks.</div>
+                        </div>
+                        <div class="crl-actions">
+                            <button id="btn-context-reducer-export" class="btn btn-outline btn-sm">Export JSON</button>
+                            <button id="btn-context-reducer-clear" class="btn btn-outline btn-sm">Clear</button>
+                            <button id="btn-context-reducer-close" class="btn btn-outline btn-sm">Close</button>
+                        </div>
+                    </div>
+                    <div class="crl-model-bar">
+                        <label for="context-reducer-model">Price against model:</label>
+                        <select id="context-reducer-model" class="crl-model-select" title="Cost is computed live from this model's registry price"></select>
+                        <span id="context-reducer-model-price" class="crl-subcell"></span>
+                    </div>
+                    <div id="context-reducer-summary" class="crl-summary"></div>
+                    <div class="crl-table-wrap">
+                        <table class="crl-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Request</th>
+                                    <th>Raw</th>
+                                    <th>Reduced</th>
+                                    <th>Saved</th>
+                                    <th>Cost saved</th>
+                                    <th>Latency</th>
+                                </tr>
+                            </thead>
+                            <tbody id="context-reducer-runs"></tbody>
+                        </table>
+                    </div>
+                </section>
+                <div id="chat-messages" class="chat-messages"></div>
+                <div class="chat-input-area">
+                    <!-- File drop overlay -->
+                    <div id="file-drop-overlay" class="file-drop-overlay">
+                        <span>Drop file here</span>
+                    </div>
+                    <!-- File preview bar -->
+                    <div id="file-preview" class="file-preview" style="display:none;">
+                        <span id="file-preview-name"></span>
+                        <button id="btn-remove-file" class="btn-icon" title="Remove file">&times;</button>
+                    </div>
+                    <div class="input-row">
+                        <button id="btn-attach" class="btn-icon" title="Attach file">&#128206;</button>
+                        <input type="file" id="file-input" style="display:none"
+                               accept="image/*,.pdf,.txt,.csv,audio/*">
+                        <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+                        <button id="btn-voice" class="btn-icon" title="Click to speak">&#127908;</button>
+                        <!-- Pipeline launcher -->
+                        <div class="chat-pipeline-wrap" id="chat-pipeline-wrap">
+                            <button id="btn-pipeline" class="btn-icon btn-pipeline-trigger" title="Run pipeline">&#9889;</button>
+                            <div class="chat-pipeline-menu hidden" id="chat-pipeline-menu">
+                                <div class="cpm-header">Select pipeline</div>
+                                <div id="cpm-list" class="cpm-list"><div class="cpm-empty">Loading…</div></div>
+                            </div>
+                        </div>
+                        <button id="btn-send" class="btn btn-primary">Send</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Memory View -->
+            <div id="view-memory" class="view">
+                <div class="view-header">
+                    <h2>Memory</h2>
+                    <div class="memory-controls">
+                        <input type="text" id="memory-search" placeholder="Search memories..." class="input">
+                        <select id="memory-period" class="input" style="width:auto;padding:6px 10px;">
+                            <option value="all">All Time</option>
+                            <option value="1">Today</option>
+                            <option value="3">3 Days</option>
+                            <option value="7">This Week</option>
+                        </select>
+                        <button id="btn-memory-search" class="btn btn-primary">Search</button>
+                        <button id="btn-add-record" class="btn btn-save" title="Add new record">+ Add</button>
+                        <button id="btn-export" class="btn btn-outline" title="Export all records">Export</button>
+                        <button id="btn-import-kb" class="btn btn-outline" title="Import text or file into memory">Import</button>
+                    </div>
+                </div>
+                <div id="memory-stats-bar" class="memory-stats-bar"></div>
+                <!-- hidden inputs so JS references don't break -->
+                <input type="hidden" id="memory-search-mode" value="hybrid">
+                <input type="hidden" id="memory-tier" value="all">
+                <input type="hidden" id="memory-tags" value="">
+                <div id="memory-list" class="memory-list"></div>
+            </div>
+
+            <!-- Tasks View -->
+            <div id="view-tasks" class="view">
+                <div class="view-header">
+                    <h2>Tasks</h2>
+                    <div class="tasks-controls" id="tasks-tab-controls">
+                        <!-- Controls injected by tasks.js -->
+                    </div>
+                </div>
+                <div id="tasks-content" style="padding:20px;">
+                    <!-- Content loaded by tasks.js -->
+                </div>
+            </div>
+
+            <!-- Profile View -->
+            <div id="view-profile" class="view">
+                <div class="view-header">
+                    <h2>Profile</h2>
+                </div>
+                <div id="profile-content" style="flex:1;overflow-y:auto;padding:20px;">
+                    <!-- Content loaded by profile.js -->
+                </div>
+            </div>
+
+            <!-- Graph View -->
+            <div id="view-graph" class="view">
+                <div class="view-header">
+                    <h2>Knowledge Graph</h2>
+                    <div class="graph-controls">
+                        <div class="graph-mode-toggle" role="tablist" aria-label="Graph visualization mode">
+                            <button id="graph-mode-network" class="graph-mode-btn active" data-graph-mode="network" role="tab" aria-selected="true">Network</button>
+                            <button id="graph-mode-brain" class="graph-mode-btn" data-graph-mode="brain" role="tab" aria-selected="false">Brain</button>
+                            <button id="graph-mode-thermal" class="graph-mode-btn" data-graph-mode="thermal" role="tab" aria-selected="false">Thermal</button>
+                        </div>
+                        <div class="graph-time-toggle" role="tablist" aria-label="Brain time window">
+                            <button class="graph-time-btn active" data-graph-time="all" role="tab" aria-selected="true">All</button>
+                            <button class="graph-time-btn" data-graph-time="30d" role="tab" aria-selected="false">30d</button>
+                            <button class="graph-time-btn" data-graph-time="7d" role="tab" aria-selected="false">7d</button>
+                            <button class="graph-time-btn" data-graph-time="1d" role="tab" aria-selected="false">Today</button>
+                        </div>
+                        <div id="graph-timeline-controls" class="graph-timeline-controls hidden" aria-label="Brain timeline playback">
+                            <button id="graph-timeline-play" class="graph-timeline-play" type="button" title="Play brain evolution">Play</button>
+                            <input id="graph-timeline-range" class="graph-timeline-range" type="range" min="0" max="1" step="1" value="1" aria-label="Brain timeline scrubber">
+                            <span id="graph-timeline-label" class="graph-timeline-label">Latest</span>
+                        </div>
+                        <select id="graph-scope-filter" class="input" style="width:auto;padding:6px 10px;">
+                            <option value="user">User Graph</option>
+                            <option value="full">Full Internal Graph</option>
+                        </select>
+                        <select id="graph-level-filter" class="input" style="width:auto;padding:6px 10px;">
+                            <option value="all">All levels</option>
+                            <option value="WORKING">Working</option>
+                            <option value="DECISIONS">Decisions</option>
+                            <option value="DOMAIN">Domain</option>
+                            <option value="IDENTITY">Identity</option>
+                        </select>
+                        <input id="graph-tag-filter" class="input" type="text" placeholder="Filter by tag..." style="max-width:180px;">
+                        <button id="btn-graph-reset" class="btn btn-outline">Reset</button>
+                    </div>
+                </div>
+                <div class="graph-stats-bar" id="graph-stats">
+                    <div class="graph-stats-bar-item">
+                        <span class="graph-stats-bar-value" id="graph-node-count">--</span>
+                        <span class="graph-stats-bar-label">Nodes</span>
+                    </div>
+                    <div class="graph-stats-bar-item">
+                        <span class="graph-stats-bar-value" id="graph-edge-count">--</span>
+                        <span class="graph-stats-bar-label">Edges</span>
+                    </div>
+                    <div class="graph-stats-bar-item">
+                        <span class="graph-stats-bar-value" id="graph-avg-strength">--</span>
+                        <span class="graph-stats-bar-label">Avg Strength</span>
+                    </div>
+                </div>
+                <div class="graph-shell">
+                    <aside class="graph-sidebar">
+                        <div class="graph-panel">
+                            <div class="graph-panel-title">Legend</div>
+                            <div id="graph-level-breakdown" class="graph-breakdown"></div>
+                        </div>
+                        <div class="graph-panel">
+                            <div class="graph-panel-title">Top Tags</div>
+                            <div id="graph-top-tags" class="graph-breakdown"></div>
+                        </div>
+                        <div class="graph-panel">
+                            <div class="graph-panel-title">Edge Threshold</div>
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <input type="range" id="graph-edge-threshold" min="0" max="1" step="0.05" value="0.3" style="flex:1">
+                                <span id="graph-edge-value" style="font-size:12px;color:var(--text-muted);min-width:32px">0%</span>
+                            </div>
+                            <p style="font-size:11px;color:var(--text-muted);margin-top:4px">Hide weak connections</p>
+                        </div>
+                    </aside>
+                    <div id="graph-container" class="graph-container">
+                        <!-- Graph will be rendered here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Activity View -->
+            <div id="view-activity" class="view">
+                <div class="view-header">
+                    <h2>Activity</h2>
+                    <div class="activity-header-actions">
+                        <label class="activity-autonomy-toggle" title="Enable or disable autonomous mode">
+                            <input type="checkbox" id="activity-autonomy-enabled">
+                            <span class="activity-autonomy-slider"></span>
+                            <span id="activity-autonomy-label" class="activity-autonomy-label">Off</span>
+                        </label>
+                        <button id="btn-activity-stop-server" class="btn btn-danger btn-mini" title="Stop Remy server" style="display:none">
+                            Stop Server
+                        </button>
+                        <div class="activity-mode-toggle">
+                            <button id="btn-activity-live" class="btn btn-outline activity-mode-btn active">
+                                <span class="live-dot"></span> Live
+                            </button>
+                            <button id="btn-activity-history" class="btn btn-outline activity-mode-btn">
+                                History
+                            </button>
+                        </div>
+                    </div>
+                    <select id="activity-filter" class="input" style="width:auto;padding:6px 10px;display:none;">
+                        <option value="all">All</option>
+                        <option value="outcomes">Actions</option>
+                        <option value="goals">Goals</option>
+                        <option value="reflections">Reflections</option>
+                        <option value="proactive">Proactive</option>
+                    </select>
+                </div>
+                <!-- Live Panel -->
+                <div id="activity-live-panel" class="activity-live-panel">
+                    <!-- Budget bar (hidden, kept for JS compatibility) -->
+                    <div class="activity-budget-bar" id="activity-budget-bar" style="display:none">
+                        <div class="budget-item">
+                            <span class="budget-label">Today</span>
+                            <div class="budget-track"><div class="budget-fill" id="budget-daily-fill"></div></div>
+                            <span class="budget-text" id="budget-daily-text">--</span>
+                        </div>
+                        <div class="budget-item">
+                            <span class="budget-label">Hour</span>
+                            <div class="budget-track"><div class="budget-fill" id="budget-hourly-fill"></div></div>
+                            <span class="budget-text" id="budget-hourly-text">--</span>
+                        </div>
+                        <div class="budget-item">
+                            <span class="budget-label">Session</span>
+                            <div class="budget-track"><div class="budget-fill" id="budget-session-fill"></div></div>
+                            <span class="budget-text" id="budget-session-text">--</span>
+                        </div>
+                        <div class="budget-item">
+                            <span class="budget-label">Lifetime</span>
+                            <span class="budget-text" id="budget-lifetime-text">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Status bar -->
+                    <div class="activity-status-bar">
+                        <span id="activity-live-status" class="status-indicator disconnected">
+                            <span class="status-dot"></span>
+                            <span class="status-text">Disconnected</span>
+                        </span>
+                        <span id="activity-agent-status" class="activity-agent-status-text">Remy is idle</span>
+                        <span style="flex:1"></span>
+                        <span id="activity-live-count" class="activity-live-count" style="display:none">0 events</span>
+                        <button id="btn-activity-clear" class="btn-icon" title="Clear">&times;</button>
+                    </div>
+
+                    <!-- Main 2-column layout -->
+                    <div class="activity-main-columns">
+                        <!-- Left: what Remy is working on -->
+                        <section class="activity-live-card activity-card-focus">
+                            <div class="activity-live-card-header">
+                                <h3>Working on</h3>
+                                <button id="btn-activity-decision-dossier" class="btn btn-outline btn-mini" title="Decision details" style="display:none">
+                                    Details
+                                </button>
+                                <span id="activity-plans-count" class="activity-live-card-count" style="display:none">0</span>
+                                <span id="activity-doing-count" class="activity-live-card-count" style="display:none">0</span>
+                            </div>
+                            <div id="activity-focus" class="activity-live-list"></div>
+                        </section>
+
+                        <!-- Right: upcoming tasks + approvals -->
+                        <section class="activity-live-card activity-card-queue">
+                            <div class="activity-live-card-header">
+                                <h3>Task queue</h3>
+                                <span id="activity-queue-count" class="activity-live-card-count">0</span>
+                                <span id="activity-approvals-count" class="activity-live-card-count" style="display:none">0</span>
+                            </div>
+                            <div id="activity-queue" class="activity-live-list activity-mission-queue-list">
+                                <div class="activity-live-empty">No active tasks</div>
+                            </div>
+                            <div id="activity-approvals" class="activity-live-list activity-approval-list" style="display:none">
+                                <div class="activity-live-empty">No pending approvals</div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <!-- Hidden panels kept for JS compat -->
+                    <div id="activity-plans" style="display:none"></div>
+                    <div id="activity-doing" style="display:none"></div>
+
+                    <!-- Live event stream (collapsed by default, shown when active) -->
+                    <div class="activity-stream-wrap">
+                        <div class="activity-stream-toggle" id="btn-activity-stream-toggle">
+                            <span>Event stream</span>
+                            <span class="activity-stream-chevron">▾</span>
+                        </div>
+                        <div id="activity-stream" class="activity-stream activity-stream-collapsed"></div>
+                    </div>
+                </div>
+
+                <!-- History Panel -->
+                <div id="activity-history-panel" style="display:none;">
+                    <div id="activity-summary" class="stats-cards"></div>
+                    <div id="activity-list" class="memory-list" style="padding:0 20px 20px;"></div>
+                </div>
+            </div>
+
+            <!-- History View -->
+            <div id="view-history" class="view">
+                <div class="view-header">
+                    <h2>Session History</h2>
+                    <div class="history-controls">
+                        <select id="history-period" class="input" style="width:auto;padding:6px 10px">
+                            <option value="all">All time</option>
+                            <option value="today">Today</option>
+                            <option value="week">This week</option>
+                            <option value="month">This month</option>
+                        </select>
+                        <span id="history-count" style="font-size:12px;color:var(--text-muted)"></span>
+                        <button class="btn btn-outline btn-sm" id="btn-history-clear" style="color:var(--red);border-color:var(--red);margin-left:auto">Clear All</button>
+                    </div>
+                </div>
+                <div class="history-shell">
+                    <div class="history-sidebar" id="history-list">
+                        <!-- Session items grouped by date -->
+                    </div>
+                    <div class="history-detail" id="history-detail">
+                        <div class="empty-state">Select a session to view the conversation</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reliability View -->
+            <div id="view-reliability" class="view">
+                <div class="view-header">
+                    <h2>Reliability</h2>
+                    <button id="btn-reliability-refresh" class="btn btn-outline btn-sm" type="button">Refresh</button>
+                </div>
+                <div id="reliability-content" class="reliability-content"></div>
+            </div>
+
+            <!-- Stats View -->
+            <div id="view-stats" class="view">
+                <div class="view-header">
+                    <h2>Dashboard</h2>
+                </div>
+                <div id="metrics-cards" class="metrics-section"></div>
+                <div id="stats-cards" class="stats-cards"></div>
+            </div>
+
+
+            <!-- Documents & Reports View -->
+            <div id="view-documents" class="view">
+                <div class="view-header">
+                    <h2>Documents &amp; Reports</h2>
+                    <button id="btn-new-document" class="btn btn-primary btn-sm" style="margin-left:auto">+ New Document</button>
+                </div>
+
+                <!-- Tab bar + filters -->
+                <div class="docs-toolbar">
+                    <div class="docs-tabs">
+                        <button id="docs-tab-documents" class="docs-tab active">&#128196; Documents</button>
+                        <button id="docs-tab-reports" class="docs-tab">&#128209; Reports</button>
+                        <button id="docs-tab-import" class="docs-tab">&#8593; Import</button>
+                    </div>
+                    <div class="docs-filters" id="docs-filters-bar">
+                        <button class="btn-outline btn-mini docs-filter-btn active" data-docs-filter="all">All</button>
+                        <button class="btn-outline btn-mini docs-filter-btn" data-docs-filter="1">Day</button>
+                        <button class="btn-outline btn-mini docs-filter-btn" data-docs-filter="3">3 Days</button>
+                        <button class="btn-outline btn-mini docs-filter-btn" data-docs-filter="7">Week</button>
+                    </div>
+                </div>
+
+                <!-- Documents pane -->
+                <div id="docs-pane-documents" class="docs-pane-scroll">
+                    <ul id="docs-list" class="docs-list"></ul>
+                </div>
+
+                <!-- Reports pane -->
+                <div id="docs-pane-reports" class="hidden docs-pane-scroll">
+                    <ul id="reports-list" class="docs-list"></ul>
+                </div>
+
+                <!-- Import pane -->
+                <div id="docs-pane-import" class="hidden docs-pane-scroll">
+                    <div class="bulk-import-wrap">
+                        <div id="bulk-drop-zone" class="bulk-drop-zone">
+                            <div class="bulk-drop-icon">&#128196;</div>
+                            <div class="bulk-drop-label">Drag &amp; drop files here</div>
+                            <div class="bulk-drop-hint">PDF, DOCX, XLSX, CSV, HTML, XML, TXT, MD, ZIP &mdash; up to 512 MB per file</div>
+                            <button id="bulk-pick-btn" class="btn btn-outline btn-sm" style="margin-top:12px">Choose files</button>
+                            <input id="bulk-file-input" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.html,.htm,.xml,.json,.jsonl,.txt,.md,.markdown,.rst,.zip" style="display:none">
+                        </div>
+
+                        <!-- Selected files list -->
+                        <div id="bulk-file-list" class="bulk-file-list hidden"></div>
+
+                        <!-- Options row -->
+                        <div class="bulk-options-row" id="bulk-options-row" style="display:none">
+                            <label class="bulk-opt-label">
+                                <input type="checkbox" id="bulk-pin-chk">
+                                Pin to long-term memory (L4)
+                            </label>
+                            <label class="bulk-opt-label" style="margin-left:16px">
+                                Tags:
+                                <input type="text" id="bulk-tags-input" class="input-inline" placeholder="research, project-x" style="width:180px;margin-left:6px">
+                            </label>
+                            <button id="bulk-start-btn" class="btn btn-primary btn-sm" style="margin-left:auto">Import to Memory</button>
+                        </div>
+
+                        <!-- Progress log -->
+                        <div id="bulk-progress-wrap" class="hidden">
+                            <div class="bulk-progress-header">
+                                <span id="bulk-progress-label">Importing…</span>
+                                <span id="bulk-progress-count"></span>
+                            </div>
+                            <div class="bulk-progress-bar-track"><div id="bulk-progress-bar" class="bulk-progress-bar" style="width:0%"></div></div>
+                            <div id="bulk-log" class="bulk-log"></div>
+                            <button id="bulk-done-btn" class="btn btn-outline btn-sm hidden" style="margin-top:10px">Done</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+
+            <!-- Calendar View -->
+            <div id="view-calendar" class="view">
+                <div class="view-header">
+                    <h2>Calendar</h2>
+                    <div style="margin-left:auto;display:flex;gap:.5rem;align-items:center">
+                        <button id="cal-prev" class="btn btn-outline btn-sm">&#8249;</button>
+                        <span id="cal-month-label" style="font-weight:600;min-width:140px;text-align:center"></span>
+                        <button id="cal-next" class="btn btn-outline btn-sm">&#8250;</button>
+                        <button id="cal-today" class="btn btn-outline btn-sm">Today</button>
+                    </div>
+                </div>
+                <div id="cal-grid" class="cal-grid"></div>
+                <div id="cal-event-list" class="cal-event-list hidden">
+                    <div class="cal-event-list-header">
+                        <span id="cal-event-list-date"></span>
+                        <button id="cal-event-list-close" class="btn-icon">&times;</button>
+                    </div>
+                    <ul id="cal-events-ul"></ul>
+                </div>
+            </div>
+
+
+
+            <!-- Glass Brain View -->
+            <div id="view-glass-brain" class="view"></div>
+
+            <!-- Pipelines (Flow Builder) View -->
+            <div id="view-pipelines" class="view">
+                <div class="view-header">
+                    <h2>Pipelines</h2>
+                </div>
+                <div id="pipelines-content" class="pl-content-area"></div>
+            </div>
+
+            <!-- Automations View -->
+            <div id="view-automations" class="view">
+                <div class="view-header">
+                    <h2>Automations</h2>
+                    <div style="display:flex;gap:8px">
+                        <button id="btn-new-automation" class="btn btn-primary">+ New Automation</button>
+                    </div>
+                </div>
+                <div id="automations-content" style="padding:20px;position:relative;">
+                    <!-- Content loaded by automations.js -->
+                </div>
+            </div>
+
+            <!-- Settings View -->
+            <div id="view-settings" class="view">
+                <div class="view-header">
+                    <h2>Settings</h2>
+                </div>
+                <div class="settings-container">
+                    <div id="settings-content" class="settings-content">
+                        <p style="color:var(--text-muted)">Loading settings...</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Approval Notification Area — floating cards for human-in-the-loop approval -->
+        <div id="approval-notification-area" class="approval-notification-area"></div>
+
+        <!-- Guidance Notification Area — floating cards for guidance questions -->
+        <div id="guidance-notification-area" class="approval-notification-area"></div>
+
+        <!-- Context Panel (slide-in for record details) -->
+        <aside id="context-panel" class="context-panel">
+            <div class="panel-header">
+                <h3 id="panel-title">Details</h3>
+                <button id="btn-close-panel" class="btn-icon" title="Close">&times;</button>
+            </div>
+            <div id="panel-content" class="panel-content"></div>
+        </aside>
+    </div>
+
+    <!-- Drawflow — visual node editor for pipeline builder -->
+    <div id="first-run-wizard" class="first-run-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="first-run-title">
+        <div class="first-run-panel">
+            <div class="first-run-progress" aria-hidden="true">
+                <span class="first-run-dot active" data-first-run-dot="0"></span>
+                <span class="first-run-dot" data-first-run-dot="1"></span>
+                <span class="first-run-dot" data-first-run-dot="2"></span>
+            </div>
+            <div class="first-run-step" data-first-run-step="0">
+                <div class="home-kicker">Welcome to Remy</div>
+                <h2 id="first-run-title">Set up your local AI workspace.</h2>
+                <p>Remy runs workflows, documents, memory, and automations on this PC. Your data stays local unless a workflow uses an AI provider or integration you configure.</p>
+                <div class="first-run-actions">
+                    <button class="btn btn-primary" id="first-run-start" type="button">Start setup</button>
+                    <button class="btn btn-outline" id="first-run-later" type="button">Skip for now</button>
+                </div>
+            </div>
+            <div class="first-run-step hidden" data-first-run-step="1">
+                <div class="home-kicker">AI Provider</div>
+                <h2>Add your AI key.</h2>
+                <p>Use your own provider key. You can also skip this and use local workflows until you add a model later.</p>
+                <label class="home-template-field">
+                    <span>Provider</span>
+                    <select id="first-run-provider" class="input">
+                        <option value="gemini">Google Gemini</option>
+                        <option value="openrouter">OpenRouter</option>
+                    </select>
+                </label>
+                <label class="home-template-field">
+                    <span>API key</span>
+                    <input id="first-run-key" type="password" placeholder="Paste your key">
+                </label>
+                <div class="first-run-actions">
+                    <button class="btn btn-primary" id="first-run-save-key" type="button">Save key</button>
+                    <button class="btn btn-outline" id="first-run-skip-key" type="button">Skip</button>
+                </div>
+                <div id="first-run-status" class="first-run-status"></div>
+            </div>
+            <div class="first-run-step hidden" data-first-run-step="2">
+                <div class="home-kicker">Ready</div>
+                <h2>Start with a template.</h2>
+                <p>Run a dry run first, inspect the result, then enable automation when it looks right.</p>
+                <div class="first-run-summary">
+                    <span>Local history</span>
+                    <span>Safety review before runs</span>
+                    <span>Repair suggestions when needed</span>
+                </div>
+                <div class="first-run-actions">
+                    <button class="btn btn-primary" id="first-run-finish" type="button">Open templates</button>
+                    <button class="btn btn-outline" id="first-run-open-settings" type="button">Settings</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/vendor/drawflow.min.js"></script>
+    <!-- 3d-force-graph loaded lazily by graph.js on first Graph view open -->
+    <script type="module" src="/js/api-client.js?v=1.22"></script>
+    <script type="module" src="/js/chat.js?v=1.25"></script>
+    <script type="module" src="/js/app.js?v=1.26"></script>
+    <!-- graph.js, documents.js, calendar.js, glass_brain.js loaded on demand by app.js -->
+    <!-- knowledge.js self-contained module, no nav view -->
+
+    <!-- Document Editor Modal -->
+    <div id="docs-editor-modal" class="docs-modal-overlay hidden">
+        <div class="docs-modal">
+            <div class="docs-editor-header">
+                <input id="docs-editor-name" type="text" class="docs-editor-name-input" placeholder="filename.md" />
+                <div class="docs-editor-btns">
+                    <button id="btn-docs-edit" class="btn btn-outline btn-sm">Edit</button>
+                    <button id="btn-docs-save" class="btn btn-primary btn-sm hidden">Save</button>
+                    <button id="btn-docs-editor-cancel" class="btn btn-outline btn-sm">&#10005; Close</button>
+                </div>
+            </div>
+            <textarea id="docs-editor-content" class="docs-editor-textarea" rows="25" placeholder="Write markdown here..."></textarea>
+            <div id="docs-editor-preview" class="docs-editor-preview hidden"></div>
+        </div>
+    </div>
+
+    <!-- Custom Confirm Modal -->
+    <div id="confirm-modal" class="modal-overlay">
+        <div class="modal">
+            <h3 id="modal-title">Confirm</h3>
+            <p id="modal-message">Are you sure?</p>
+            <div class="modal-actions">
+                <button id="btn-modal-cancel" class="btn btn-outline">Cancel</button>
+                <button id="btn-modal-confirm" class="btn btn-primary">Confirm</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

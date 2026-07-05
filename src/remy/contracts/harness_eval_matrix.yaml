@@ -1,0 +1,39 @@
+version: 2026-03-30.v1
+name: harness-eval-matrix
+scenarios:
+  - id: verify_gate_ablation
+    label: Verify Gate Ablation
+    status: planned
+    baseline_mode: with_verify_gate
+    ablation_mode: without_verify_gate
+    target_metrics:
+      - false_success_rate
+      - verification_coverage
+      - operator_traceability
+  - id: recovery_replay_ablation
+    label: Recovery Replay Ablation
+    status: planned
+    baseline_mode: with_recovery_replay
+    ablation_mode: without_recovery_replay
+    target_metrics:
+      - recovery_quality
+      - restart_reliability
+      - operator_incident_visibility
+  - id: correction_loop_ablation
+    label: Correction Loop Ablation
+    status: planned
+    baseline_mode: with_correction_loop
+    ablation_mode: without_correction_loop
+    target_metrics:
+      - correction_capture_rate
+      - memory_repair_latency
+      - repeated_error_rate
+  - id: decision_dossier_ablation
+    label: Decision Dossier Ablation
+    status: planned
+    baseline_mode: with_decision_dossier
+    ablation_mode: without_decision_dossier
+    target_metrics:
+      - operator_traceability
+      - decision_replay_quality
+      - review_time

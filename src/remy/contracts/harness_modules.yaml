@@ -1,0 +1,41 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-harness-modules",
+  "modules": [
+    {
+      "id": "planning",
+      "label": "Planning module",
+      "status": "active",
+      "responsibility": "Structures tasks, goals, and next actions before execution.",
+      "artifacts": ["decision_dossier", "session_log"]
+    },
+    {
+      "id": "verification",
+      "label": "Verification module",
+      "status": "active",
+      "responsibility": "Checks artifact-backed success before finalize and triggers repair when needed.",
+      "artifacts": ["generated_report", "research_report", "verification_incident"]
+    },
+    {
+      "id": "recovery",
+      "label": "Recovery module",
+      "status": "active",
+      "responsibility": "Detects gaps and reconstructs missing durable memory from history.",
+      "artifacts": ["reconstruction_review", "startup_incident_report"]
+    },
+    {
+      "id": "correction",
+      "label": "Correction module",
+      "status": "active",
+      "responsibility": "Applies negative feedback, review queues, and correction pressure to bad memory.",
+      "artifacts": ["correction_review_summary"]
+    },
+    {
+      "id": "research",
+      "label": "Research module",
+      "status": "active",
+      "responsibility": "Runs bounded research flows with stored findings and completion verification.",
+      "artifacts": ["research_report", "factuality_analysis"]
+    }
+  ]
+}

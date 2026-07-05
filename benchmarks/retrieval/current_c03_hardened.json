@@ -1,0 +1,59 @@
+{
+  "summary": {
+    "backend": "ddgs",
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+  },
+  "results": [
+    {
+      "id": "c03_site_constraint_arxiv",
+      "query": "site:arxiv.org mixture of experts survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 0.82,
+      "candidate_count": 10,
+      "brain_writes_total": 0,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 0,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/abs/2407.06204"
+        },
+        {
+          "title": "A Comprehensive Survey of Mixture-of-Experts: Algorithms, Theory, and ...",
+          "uri": "https://arxiv.org/abs/2503.07137"
+        },
+        {
+          "title": "A Survey on Mixture of Experts - arXiv.org",
+          "uri": "https://arxiv.org/html/2407.06204v1"
+        },
+        {
+          "title": "[2604.03342] Mixture-of-Experts in Remote Sensing: A Survey",
+          "uri": "https://arxiv.org/abs/2604.03342"
+        },
+        {
+          "title": "A Survey on Mixture of Experts in Large Language Models",
+          "uri": "https://arxiv.org/pdf/2407.06204v3"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "all_match_arxiv.org": false,
+        "no_off_domain_in_top_10": false,
+        "brain_writes_total": 0,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 0
+      },
+      "issues": [
+        "site-constraint violated: off-domain candidates present: ['https://spotintelligence.com/2026/04/09/mixture-of-experts-moe/', 'https://www.mindstudio.ai/blog/gemma-4-mixture-of-experts-architecture', 'https://www.linkedin.com/posts/gaurav-kumar-60b31a178_a-comprehensive-survey-of-mixture-of-experts-activity-7447575438249435136-gCpH', 'https://papers.nips.cc/paper_files/paper/2022/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html']",
+        "off-domain in top-10: ['https://spotintelligence.com/2026/04/09/mixture-of-experts-moe/', 'https://www.mindstudio.ai/blog/gemma-4-mixture-of-experts-architecture', 'https://www.linkedin.com/posts/gaurav-kumar-60b31a178_a-comprehensive-survey-of-mixture-of-experts-activity-7447575438249435136-gCpH', 'https://papers.nips.cc/paper_files/paper/2022/hash/91edff07232fb1b55a505a9e9f6c0ff3-Abstract-Conference.html']"
+      ],
+      "todo_assertions_phase1": [],
+      "passed": false
+    }
+  ]
+}

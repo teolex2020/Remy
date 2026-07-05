@@ -1,0 +1,58 @@
+{
+  "summary": {
+    "backend": "ddgs",
+    "total": 1,
+    "passed": 1,
+    "failed": 0
+  },
+  "results": [
+    {
+      "id": "c02_arxiv_known_paper",
+      "query": "arxiv 2312.10997 retrieval augmented generation survey",
+      "success_class": "success_with_verified_sources",
+      "elapsed_s": 0.89,
+      "candidate_count": 10,
+      "brain_writes_total": 1,
+      "brain_writes_analysis": 0,
+      "brain_writes_infra": 1,
+      "intent_calls_primary": 1,
+      "error": null,
+      "mode": "candidate_discovery",
+      "top_candidates": [
+        {
+          "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://arxiv.org/abs/2312.10997"
+        },
+        {
+          "title": "Retrieval-Augmented Generation for AI-Generated Content: A Survey",
+          "uri": "https://link.springer.com/article/10.1007/s41019-025-00335-5"
+        },
+        {
+          "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://huggingface.co/papers/2312.10997"
+        },
+        {
+          "title": "GitHub - Tongji-KGLLM/RAG-Survey",
+          "uri": "https://github.com/Tongji-KGLLM/RAG-Survey"
+        },
+        {
+          "title": "Retrieval-Augmented Generation for Large...",
+          "uri": "https://axi.lims.ac.uk/paper/2312.10997"
+        }
+      ],
+      "checks": {
+        "min_candidates>=1": true,
+        "any_domain_in_['arxiv.org']": true,
+        "brain_writes_total": 1,
+        "brain_writes_analysis": 0,
+        "brain_writes_infra": 1,
+        "no_analysis_brain_writes": true
+      },
+      "issues": [],
+      "todo_assertions_phase1": [
+        "fabricated_authors"
+      ],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-runtime-contract",
+  "stages": [
+    "receive",
+    "route",
+    "execute",
+    "verify",
+    "repair",
+    "finalize"
+  ],
+  "transitions": [
+    "receive->route",
+    "route->execute",
+    "execute->verify",
+    "verify->repair",
+    "verify->finalize",
+    "repair->verify",
+    "repair->finalize"
+  ],
+  "stop_conditions": [
+    "explicit_user_completion",
+    "verified_success",
+    "approval_blocked",
+    "fatal_runtime_incident",
+    "step_limit_reached"
+  ],
+  "retry_rules": [
+    "tool_error: bounded_retry",
+    "verification_failed: repair_then_verify",
+    "timeout: bounded_retry",
+    "format_error: repair_then_verify"
+  ],
+  "escalation_conditions": [
+    "approval_blocked",
+    "store_integrity_incident",
+    "memory_recovery_applied",
+    "evidence_conflict",
+    "repeated_verification_failure"
+  ],
+  "required_artifacts": [
+    "session_log",
+    "factuality_analysis",
+    "decision_dossier",
+    "research_report",
+    "reconstruction_review"
+  ],
+  "failure_classes": [
+    "format_error",
+    "tool_error",
+    "validation_error",
+    "verification_failed",
+    "evidence_conflict",
+    "memory_recovery_applied",
+    "store_integrity_incident",
+    "timeout",
+    "approval_blocked"
+  ]
+}

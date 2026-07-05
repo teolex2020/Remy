@@ -1,0 +1,70 @@
+{
+  "version": "2026-03-30.v1",
+  "name": "remy-script-adapter-registry",
+  "entries": [
+    {
+      "id": "tool_dispatch",
+      "label": "Tool dispatch",
+      "category": "system_action",
+      "path": "src/remy/core/tool_dispatch.py",
+      "purpose": "Routes tool execution through deterministic handlers, retries, and guards.",
+      "critical": true
+    },
+    {
+      "id": "approval_queue",
+      "label": "Approval queue",
+      "category": "system_action",
+      "path": "src/remy/core/approval_queue.py",
+      "purpose": "Applies operator approval gates for risky actions.",
+      "critical": true
+    },
+    {
+      "id": "notification_router",
+      "label": "Notification router",
+      "category": "adapter",
+      "path": "src/remy/core/notification_router.py",
+      "purpose": "Routes runtime incidents and operator alerts to the right surface.",
+      "critical": true
+    },
+    {
+      "id": "history_replay",
+      "label": "History replay",
+      "category": "system_action",
+      "path": "src/remy/core/history_replay.py",
+      "purpose": "Analyzes and reconstructs memory from the recovery journal.",
+      "critical": true
+    },
+    {
+      "id": "verification_gate",
+      "label": "Verification gate",
+      "category": "validator",
+      "path": "src/remy/core/verification_gate.py",
+      "purpose": "Checks artifact-backed success before finalize and emits incidents.",
+      "critical": true
+    },
+    {
+      "id": "report_builder",
+      "label": "Report builder",
+      "category": "adapter",
+      "path": "src/remy/core/report_builder.py",
+      "purpose": "Builds PDF artifacts and exposes deterministic report verification.",
+      "critical": false
+    },
+    {
+      "id": "browser_dispatch",
+      "label": "Browser dispatch",
+      "category": "system_action",
+      "path": "src/remy/core/tool_handlers/browser_dispatch.py",
+      "purpose": "Shapes browser execution, retries, and approval-aware actions.",
+      "critical": false
+    },
+    {
+      "id": "browser_result_parser",
+      "label": "Browser result parser",
+      "category": "parser",
+      "path": "src/remy/core/tool_handlers/browser_dispatch.py",
+      "purpose": "Normalizes browser tool results into actionable runtime outputs.",
+      "critical": false
+    }
+  ]
+}
