@@ -11,8 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from remy.core.file_utils import atomic_write
@@ -719,3 +719,74 @@ async def list_home_templates():
 def _guard_id(pipeline_id: str):
     if not pipeline_id or "/" in pipeline_id or "\\" in pipeline_id or ".." in pipeline_id:
         raise HTTPException(status_code=400, detail="Invalid pipeline id")
+
+
+# ── Workflow files (shared storage for File Read / File Write blocks) ─────────
+#
+# Makes the data/workflow_files directory visible: pipelines' File Read picks
+# from these, File Write results can be downloaded. Names are sanitized by the
+# same helper the runner uses (`_safe_workflow_file`), so the API and the
+# blocks agree on what a valid file is.
+
+_WORKFLOW_FILE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB — these are text inputs, not media
+
+
+@router.get("/workflow-files")
+async def list_workflow_files():
+    from remy.core.pipeline_runner import _workflow_files_dir
+
+    files = []
+    for path in sorted(_workflow_files_dir().iterdir()):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        files.append({
+            "name": path.name,
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+        })
+    return {"files": files}
+
+
+@router.post("/workflow-files")
+async def upload_workflow_file(file: UploadFile = File(...)):
+    from remy.core.pipeline_runner import _safe_workflow_file
+
+    try:
+        path = _safe_workflow_file(file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    content = await file.read()
+    if len(content) > _WORKFLOW_FILE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 5 MB)")
+
+    path.write_bytes(content)
+    return {"uploaded": True, "name": path.name, "size": len(content)}
+
+
+@router.get("/workflow-files/{filename}")
+async def download_workflow_file(filename: str):
+    from remy.core.pipeline_runner import _safe_workflow_file
+
+    try:
+        path = _safe_workflow_file(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, filename=path.name)
+
+
+@router.delete("/workflow-files/{filename}")
+async def delete_workflow_file(filename: str):
+    from remy.core.pipeline_runner import _safe_workflow_file
+
+    try:
+        path = _safe_workflow_file(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    path.unlink()
+    return {"deleted": True, "name": filename}

@@ -8693,6 +8693,17 @@ details[open] .sandbox-arrow {
 .pf-cfg-input, .pf-cfg-select { background: var(--bg-primary); border: 1px solid var(--bg-surface); border-radius: 6px; padding: .38rem .6rem; color: var(--text-primary); font-size: .83rem; width: 100%; }
 .pf-cfg-input:focus, .pf-cfg-select:focus, .pf-cfg-textarea:focus { outline: none; border-color: var(--accent); }
 .pf-cfg-textarea { background: var(--bg-primary); border: 1px solid var(--bg-surface); border-radius: 6px; padding: .38rem .6rem; color: var(--text-primary); font-size: .83rem; width: 100%; resize: vertical; font-family: inherit; line-height: 1.55; }
+/* Workflow-file widgets (File Read picker / File Write storage list) */
+.pf-wf-actions { margin-top: .4rem; }
+.pf-wf-list { display: flex; flex-direction: column; gap: .3rem; }
+.pf-wf-row { display: flex; align-items: center; gap: .5rem; padding: .35rem .55rem; background: var(--bg-primary); border: 1px solid var(--bg-surface); border-radius: 6px; }
+.pf-wf-name { flex: 1; min-width: 0; font-size: .8rem; color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-wf-name:hover { text-decoration: underline; }
+.pf-wf-size { flex-shrink: 0; font-size: .7rem; color: var(--text-muted); }
+.pf-wf-del { flex-shrink: 0; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: .75rem; padding: .1rem .3rem; border-radius: 4px; }
+.pf-wf-del:hover { color: #f38ba8; background: rgba(243, 139, 168, .12); }
+.pf-wf-empty { font-size: .75rem; color: var(--text-muted); padding: .3rem 0; }
+
 .pf-block-help { margin-top: .85rem; padding: .75rem .85rem; border: 1px solid rgba(137, 180, 250, .18); border-radius: 8px; background: rgba(137, 180, 250, .06); color: var(--text-secondary); font-size: .78rem; line-height: 1.45; }
 .pf-block-help-title { color: var(--text-primary); font-weight: 700; margin-bottom: .35rem; }
 .pf-block-help-body { margin-bottom: .45rem; }

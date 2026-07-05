@@ -279,6 +279,23 @@ class ApiClient {
         return res.json();
     }
 
+    async getWorkflowFiles() {
+        const res = await this._fetch("/api/workflow-files");
+        return res.json();
+    }
+
+    async uploadWorkflowFile(file) {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await this._fetch("/api/workflow-files", { method: "POST", body: form });
+        return res.json();
+    }
+
+    async deleteWorkflowFile(name) {
+        const res = await this._fetch(`/api/workflow-files/${encodeURIComponent(name)}`, { method: "DELETE" });
+        return res.json();
+    }
+
     async getRecords(tags = null, tier = "all", period = "all", offset = 0, limit = 50) {
         let url = `/api/records?limit=${limit}&offset=${offset}`;
         if (tags) url += `&tags=${encodeURIComponent(tags)}`;

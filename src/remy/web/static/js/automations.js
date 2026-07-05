@@ -271,12 +271,12 @@ function _blockHelpText(type) {
     },
     file_read: {
       title: "What this block does",
-      body: "Reads a text file from the app workflow_files directory.",
+      body: "Reads an uploaded file from shared workflow storage. Upload files right here in the block settings.",
       tip: "Tip: file access is limited to the app data folder for safety.",
     },
     file_write: {
       title: "What this block does",
-      body: "Writes text to a file in the app workflow_files directory.",
+      body: "Writes text to a file in shared workflow storage. Results can be downloaded from the block settings.",
       tip: "Tip: use append for logs and overwrite for the latest snapshot.",
     },
     code: {
@@ -989,6 +989,12 @@ function _importSteps(automation) {
 // ── Palette drag ──────────────────────────────────────────────────────────────
 
 function _bindPaletteDrag(container) {
+  // Bind exactly once per element: the palette and canvas container survive
+  // editor open/close, so rebinding on every _openEditor stacked N drop
+  // handlers and added N duplicate blocks per drag (same bug as pipelines).
+  if (container.dataset.dragBound) return;
+  container.dataset.dragBound = "1";
+
   let _dragType = null;
 
   document.querySelectorAll("#at-palette-panel .pf-palette-item").forEach(item => {
@@ -1073,6 +1079,90 @@ function _openNodeConfig(id) {
       _openNodeConfig(id);
     });
   });
+  _initWorkflowFileWidgets(body, id);
+}
+
+// ── Workflow-file widgets (File Read picker / File Write storage list) ────────
+// Mirrors pipelines.js — both editors share the same block config UX.
+
+async function _initWorkflowFileWidgets(body, nodeId) {
+  const select = body.querySelector(".pf-wf-file-select");
+  const listEl = body.querySelector(".pf-wf-list");
+  if (!select && !listEl) return;
+
+  const refresh = async () => {
+    let files = [];
+    try {
+      files = (await window.apiClient.getWorkflowFiles()).files || [];
+    } catch (_e) { /* offline — leave current state */ }
+
+    if (select) {
+      const current = select.value;
+      select.innerHTML = "";
+      if (!files.length && !current) {
+        select.appendChild(new Option("— no files yet, upload one —", ""));
+      }
+      if (current && !files.some(f => f.name === current)) {
+        select.appendChild(new Option(`${current} (missing)`, current));
+      }
+      files.forEach(f => select.appendChild(new Option(f.name, f.name)));
+      select.value = current || (files[0]?.name ?? "");
+    }
+
+    if (listEl) {
+      if (!files.length) {
+        listEl.innerHTML = `<div class="pf-wf-empty">No files yet — this block will create one on first run.</div>`;
+      } else {
+        listEl.innerHTML = files.map(f => `
+          <div class="pf-wf-row">
+            <a class="pf-wf-name" href="/api/workflow-files/${encodeURIComponent(f.name)}" download title="Download">${_esc(f.name)}</a>
+            <span class="pf-wf-size">${_formatBytes(f.size)}</span>
+            <button type="button" class="pf-wf-del" data-name="${_esc(f.name)}" title="Delete file">✕</button>
+          </div>`).join("");
+        listEl.querySelectorAll(".pf-wf-del").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            if (!confirm(`Delete "${btn.dataset.name}" from workflow storage?`)) return;
+            try { await window.apiClient.deleteWorkflowFile(btn.dataset.name); } catch (_e) {}
+            refresh();
+          });
+        });
+      }
+    }
+  };
+
+  const uploadBtn = body.querySelector(".pf-wf-upload-btn");
+  const uploadInput = body.querySelector(".pf-wf-upload-input");
+  if (uploadBtn && uploadInput) {
+    uploadBtn.addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files?.[0];
+      if (!file) return;
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = "Uploading…";
+      try {
+        const res = await window.apiClient.uploadWorkflowFile(file);
+        await refresh();
+        if (select && res?.name) {
+          select.value = res.name;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      } catch (e) {
+        alert(`Upload failed: ${e?.message || e}`);
+      } finally {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = "⬆ Upload file";
+        uploadInput.value = "";
+      }
+    });
+  }
+
+  await refresh();
+}
+
+function _formatBytes(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+  return n + " B";
 }
 
 function _canvasNodeExists(id) {
@@ -1626,10 +1716,17 @@ function _buildConfigForm(type, data, nodeId) {
       </div>`;
   }
   if (type === "file_read") {
+    const current = data.filename || "";
     html += `
       <div class="pf-cfg-row">
-        <label class="pf-cfg-label">File name <span style="opacity:.6">(inside app workflow_files)</span></label>
-        <input class="pf-cfg-input" data-key="filename" value="${_esc(data.filename || "workflow.txt")}">
+        <label class="pf-cfg-label">File</label>
+        <select class="pf-cfg-select pf-wf-file-select" data-key="filename">
+          ${current ? `<option value="${_esc(current)}" selected>${_esc(current)}</option>` : `<option value="" selected>— select a file —</option>`}
+        </select>
+        <div class="pf-wf-actions">
+          <button type="button" class="btn btn-outline btn-sm pf-wf-upload-btn">⬆ Upload file</button>
+          <input type="file" class="pf-wf-upload-input" style="display:none">
+        </div>
       </div>
       <div class="pf-cfg-row">
         <label class="pf-cfg-label">Max characters</label>
@@ -1639,7 +1736,7 @@ function _buildConfigForm(type, data, nodeId) {
   if (type === "file_write") {
     html += `
       <div class="pf-cfg-row">
-        <label class="pf-cfg-label">File name <span style="opacity:.6">(inside app workflow_files)</span></label>
+        <label class="pf-cfg-label">File name <span style="opacity:.6">(created in shared workflow storage)</span></label>
         <input class="pf-cfg-input" data-key="filename" value="${_esc(data.filename || "workflow.txt")}">
       </div>
       <div class="pf-cfg-row">
@@ -1652,6 +1749,10 @@ function _buildConfigForm(type, data, nodeId) {
           <option value="overwrite" ${(data.mode || "overwrite")==="overwrite"?"selected":""}>Overwrite</option>
           <option value="append" ${data.mode==="append"?"selected":""}>Append</option>
         </select>
+      </div>
+      <div class="pf-cfg-row">
+        <label class="pf-cfg-label">Files in storage</label>
+        <div class="pf-wf-list">Loading…</div>
       </div>`;
   }
   if (type === "code") {
