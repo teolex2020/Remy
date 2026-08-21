@@ -11,4 +11,3 @@ MESSAGE_CHANNEL = DeltaChannel(
     list,
     snapshot_frequency=50,
 )
-

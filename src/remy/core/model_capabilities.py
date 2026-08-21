@@ -124,4 +124,3 @@ def clear_runtime_capability_overrides() -> None:
     """Reset learned observations (primarily for tests and model reloads)."""
     with _override_lock:
         _runtime_overrides.clear()
-
