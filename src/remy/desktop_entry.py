@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 
 
 _INTERNAL_AURA_PROBE_ARG = "--remy-internal-aura-probe"
+_SINGLE_INSTANCE_MUTEX_NAME = r"Local\AuroraSeed.Remy.Desktop"
+_single_instance_mutex = None
 
 
 def _run_internal_aura_probe(argv: list[str]) -> bool:
@@ -35,9 +37,38 @@ def _run_internal_aura_probe(argv: list[str]) -> bool:
     return True
 
 
+def _acquire_single_instance() -> bool:
+    """Allow only one interactive Remy desktop process per Windows session."""
+    global _single_instance_mutex
+    if sys.platform != "win32":
+        return True
+    if _single_instance_mutex is not None:
+        return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    create_mutex.restype = wintypes.HANDLE
+    handle = create_mutex(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+
+    # Holding the handle for the process lifetime holds the named mutex.
+    _single_instance_mutex = (kernel32, handle)
+    return True
+
+
 def main() -> None:
     """Open Remy as a local desktop app without requiring a terminal wizard."""
     if _run_internal_aura_probe(sys.argv[1:]):
+        return
+    if not _acquire_single_instance():
         return
 
     load_dotenv()

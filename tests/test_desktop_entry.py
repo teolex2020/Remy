@@ -11,6 +11,7 @@ def test_desktop_entry_opens_gui_without_setup_wizard():
 
     with (
         patch("remy.desktop_entry.load_dotenv") as load_dotenv,
+        patch("remy.desktop_entry._acquire_single_instance", return_value=True) as acquire_single_instance,
         patch("remy.core.logging_config.setup_logging") as setup_logging,
         patch("remy.core.setup.ensure_directories") as ensure_directories,
         patch("remy.optional_dependencies.require_extra") as require_extra,
@@ -20,6 +21,7 @@ def test_desktop_entry_opens_gui_without_setup_wizard():
         desktop_entry.main()
 
     load_dotenv.assert_called_once()
+    acquire_single_instance.assert_called_once_with()
     setup_logging.assert_called_once_with(log_to_file=True)
     ensure_directories.assert_called_once()
     require_extra.assert_called_once_with("webview", "desktop", "desktop mode")
@@ -69,11 +71,28 @@ def test_desktop_entry_internal_aura_probe_skips_gui(monkeypatch):
 
     with (
         patch("remy.desktop_entry.load_dotenv") as load_dotenv,
+        patch("remy.desktop_entry._acquire_single_instance") as acquire_single_instance,
         patch("remy.core.desktop_gui.DesktopGUI") as desktop_gui,
     ):
         desktop_entry.main()
 
     aura_module.Aura.assert_called_once_with(r"C:\RemyData\brain")
     aura_instance.close.assert_called_once_with()
+    load_dotenv.assert_not_called()
+    acquire_single_instance.assert_not_called()
+    desktop_gui.assert_not_called()
+
+
+def test_desktop_entry_duplicate_process_skips_gui():
+    from remy import desktop_entry
+
+    with (
+        patch("remy.desktop_entry._run_internal_aura_probe", return_value=False),
+        patch("remy.desktop_entry._acquire_single_instance", return_value=False),
+        patch("remy.desktop_entry.load_dotenv") as load_dotenv,
+        patch("remy.core.desktop_gui.DesktopGUI") as desktop_gui,
+    ):
+        desktop_entry.main()
+
     load_dotenv.assert_not_called()
     desktop_gui.assert_not_called()

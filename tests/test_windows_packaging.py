@@ -39,6 +39,7 @@ def test_inno_setup_is_per_user_and_creates_normal_shortcuts():
     assert r'Filename: "{app}\Remy.exe"' in installer
     assert "UninstallDisplayIcon={app}\\Remy.exe" in installer
     assert "runascurrentuser" not in installer.lower()
+    assert "postinstall skipifsilent unchecked" in installer
 
 
 def test_build_script_uses_isolated_environment_and_all_features():

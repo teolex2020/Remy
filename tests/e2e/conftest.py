@@ -165,5 +165,8 @@ def authenticated_page(page, server_url):
     )
     page.goto(server_url, wait_until="domcontentloaded")
     page.wait_for_selector(".sidebar", timeout=10000)
-    page.wait_for_selector("#startup-splash.is-hidden", timeout=10000)
+    page.wait_for_function(
+        "document.getElementById('startup-splash')?.classList.contains('is-hidden')",
+        timeout=10000,
+    )
     yield page

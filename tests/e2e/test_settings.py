@@ -69,3 +69,65 @@ class TestSettings:
         text = page.locator("#settings-content").inner_text()
         # Should mention API key status somehow
         assert len(text) > 10  # Content loaded
+
+    def test_added_model_appears_in_chat_without_page_reload(self, authenticated_page):
+        """Registering a provider model should refresh the chat picker live."""
+        page = authenticated_page
+        state = {"added": False}
+
+        def available_models(route):
+            models = [{
+                "name": "existing/model",
+                "provider": "openrouter",
+                "label": "Existing model",
+                "has_key": True,
+            }]
+            if state["added"]:
+                models.append({
+                    "name": "new/live-model",
+                    "provider": "openrouter",
+                    "label": "Live model",
+                    "has_key": True,
+                })
+            route.fulfill(json={"models": models})
+
+        def model_registry(route):
+            if route.request.method == "PUT":
+                state["added"] = True
+                route.fulfill(json={"registered": "new/live-model"})
+                return
+            models = []
+            if state["added"]:
+                models.append({
+                    "name": "new/live-model",
+                    "provider": "openrouter",
+                    "has_key": True,
+                    "api_key_masked": "sk-or-...test",
+                    "input_price": None,
+                    "output_price": None,
+                })
+            route.fulfill(json={"models": models})
+
+        page.route("**/api/models", available_models)
+        page.route("**/api/model-registry", model_registry)
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "document.getElementById('startup-splash')?.classList.contains('is-hidden')",
+            timeout=10_000,
+        )
+
+        assert page.locator('#chat-model-select option[value="new/live-model"]').count() == 0
+
+        self._navigate_to_settings(page)
+        page.click('[data-settings-category="models"]')
+        page.locator("details.settings-add-model summary").click()
+        page.locator("#add-model-provider").select_option("openrouter")
+        page.locator("#add-model-name").fill("new/live-model")
+        page.locator("#add-model-key").fill("sk-or-test")
+        page.locator("#btn-add-model").click()
+
+        page.wait_for_function(
+            "document.querySelector('#chat-model-select option[value=\"new/live-model\"]') !== null",
+            timeout=5_000,
+        )
+        assert state["added"] is True
