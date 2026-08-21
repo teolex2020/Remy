@@ -52,3 +52,28 @@ def test_desktop_entry_keeps_remy_imports_inside_main():
     source = Path("src/remy/desktop_entry.py").read_text(encoding="utf-8")
 
     assert "from remy.core." not in source.split("def main", 1)[0]
+
+
+def test_desktop_entry_internal_aura_probe_skips_gui(monkeypatch):
+    from remy import desktop_entry
+
+    aura_instance = MagicMock()
+    aura_module = MagicMock()
+    aura_module.Aura.return_value = aura_instance
+    monkeypatch.setitem(__import__("sys").modules, "aura", aura_module)
+    monkeypatch.setattr(
+        desktop_entry.sys,
+        "argv",
+        ["Remy.exe", "--remy-internal-aura-probe", r"C:\RemyData\brain"],
+    )
+
+    with (
+        patch("remy.desktop_entry.load_dotenv") as load_dotenv,
+        patch("remy.core.desktop_gui.DesktopGUI") as desktop_gui,
+    ):
+        desktop_entry.main()
+
+    aura_module.Aura.assert_called_once_with(r"C:\RemyData\brain")
+    aura_instance.close.assert_called_once_with()
+    load_dotenv.assert_not_called()
+    desktop_gui.assert_not_called()

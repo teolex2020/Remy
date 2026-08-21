@@ -51,7 +51,7 @@ def test_help_presents_quick_start_commands():
 
 
 def test_package_and_project_versions_match():
-    assert _project_metadata()["version"] == __version__ == "0.9.0"
+    assert _project_metadata()["version"] == __version__ == "0.9.1"
 
 
 def test_version_flag_reports_release_version(capsys):
@@ -59,7 +59,7 @@ def test_version_flag_reports_release_version(capsys):
         _build_parser().parse_args(["--version"])
 
     assert exc_info.value.code == 0
-    assert capsys.readouterr().out.strip() == "Remy 0.9.0"
+    assert capsys.readouterr().out.strip() == "Remy 0.9.1"
 
 
 def test_missing_optional_feature_has_actionable_install_hint():
