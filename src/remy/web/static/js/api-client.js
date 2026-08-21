@@ -7,6 +7,84 @@ import { newRequestId } from "./ui.js";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 
+const API_FIELD_LABELS = {
+    name: "Project name",
+    domain: "Project area",
+    description: "Project purpose",
+    workspace_id: "Project folder",
+};
+
+function formatApiErrorDetail(detail, fallbackMessage = "Request failed") {
+    if (typeof detail === "string" && detail.trim()) return detail.trim();
+
+    if (Array.isArray(detail)) {
+        const messages = detail.map((item) => {
+            if (typeof item === "string") return item.trim();
+            if (!item || typeof item !== "object") return "";
+
+            const location = Array.isArray(item.loc)
+                ? item.loc.filter((part) => !["body", "query", "path"].includes(String(part)))
+                : [];
+            const field = location.length
+                ? API_FIELD_LABELS[String(location.at(-1))] || location.join(".")
+                : "";
+            const message = item.msg || item.message || item.detail || "";
+            if (field && message) return `${field}: ${message}`;
+            if (message) return String(message);
+            try {
+                return JSON.stringify(item);
+            } catch (_) {
+                return "";
+            }
+        }).filter(Boolean);
+        if (messages.length) return messages.join(". ");
+    }
+
+    if (detail && typeof detail === "object") {
+        const nested = detail.message || detail.error || detail.detail;
+        if (nested && nested !== detail) {
+            return formatApiErrorDetail(nested, fallbackMessage);
+        }
+        try {
+            const serialized = JSON.stringify(detail);
+            if (serialized && serialized !== "{}") return serialized;
+        } catch (_) {
+            // Fall through to the caller-provided message.
+        }
+    }
+
+    return fallbackMessage;
+}
+
+async function responsePayload(res) {
+    try {
+        return await res.json();
+    } catch (_) {
+        return {};
+    }
+}
+
+async function readApiJson(res, fallbackMessage = "Request failed") {
+    const payload = await responsePayload(res);
+    if (!res.ok) {
+        throw new Error(formatApiErrorDetail(
+            payload.detail ?? payload.error ?? payload.message,
+            fallbackMessage,
+        ));
+    }
+    return payload;
+}
+
+function hasLegacyProjectProfileValidation(detail) {
+    if (!Array.isArray(detail) || !detail.length) return false;
+    const unsupported = new Set(["domain", "description"]);
+    return detail.every((item) => {
+        if (!item || typeof item !== "object" || item.type !== "extra_forbidden") return false;
+        const location = Array.isArray(item.loc) ? item.loc : [];
+        return unsupported.has(String(location.at(-1)));
+    });
+}
+
 class ApiClient {
     constructor() {
         this.ws = null;
@@ -18,6 +96,7 @@ class ApiClient {
         this._approvalHandlers = [];
         this._guidanceHandlers = [];
         this._runtimeHandlers = [];
+        this._runtimeStatusHandlers = [];
         this._runtimeReconnect = 0;
         this._activityActive = false;
         this.reconnectAttempt = 0;
@@ -74,6 +153,8 @@ class ApiClient {
                 context_reducer_compare: Boolean(options.contextReducerCompare),
                 context_reducer_apply: Boolean(options.contextReducerApply),
                 model: options.model || undefined,
+                workspace_id: options.workspaceId || undefined,
+                team_mode: options.teamMode || "off",
             }));
         }
     }
@@ -104,6 +185,493 @@ class ApiClient {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ type: "new_session" }));
         }
+    }
+
+    cancelGeneration() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: "cancel" }));
+        }
+    }
+
+    async getProjects(includeArchived = false) {
+        const query = includeArchived ? "?include_archived=true" : "";
+        const res = await this._fetch(`/api/projects${query}`);
+        return readApiJson(res, "Could not load projects");
+    }
+
+    async createProject(name, activate = true, profile = {}) {
+        const body = { name, activate };
+        const domain = String(profile.domain || "").trim();
+        const description = String(profile.description || "").trim();
+        if (domain) body.domain = domain;
+        if (description) body.description = description;
+
+        const request = (payload) => this._fetch("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        let res = await request(body);
+        if (!res.ok && res.status === 422 && (domain || description)) {
+            const validation = await responsePayload(res.clone());
+            if (hasLegacyProjectProfileValidation(validation.detail)) {
+                // A browser can receive newer static files from disk while the
+                // already-running Python process still has the previous request
+                // schema in memory. Preserve the essential operation: create the
+                // project by title, then let a restart enable the richer profile.
+                res = await request({ name, activate });
+                const created = await readApiJson(res, "Could not create project");
+                created.compatibility_warning =
+                    "Project created from its title. Restart Remy before adding its area or purpose.";
+                return created;
+            }
+        }
+        return readApiJson(res, "Could not create project");
+    }
+
+    async activateProject(projectId) {
+        const res = await this._fetch(`/api/projects/${encodeURIComponent(projectId)}/activate`, {
+            method: "POST",
+        });
+        return readApiJson(res, "Could not open project");
+    }
+
+    async updateProject(projectId, changes) {
+        const res = await this._fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(changes || {}),
+        });
+        return readApiJson(res, "Could not update project");
+    }
+
+    async getProjectAgent(projectId) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/agent`,
+        );
+        return readApiJson(res, "Could not load Project Agent");
+    }
+
+    async updateProjectAgent(projectId, changes) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/agent`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(changes || {}),
+            },
+        );
+        return readApiJson(res, "Could not update Project Agent");
+    }
+
+    async createKnowledgePack(projectId, name, description = "") {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/knowledge-packs`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, description }),
+            },
+        );
+        return readApiJson(res, "Could not create Knowledge Pack");
+    }
+
+    async updateKnowledgePack(projectId, packId, changes) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/knowledge-packs/${encodeURIComponent(packId)}`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(changes || {}),
+            },
+        );
+        return readApiJson(res, "Could not update Knowledge Pack");
+    }
+
+    async deleteKnowledgePack(projectId, packId) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/knowledge-packs/${encodeURIComponent(packId)}`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete Knowledge Pack");
+    }
+
+    async uploadKnowledgePackSource(projectId, packId, file) {
+        const body = new FormData();
+        body.append("file", file);
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/knowledge-packs/${encodeURIComponent(packId)}/sources`,
+            { method: "POST", body },
+        );
+        return readApiJson(res, "Could not upload knowledge source");
+    }
+
+    async deleteKnowledgePackSource(projectId, packId, sourceId) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/knowledge-packs/${encodeURIComponent(packId)}/sources/${encodeURIComponent(sourceId)}`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete knowledge source");
+    }
+
+    async archiveProject(projectId) {
+        const res = await this._fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+            method: "DELETE",
+        });
+        return readApiJson(res, "Could not archive project");
+    }
+
+    async restoreProject(projectId) {
+        const res = await this._fetch(
+            `/api/projects/${encodeURIComponent(projectId)}/restore`,
+            { method: "POST" },
+        );
+        return readApiJson(res, "Could not restore project");
+    }
+
+    async getConversations() {
+        const res = await this._fetch("/api/conversations");
+        return res.json();
+    }
+
+    async createConversation(title = "New conversation") {
+        const res = await this._fetch("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title }),
+        });
+        return res.json();
+    }
+
+    async activateConversation(conversationId) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/activate`,
+            { method: "POST" },
+        );
+        return res.json();
+    }
+
+    async renameConversation(conversationId, title) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title }),
+            },
+        );
+        return res.json();
+    }
+
+    async archiveConversation(conversationId) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}`,
+            { method: "DELETE" },
+        );
+        return res.json();
+    }
+
+    async getConversationMessages(conversationId, limit = 120, options = {}) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${encodeURIComponent(limit)}`,
+            { signal: options.signal },
+        );
+        return res.json();
+    }
+
+    async getConversationTrajectory(conversationId, limit = 1500) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/trajectory?limit=${encodeURIComponent(limit)}`,
+        );
+        return readApiJson(res, "Could not load trajectory");
+    }
+
+    async getTrajectoryAnalytics(days = 30, limit = 20000) {
+        const query = new URLSearchParams({
+            days: String(days),
+            limit: String(limit),
+        });
+        const res = await this._fetch(`/api/trajectory/analytics?${query.toString()}`);
+        return readApiJson(res, "Could not load project trajectory analytics");
+    }
+
+    async createTrajectoryBaseline(name, days = 30, activate = true) {
+        const res = await this._fetch("/api/trajectory/analytics/baselines", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, days, activate }),
+        });
+        return readApiJson(res, "Could not create trajectory baseline");
+    }
+
+    async activateTrajectoryBaseline(baselineId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/baselines/${encodeURIComponent(baselineId)}/activate`,
+            { method: "PUT" },
+        );
+        return readApiJson(res, "Could not activate trajectory baseline");
+    }
+
+    async useTrajectoryWindowMedian() {
+        const res = await this._fetch("/api/trajectory/analytics/baselines/window-median", {
+            method: "PUT",
+        });
+        return readApiJson(res, "Could not switch to the live window median");
+    }
+
+    async deleteTrajectoryBaseline(baselineId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/baselines/${encodeURIComponent(baselineId)}`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete trajectory baseline");
+    }
+
+    async updateTrajectoryAlert(alertId, status) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/alerts/${encodeURIComponent(alertId)}`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status }),
+            },
+        );
+        return readApiJson(res, "Could not update regression alert");
+    }
+
+    async getTrajectoryAlertHistory(alertId = "", limit = 200) {
+        const query = new URLSearchParams({ limit: String(limit) });
+        if (alertId) query.set("alert_id", alertId);
+        const res = await this._fetch(
+            `/api/trajectory/analytics/alert-history?${query.toString()}`,
+        );
+        return readApiJson(res, "Could not load trajectory alert history");
+    }
+
+    async updateTrajectorySlo(config) {
+        const res = await this._fetch("/api/trajectory/analytics/slo", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(config || {}),
+        });
+        return readApiJson(res, "Could not update trajectory SLO");
+    }
+
+    async getTrajectorySloIncidents(status = "", limit = 100) {
+        const query = new URLSearchParams({ limit: String(limit) });
+        if (status) query.set("status", status);
+        const res = await this._fetch(
+            `/api/trajectory/analytics/slo/incidents?${query.toString()}`,
+        );
+        return readApiJson(res, "Could not load trajectory SLO incidents");
+    }
+
+    async updateTrajectorySloIncident(incidentId, status) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/slo/incidents/${encodeURIComponent(incidentId)}`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status }),
+            },
+        );
+        return readApiJson(res, "Could not update trajectory SLO incident");
+    }
+
+    async getTrajectoryIncidentDossier(incidentId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/incidents/${encodeURIComponent(incidentId)}/dossier`,
+        );
+        return readApiJson(res, "Could not build trajectory incident dossier");
+    }
+
+    async createTrajectoryEvalCase(incidentId, name = "") {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/incidents/${encodeURIComponent(incidentId)}/eval-cases`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name }),
+            },
+        );
+        return readApiJson(res, "Could not create trajectory regression eval");
+    }
+
+    async getTrajectoryEvalCases(limit = 100) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-cases?limit=${encodeURIComponent(limit)}`,
+        );
+        return readApiJson(res, "Could not load trajectory regression evals");
+    }
+
+    async runTrajectoryEvalCase(caseId, conversationId = "") {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-cases/${encodeURIComponent(caseId)}/runs`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ conversation_id: conversationId }),
+            },
+        );
+        return readApiJson(res, "Could not run trajectory regression eval");
+    }
+
+    async sandboxReplayTrajectoryEvalCase(caseId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-cases/${encodeURIComponent(caseId)}/sandbox-replay`,
+            { method: "POST" },
+        );
+        return readApiJson(res, "Could not run trajectory sandbox replay");
+    }
+
+    async runTrajectoryEvalMatrix({ name = "", preferredModel = "", caseIds = [] } = {}) {
+        const res = await this._fetch("/api/trajectory/analytics/eval-matrices", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                name,
+                preferred_model: preferredModel,
+                case_ids: caseIds,
+            }),
+        });
+        return readApiJson(res, "Could not run trajectory replay matrix");
+    }
+
+    async getTrajectoryEvalMatrices(limit = 20) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-matrices?limit=${encodeURIComponent(limit)}`,
+        );
+        return readApiJson(res, "Could not load trajectory replay matrices");
+    }
+
+    async runTrajectoryEvalComparison({ name = "", models = [], caseIds = [] } = {}) {
+        const res = await this._fetch("/api/trajectory/analytics/eval-comparisons", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, models, case_ids: caseIds }),
+        });
+        return readApiJson(res, "Could not run trajectory model comparison");
+    }
+
+    async getTrajectoryEvalComparisons(limit = 20) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-comparisons?limit=${encodeURIComponent(limit)}`,
+        );
+        return readApiJson(res, "Could not load trajectory model comparisons");
+    }
+
+    async startTrajectoryModelPromotion({ candidateModel, confirmModel, canaryPercent = 10 }) {
+        const res = await this._fetch("/api/trajectory/analytics/model-promotions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                candidate_model: candidateModel,
+                confirm_model: confirmModel,
+                canary_percent: canaryPercent,
+            }),
+        });
+        return readApiJson(res, "Could not start model promotion canary");
+    }
+
+    async finalizeTrajectoryModelPromotion(promotionId, confirmModel) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/model-promotions/${encodeURIComponent(promotionId)}/promote`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ confirm_model: confirmModel }),
+            },
+        );
+        return readApiJson(res, "Could not finalize model promotion");
+    }
+
+    async rollbackTrajectoryModelPromotion(promotionId, confirmModel) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/model-promotions/${encodeURIComponent(promotionId)}/rollback`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ confirm_model: confirmModel }),
+            },
+        );
+        return readApiJson(res, "Could not roll back model promotion");
+    }
+
+    async getTrajectoryEvalRuns(caseId, limit = 50) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-cases/${encodeURIComponent(caseId)}/runs?limit=${encodeURIComponent(limit)}`,
+        );
+        return readApiJson(res, "Could not load trajectory eval runs");
+    }
+
+    async deleteTrajectoryEvalCase(caseId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/eval-cases/${encodeURIComponent(caseId)}`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete trajectory regression eval");
+    }
+
+    async createTrajectoryAlertPolicy(policy) {
+        const res = await this._fetch("/api/trajectory/analytics/policies", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(policy || {}),
+        });
+        return readApiJson(res, "Could not create trajectory alert policy");
+    }
+
+    async updateTrajectoryAlertPolicy(policyId, policy) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/policies/${encodeURIComponent(policyId)}`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(policy || {}),
+            },
+        );
+        return readApiJson(res, "Could not update trajectory alert policy");
+    }
+
+    async deleteTrajectoryAlertPolicy(policyId) {
+        const res = await this._fetch(
+            `/api/trajectory/analytics/policies/${encodeURIComponent(policyId)}`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete trajectory alert policy");
+    }
+
+    async forkConversationTrajectory(conversationId, eventId, options = {}) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/trajectory/${encodeURIComponent(eventId)}/fork`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(options),
+            },
+        );
+        return readApiJson(res, "Could not fork trajectory");
+    }
+
+    async updateTrajectoryAnnotation(conversationId, eventId, annotation) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/trajectory/${encodeURIComponent(eventId)}/annotation`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(annotation || {}),
+            },
+        );
+        return readApiJson(res, "Could not save trajectory annotation");
+    }
+
+    async deleteTrajectoryAnnotation(conversationId, eventId) {
+        const res = await this._fetch(
+            `/api/conversations/${encodeURIComponent(conversationId)}/trajectory/${encodeURIComponent(eventId)}/annotation`,
+            { method: "DELETE" },
+        );
+        return readApiJson(res, "Could not delete trajectory annotation");
     }
 
     onMessage(fn) {
@@ -181,6 +749,7 @@ class ApiClient {
 
         this.runtimeWs.onopen = () => {
             this._runtimeReconnect = 0;
+            this._emitRuntimeStatus("connected");
             if (this._activityActive) {
                 this._emitActivityStatus("connected");
             }
@@ -201,12 +770,14 @@ class ApiClient {
         };
 
         this.runtimeWs.onclose = (event) => {
+            this._emitRuntimeStatus("disconnected");
             if (this._activityActive) {
                 this._emitActivityStatus("disconnected");
             }
             if (event.code === 4001) return;
 
             if (this._runtimeReconnect >= MAX_RECONNECT_ATTEMPTS) {
+                this._emitRuntimeStatus("failed");
                 if (this._activityActive) {
                     console.warn(`Runtime WebSocket: gave up after ${MAX_RECONNECT_ATTEMPTS} attempts.`);
                     this._emitActivityStatus("failed");
@@ -216,6 +787,7 @@ class ApiClient {
 
             const delay = Math.min(1000 * (2 ** this._runtimeReconnect), 30000);
             this._runtimeReconnect++;
+            this._emitRuntimeStatus("reconnecting");
             setTimeout(() => {
                 if (this._activityActive) {
                     this._emitActivityStatus("reconnecting");
@@ -225,6 +797,7 @@ class ApiClient {
         };
 
         this.runtimeWs.onerror = () => {
+            this._emitRuntimeStatus("disconnected");
             if (this._activityActive) {
                 this._emitActivityStatus("disconnected");
             }
@@ -374,6 +947,25 @@ class ApiClient {
         return res.json();
     }
 
+    async getResearchNotifications(limit = 20) {
+        const res = await this._fetch(`/api/knowledge/research/notifications?limit=${limit}`);
+        return res.json();
+    }
+
+    async pauseResearch(projectId) {
+        const res = await this._fetch(`/api/knowledge/research/${encodeURIComponent(projectId)}/pause`, {
+            method: "POST",
+        });
+        return res.json();
+    }
+
+    async resumeResearch(projectId) {
+        const res = await this._fetch(`/api/knowledge/research/${encodeURIComponent(projectId)}/resume`, {
+            method: "POST",
+        });
+        return res.json();
+    }
+
     async getKnowledgeMetrics(limit = 50) {
         const res = await this._fetch(`/api/knowledge/metrics?limit=${limit}`);
         return res.json();
@@ -386,6 +978,162 @@ class ApiClient {
 
     async getKnowledgeStats() {
         const res = await this._fetch("/api/knowledge/stats");
+        return res.json();
+    }
+
+    async getLearningReviews(status = "pending", limit = 100) {
+        const res = await this._fetch(`/api/knowledge/learning-reviews?status=${encodeURIComponent(status)}&limit=${limit}`);
+        return res.json();
+    }
+
+    async decideLearningReview(reviewId, decision) {
+        const res = await this._fetch(`/api/knowledge/learning-reviews/${encodeURIComponent(reviewId)}/decision`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+        });
+        return res.json();
+    }
+
+    async getExecutionAttempts(limit = 100) {
+        const res = await this._fetch(`/api/knowledge/execution-attempts?limit=${limit}`);
+        return res.json();
+    }
+
+    // ============== Background task handles ==============
+
+    async launchWorkerTasks(tasks, conversationId = "") {
+        const res = await this._fetch("/api/tasks/workers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tasks, conversation_id: conversationId, channel: "web" }),
+        });
+        return readApiJson(res, "Could not launch background task");
+    }
+
+    async getWorkerTasks(status = "", limit = 100) {
+        const query = new URLSearchParams({ status, limit: String(limit) });
+        const res = await this._fetch(`/api/tasks?${query.toString()}`);
+        return readApiJson(res, "Could not load background tasks");
+    }
+
+    async getWorkerTask(taskId) {
+        const res = await this._fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+        return readApiJson(res, "Could not load background task");
+    }
+
+    async cancelWorkerTask(taskId, reason = "Stopped by user") {
+        const res = await this._fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason }),
+        });
+        return readApiJson(res, "Could not stop background task");
+    }
+
+    async resumeWorkerTask(taskId, confirmSideEffects = false) {
+        const res = await this._fetch(`/api/tasks/${encodeURIComponent(taskId)}/resume`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm_side_effects: Boolean(confirmSideEffects) }),
+        });
+        return readApiJson(res, "Could not resume background task");
+    }
+
+    async getChildSessions(parentSessionId = "", limit = 100) {
+        const query = new URLSearchParams({
+            parent_session_id: parentSessionId,
+            limit: String(limit),
+        });
+        const res = await this._fetch(`/api/children?${query.toString()}`);
+        return readApiJson(res, "Could not load child sessions");
+    }
+
+    async getChildReport(childId) {
+        const res = await this._fetch(`/api/children/${encodeURIComponent(childId)}/report`);
+        return readApiJson(res, "Could not load child report");
+    }
+
+    async followUpChild(childId, message, confirmSideEffects = false) {
+        const res = await this._fetch(`/api/children/${encodeURIComponent(childId)}/follow-up`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                message,
+                confirm_side_effects: Boolean(confirmSideEffects),
+            }),
+        });
+        return readApiJson(res, "Could not send child follow-up");
+    }
+
+    async interruptChild(childId, reason = "Interrupted by parent") {
+        const res = await this._fetch(`/api/children/${encodeURIComponent(childId)}/interrupt`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason }),
+        });
+        return readApiJson(res, "Could not interrupt child session");
+    }
+
+    async resumeChild(childId, confirmSideEffects = false) {
+        const res = await this._fetch(`/api/children/${encodeURIComponent(childId)}/resume`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirm_side_effects: Boolean(confirmSideEffects) }),
+        });
+        return readApiJson(res, "Could not resume child session");
+    }
+
+    async getPtcTools() {
+        const res = await this._fetch("/api/ptc/tools");
+        return readApiJson(res, "Could not load PTC tool allowlist");
+    }
+
+    async validatePtcProgram(program, limits = {}) {
+        const res = await this._fetch("/api/ptc/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ program, limits }),
+        });
+        return readApiJson(res, "Could not validate PTC program");
+    }
+
+    async runPtcProgram(program, limits = {}, sessionId = "") {
+        const res = await this._fetch("/api/ptc/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ program, limits, session_id: sessionId, channel: "web" }),
+        });
+        return readApiJson(res, "Could not run PTC program");
+    }
+
+    async searchTranscripts(query, limit = 20) {
+        const res = await this._fetch(`/api/knowledge/transcripts/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+        return res.json();
+    }
+
+    async getPipelineCandidates(status = "all", limit = 100) {
+        const res = await this._fetch(`/api/pipeline-candidates?status=${encodeURIComponent(status)}&limit=${limit}`);
+        return res.json();
+    }
+
+    async dryRunPipelineCandidate(candidateId, inputText = "") {
+        const res = await this._fetch(`/api/pipeline-candidates/${encodeURIComponent(candidateId)}/dry-run`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ input_text: inputText }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Dry-run failed");
+        return res.json();
+    }
+
+    async decidePipelineCandidate(candidateId, decision) {
+        const res = await this._fetch(`/api/pipeline-candidates/${encodeURIComponent(candidateId)}/decision`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Decision failed");
         return res.json();
     }
 
@@ -480,6 +1228,18 @@ class ApiClient {
         this._runtimeHandlers.push(fn);
     }
 
+    onRuntimeStatus(fn) {
+        this._runtimeStatusHandlers.push(fn);
+        if (!this.runtimeWs) return;
+        if (this.runtimeWs.readyState === WebSocket.OPEN) fn("connected");
+        else if (this.runtimeWs.readyState === WebSocket.CONNECTING) fn("connecting");
+        else fn("disconnected");
+    }
+
+    _emitRuntimeStatus(status) {
+        this._runtimeStatusHandlers.forEach((fn) => fn(status));
+    }
+
     async submitGuidanceAnswer(requestId, answer) {
         return this._fetch(`/api/guidance/${requestId}/answer`, {
             method: "POST",
@@ -516,6 +1276,22 @@ class ApiClient {
     async getSystemStatus() {
         const res = await this._fetch("/api/system/status");
         return res.json();
+    }
+
+    async getOperatorAlerts(limit = 8, options = {}) {
+        const query = new URLSearchParams({ limit: String(limit) });
+        const res = await this._fetch(`/api/system/operator-alerts?${query.toString()}`, {
+            signal: options.signal,
+        });
+        return readApiJson(res, "Could not load operator incidents");
+    }
+
+    async acknowledgeOperatorAlert(alertId) {
+        const res = await this._fetch(
+            `/api/system/operator-alerts/${encodeURIComponent(alertId)}/ack`,
+            { method: "POST" },
+        );
+        return readApiJson(res, "Could not acknowledge operator incident");
     }
 
     async toggleAutonomy() {

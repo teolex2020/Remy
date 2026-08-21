@@ -20,7 +20,6 @@ const streamEl = document.getElementById("activity-stream");
 const liveStatusEl = document.getElementById("activity-live-status");
 const liveCountEl = document.getElementById("activity-live-count");
 const clearBtn = document.getElementById("btn-activity-clear");
-const stopServerBtn = document.getElementById("btn-activity-stop-server");
 const btnLive = document.getElementById("btn-activity-live");
 const btnHistory = document.getElementById("btn-activity-history");
 const autonomyToggleEl = document.getElementById("activity-autonomy-enabled");
@@ -36,6 +35,47 @@ const queueCountEl = document.getElementById("activity-queue-count");
 const approvalsCountEl = document.getElementById("activity-approvals-count");
 
 queueEl?.addEventListener("click", (event) => {
+    const workerButton = event.target.closest("[data-worker-task-action][data-task-id]");
+    if (workerButton) {
+        const taskId = workerButton.dataset.taskId || "";
+        const action = workerButton.dataset.workerTaskAction || "";
+        if (!taskId || !["cancel", "resume"].includes(action)) return;
+        workerButton.disabled = true;
+        workerButton.textContent = action === "cancel" ? "Stopping..." : "Resuming...";
+        const request = action === "cancel"
+            ? window.apiClient.cancelWorkerTask(taskId)
+            : window.apiClient.resumeWorkerTask(taskId, false).catch(async (err) => {
+                if (!String(err?.message || "").includes("explicit confirmation")) throw err;
+                const confirmed = window.confirm(
+                    "This task can repeat file or external changes. Resume it anyway?",
+                );
+                if (!confirmed) return null;
+                return window.apiClient.resumeWorkerTask(taskId, true);
+            });
+        request.then(refreshWorkerTasks).catch((err) => {
+            console.error(`Worker task ${action} failed:`, err);
+            window.alert(err.message || `Could not ${action} background task.`);
+            workerButton.disabled = false;
+        });
+        return;
+    }
+    const researchButton = event.target.closest("[data-research-action][data-project-id]");
+    if (researchButton) {
+        const projectId = researchButton.dataset.projectId || "";
+        const action = researchButton.dataset.researchAction || "";
+        if (!projectId || !["pause", "resume"].includes(action)) return;
+        researchButton.disabled = true;
+        researchButton.textContent = action === "pause" ? "Pausing…" : "Resuming…";
+        const request = action === "pause"
+            ? window.apiClient.pauseResearch(projectId)
+            : window.apiClient.resumeResearch(projectId);
+        request.then(refreshBackgroundResearch).catch((err) => {
+            console.error(`Research ${action} failed:`, err);
+            window.alert(err.message || `Could not ${action} research.`);
+            researchButton.disabled = false;
+        });
+        return;
+    }
     const card = event.target.closest(".activity-queue-item[data-goal-id]");
     if (!card) return;
     const goalId = card.dataset.goalId || "";
@@ -48,6 +88,8 @@ queueEl?.addEventListener("click", (event) => {
 let _cachedData = null;
 let _liveMode = true;
 let _eventCount = 0;
+let _backgroundResearch = [];
+let _workerTasks = [];
 const MAX_STREAM_EVENTS = 200;
 const MAX_PANEL_EVENTS = 8;
 const SNAPSHOT_REFRESH_MS = 15000;
@@ -168,19 +210,6 @@ autonomyToggleEl?.addEventListener("change", async () => {
         autonomyToggleEl.disabled = false;
     }
 });
-stopServerBtn?.addEventListener("click", async () => {
-    const confirmed = window.confirm("Stop the Remy server?");
-    if (!confirmed) return;
-    try {
-        stopServerBtn.disabled = true;
-        document.dispatchEvent(new CustomEvent("server-shutdown-started"));
-        await window.apiClient.shutdownServer();
-    } catch (err) {
-        console.error("Failed to stop server", err);
-        document.dispatchEvent(new CustomEvent("server-shutdown-failed"));
-        stopServerBtn.disabled = false;
-    }
-});
 decisionDossierBtn?.addEventListener("click", () => {
     openDecisionDossier().catch((err) => {
         console.error("Decision dossier failed:", err);
@@ -227,11 +256,35 @@ async function refreshAutonomyStatus() {
     }
 }
 
+async function refreshBackgroundResearch() {
+    try {
+        const data = await window.apiClient.getKnowledgeResearch();
+        _backgroundResearch = Array.isArray(data.active) ? data.active : [];
+        renderPanels();
+    } catch (err) {
+        console.error("Failed to load background research", err);
+    }
+}
+
+async function refreshWorkerTasks() {
+    try {
+        const data = await window.apiClient.getWorkerTasks("", 20);
+        _workerTasks = Array.isArray(data.tasks) ? data.tasks : [];
+        renderPanels();
+    } catch (err) {
+        console.error("Failed to load background worker tasks", err);
+    }
+}
+
 function startSnapshotPolling() {
     stopSnapshotPolling();
     _snapshotTimer = window.setInterval(() => {
         if (_liveMode && !_snapshotState.transportConnected) {
             refreshAutonomyStatus();
+        }
+        if (_liveMode) {
+            refreshBackgroundResearch();
+            refreshWorkerTasks();
         }
     }, SNAPSHOT_REFRESH_MS);
 }
@@ -642,13 +695,24 @@ function renderMissionQueueItems(items) {
     if (!items.length) {
         return `<div class="activity-live-empty">No queued mission tasks</div>`;
     }
-    return items.map((item) => `
+    return items.map((item) => {
+        const isResearch = item.type === "background_research";
+        const isWorkerTask = item.type === "background_worker_task";
+        const action = ["paused", "pausing"].includes(item.status) ? "resume" : "pause";
+        let control = isResearch
+            ? `<button class="btn btn-outline btn-mini" data-research-action="${action}" data-project-id="${esc(item.projectId)}">${action === "pause" ? "Pause safely" : "Resume"}</button>`
+            : "";
+        if (isWorkerTask && item.taskAction) {
+            control = `<button class="btn btn-outline btn-mini" data-worker-task-action="${esc(item.taskAction)}" data-task-id="${esc(item.taskId)}">${item.taskAction === "cancel" ? "Stop" : "Resume"}</button>`;
+        }
+        return `
         <article class="activity-panel-item activity-panel-mission_queue activity-queue-item${item.goalId ? " activity-queue-item-clickable" : ""}"${item.goalId ? ` data-goal-id="${esc(item.goalId)}"` : ""}>
-            <div class="activity-panel-time"><span class="activity-queue-status activity-queue-status-${esc(item.status || "pending")}">${esc(item.status || "pending")}</span></div>
+            <div class="activity-panel-time"><span class="activity-queue-status activity-queue-status-${esc(item.status || "pending")}">${esc(item.status || "pending")}</span>${control}</div>
             <div class="activity-panel-body">${esc(item.text || "")}</div>
             ${item.detail ? `<div class="activity-queue-detail">${esc(item.detail)}</div>` : ""}
         </article>
-    `).join("");
+    `;
+    }).join("");
 }
 
 function buildPlanItems() {
@@ -871,28 +935,68 @@ function buildApprovalItems() {
 }
 
 function buildMissionQueueItems() {
-    const items = Array.isArray(_snapshotState.currentMission?.pending_task_items)
+    const missionItems = Array.isArray(_snapshotState.currentMission?.pending_task_items)
         ? _snapshotState.currentMission.pending_task_items
         : [];
-    if (items.length) {
-        return items.slice(0, MAX_PANEL_EVENTS).map((item, index) => ({
+    let items = [];
+    if (missionItems.length) {
+        items = missionItems.slice(0, MAX_PANEL_EVENTS).map((item, index) => ({
             type: "mission_queue",
             text: `${index + 1}. ${item.label || ""}`,
             status: item.status || "pending",
             detail: item.detail || "",
             goalId: item.goal_id || "",
         }));
+    } else {
+        const labels = Array.isArray(_snapshotState.currentMission?.pending_task_labels)
+            ? _snapshotState.currentMission.pending_task_labels
+            : [];
+        items = labels.slice(0, MAX_PANEL_EVENTS).map((label, index) => ({
+            type: "mission_queue",
+            text: `${index + 1}. ${label}`,
+            status: "pending",
+            detail: "",
+            goalId: "",
+        }));
     }
-    const labels = Array.isArray(_snapshotState.currentMission?.pending_task_labels)
-        ? _snapshotState.currentMission.pending_task_labels
-        : [];
-    return labels.slice(0, MAX_PANEL_EVENTS).map((label, index) => ({
-        type: "mission_queue",
-        text: `${index + 1}. ${label}`,
-        status: "pending",
-        detail: "",
-        goalId: "",
-    }));
+    const researchItems = _backgroundResearch.map((project) => {
+        const checkpoint = project.durable_checkpoint || {};
+        const total = Number(project.queries_total || 0);
+        const done = Number(project.queries_done || 0);
+        return {
+            type: "background_research",
+            text: `Research: ${project.topic || project.project_id}`,
+            status: project.job_state || project.status || "queued",
+            detail: [
+                total ? `${done}/${total} queries` : "",
+                `${Number(project.findings_count || 0)} findings`,
+                checkpoint.node ? `checkpoint ${checkpoint.node}` : "",
+                checkpoint.detail || project.current_query || "",
+            ].filter(Boolean).join(" · "),
+            projectId: project.project_id || "",
+            goalId: "",
+        };
+    });
+    const workerItems = _workerTasks.slice(0, 6).map((task) => {
+        const active = Boolean(task.can_cancel);
+        const resultSummary = Array.isArray(task.results)
+            ? task.results.map((result) => `${result.role || "worker"}: ${result.status || "done"}`).join(", ")
+            : "";
+        return {
+            type: "background_worker_task",
+            text: `Delegated: ${task.goal || task.task_id}`,
+            status: task.status || "queued",
+            detail: [
+                task.current_step || task.phase || "",
+                resultSummary,
+                task.error || "",
+            ].filter(Boolean).join(" · "),
+            taskId: task.task_id || "",
+            taskAction: active ? "cancel" : task.can_resume ? "resume" : "",
+            goalId: "",
+        };
+    });
+    return [...workerItems, ...researchItems, ...items].slice(0, MAX_PANEL_EVENTS);
 }
 
 async function openMissionQueueDetail(goalId) {
@@ -1973,7 +2077,11 @@ function renderStreamEvent(event) {
 // ============== Public Entry Point ==============
 
 export async function loadActivity() {
-    await refreshAutonomyStatus();
+    await Promise.all([
+        refreshAutonomyStatus(),
+        refreshBackgroundResearch(),
+        refreshWorkerTasks(),
+    ]);
     renderPanels();
     if (_liveMode) {
         window.apiClient.connectActivity();

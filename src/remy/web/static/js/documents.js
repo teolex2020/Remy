@@ -5,7 +5,7 @@
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-let _currentDoc = null;   // { name, content, location }
+let _currentDoc = null;   // { name, content, agent_access }
 let _editMode = false;
 let _docsCache = [];
 let _reportsCache = [];
@@ -145,13 +145,19 @@ function _renderDocumentsList() {
             day: '2-digit', month: '2-digit', year: 'numeric'
         });
         const size = _formatSize(doc.size);
+        const shared = Boolean(doc.agent_access);
         return `
             <li class="docs-item" data-name="${_esc(doc.name)}">
                 <div class="docs-item-info">
                     <span class="docs-item-name">${_esc(doc.name)}</span>
-                    <span class="docs-item-meta">${date} · ${size}</span>
+                    <span class="docs-item-meta">${date} · ${size} · ${shared ? 'Agent access' : 'Private'}</span>
                 </div>
                 <div class="docs-item-actions">
+                    <button class="btn-icon doc-access-toggle ${shared ? 'shared' : ''}"
+                            title="${shared ? 'Make private' : 'Allow agent access'}"
+                            aria-label="${shared ? 'Make private' : 'Allow agent access'}"
+                            data-action="access" data-name="${_esc(doc.name)}"
+                            data-shared="${shared}">${shared ? '&#128275;' : '&#128274;'}</button>
                     <button class="btn-icon" title="View/Edit" data-action="edit" data-name="${_esc(doc.name)}">&#9998;</button>
                     <button class="btn-icon btn-danger" title="Delete" data-action="delete" data-name="${_esc(doc.name)}">&#128465;</button>
                 </div>
@@ -164,14 +170,41 @@ function _renderDocumentsList() {
     list.querySelectorAll('[data-action="delete"]').forEach(btn => {
         btn.addEventListener('click', () => _deleteDocument(btn.dataset.name));
     });
+    list.querySelectorAll('[data-action="access"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            _setDocumentAccess(btn.dataset.name, btn.dataset.shared !== 'true');
+        });
+    });
 }
 
 async function _openDocForEdit(name) {
     try {
         const data = await window.apiClient._fetch(`/api/documents/${encodeURIComponent(name)}`).then(r => r.json());
-        _openEditor({ name: data.name, content: data.content });
+        _openEditor({
+            name: data.name,
+            content: data.content,
+            agent_access: Boolean(data.agent_access),
+        });
     } catch (e) {
         alert(`Cannot load document: ${e.message}`);
+    }
+}
+
+async function _setDocumentAccess(name, agentAccess) {
+    try {
+        await window.apiClient._fetch(`/api/documents/${encodeURIComponent(name)}/access`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_access: agentAccess }),
+        });
+        if (_currentDoc?.name === name) {
+            _currentDoc.agent_access = agentAccess;
+            const checkbox = document.getElementById('docs-agent-access');
+            if (checkbox) checkbox.checked = agentAccess;
+        }
+        await _fetchAndRenderDocuments();
+    } catch (e) {
+        alert(`Access update failed: ${e.message}`);
     }
 }
 
@@ -202,10 +235,12 @@ function _openEditor(doc) {
     const btnEdit = document.getElementById('btn-docs-edit');
     const btnSave = document.getElementById('btn-docs-save');
     const btnCancel = document.getElementById('btn-docs-editor-cancel');
+    const agentAccess = document.getElementById('docs-agent-access');
 
     if (nameInput) nameInput.value = doc ? doc.name : '';
     if (nameInput) nameInput.disabled = !!doc; // can't rename existing
     if (contentArea) contentArea.value = doc ? doc.content : '';
+    if (agentAccess) agentAccess.checked = Boolean(doc?.agent_access);
 
     _setEditorMode(_editMode);
 
@@ -238,6 +273,7 @@ function _setEditorMode(editing) {
 async function _saveDocument() {
     const nameInput = document.getElementById('docs-editor-name');
     const contentArea = document.getElementById('docs-editor-content');
+    const agentAccess = document.getElementById('docs-agent-access');
     if (!nameInput || !contentArea) return;
 
     let name = nameInput.value.trim();
@@ -249,9 +285,16 @@ async function _saveDocument() {
         await window.apiClient._fetch(`/api/documents/${encodeURIComponent(name)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({
+                content,
+                agent_access: Boolean(agentAccess?.checked),
+            }),
         });
-        _currentDoc = { name, content };
+        _currentDoc = {
+            name,
+            content,
+            agent_access: Boolean(agentAccess?.checked),
+        };
         _editMode = false;
         _setEditorMode(false);
         nameInput.disabled = true;
@@ -309,6 +352,8 @@ function _renderReportsList() {
         });
         const size = _formatSize(r.size);
         const label = r.name.replace(/_/g, ' ').replace(/\.pdf$/, '');
+        const previewUrl = r.preview_url || `/api/reports/${encodeURIComponent(r.name)}`;
+        const downloadUrl = r.download_url || `${previewUrl}?download=1`;
         return `
             <li class="docs-item" data-name="${_esc(r.name)}">
                 <div class="docs-item-info">
@@ -316,7 +361,8 @@ function _renderReportsList() {
                     <span class="docs-item-meta">${date} · ${size}</span>
                 </div>
                 <div class="docs-item-actions">
-                    <a class="btn-icon" title="Download" href="/api/reports/${encodeURIComponent(r.name)}" target="_blank" download>&#8681;</a>
+                    <a class="btn-icon" title="Preview report" href="${_esc(previewUrl)}" target="_blank" rel="noopener">&#128065;</a>
+                    <a class="btn-icon" title="Download PDF" href="${_esc(downloadUrl)}" download="${_esc(r.name)}">&#8681;</a>
                     <button class="btn-icon btn-danger" title="Delete" data-action="delete-report" data-name="${_esc(r.name)}">&#128465;</button>
                 </div>
             </li>`;
