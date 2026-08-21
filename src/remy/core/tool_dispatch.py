@@ -932,7 +932,12 @@ def _execute_tool_inner(
             # their unfiltered view.
             try:
                 from remy.core.agent_tools import _apply_factual_recall_filter
-                brain_results = _apply_factual_recall_filter(brain_results)
+                # The general `recall` tool is conversation memory, not a
+                # citation surface — keep session summaries retrievable so the
+                # agent remembers prior turns instead of re-asking.
+                brain_results = _apply_factual_recall_filter(
+                    brain_results, allow_conversation_memory=True
+                )
             except Exception:
                 pass
 

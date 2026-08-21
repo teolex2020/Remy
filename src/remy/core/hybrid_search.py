@@ -24,6 +24,15 @@ _FACTUAL_FORBIDDEN_TAGS = frozenset({
     "claim:llm-unverified",   # LLM-generated claim without tool grounding
 })
 
+# Conversation-memory tags: NOT factual substrate (so they stay forbidden on a
+# citation/verify path), but they ARE legitimate answers to "what did we discuss
+# / did you already do X". The general `recall` tool exempts these so the agent
+# can remember prior turns; the factual path keeps them blocked.
+_CONVERSATION_MEMORY_TAGS = frozenset({
+    "session-summary",
+    "scratchpad",
+})
+
 
 def _is_excluded_item(item: dict) -> bool:
     return bool(_EXCLUDED_RECALL_TAGS.intersection(set(item.get("tags") or [])))
@@ -36,7 +45,7 @@ _PROMOTION_BLOCKED_TRUTH_STATUSES = frozenset({
 })
 
 
-def _is_factual_forbidden(item: dict) -> bool:
+def _is_factual_forbidden(item: dict, *, allow_conversation_memory: bool = False) -> bool:
     """Return True if this item must not be primary input on a factual path.
 
     Checks four signals:
@@ -52,9 +61,21 @@ def _is_factual_forbidden(item: dict) -> bool:
          factual surface even when admission_class alone would allow it.
 
     A record is forbidden if ANY signal fires.
+
+    ``allow_conversation_memory``: when True (the general `recall` tool, not the
+    citation/verify path), conversation-memory tags are NOT treated as a
+    forbidding signal, so the agent can recall what was previously discussed.
+    All other signals (research blobs, unverified claims, superseded/conflict)
+    still apply.
     """
-    # Tag check (A.8 gate — fast path)
-    if _FACTUAL_FORBIDDEN_TAGS.intersection(set(item.get("tags") or [])):
+    item_tags = set(item.get("tags") or [])
+
+    # Tag check (A.8 gate — fast path). On the conversation-recall surface,
+    # ignore purely-conversational tags so prior turns remain retrievable.
+    forbidden_tags = _FACTUAL_FORBIDDEN_TAGS.intersection(item_tags)
+    if allow_conversation_memory:
+        forbidden_tags = forbidden_tags - _CONVERSATION_MEMORY_TAGS
+    if forbidden_tags:
         return True
 
     meta = item.get("metadata") or {}
@@ -79,6 +100,13 @@ def _is_factual_forbidden(item: dict) -> bool:
             return True
     except Exception:
         pass  # best-effort; never block recall on import error
+
+    # Conversation-recall surface: a pure conversation-memory record that
+    # survived all the structural gates above (promotion/superseded/conflict/
+    # stale) is a legitimate "what we discussed" answer. Don't let the
+    # admission-class gate below re-block it on the recall tool.
+    if allow_conversation_memory and (_CONVERSATION_MEMORY_TAGS & item_tags):
+        return False
 
     # Admission class check (A.9 gate)
     try:

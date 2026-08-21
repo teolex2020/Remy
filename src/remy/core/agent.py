@@ -728,6 +728,65 @@ def _detect_turn_locale(user_message: str | HumanMessage) -> str:
     return "en"
 
 
+# Phrases where the model claims it is about to do work "now / in a moment"
+# and then stops — a hallucinated action. Nothing runs between turns, so this
+# is a broken promise unless a tool actually ran this turn.
+_PROMISE_PHRASE_RE = re.compile(
+    r"("
+    # English: "wait / I'll get back / let me search and report"
+    r"wait\s+(?:a\s+)?(?:moment|few\s+seconds|a\s+bit)"
+    r"|give\s+me\s+(?:a\s+)?(?:moment|few\s+seconds)"
+    r"|i['’]?ll\s+(?:get\s+back|report\s+back|search\s+and|keep\s+(?:search|look))"
+    r"|i\s+will\s+(?:continue|keep)\s+(?:search|look)"
+    r"|let\s+me\s+(?:search|check|look).{0,20}(?:and\s+(?:report|get\s+back|tell))"
+    r"|hold\s+on\s+while\s+i"
+    # Ukrainian: "зачекай / повернусь / дай кілька секунд"
+    r"|зачека(?:й|йте|ю)"
+    r"|заче?кай\s+(?:кілька|трохи|хвилин)"
+    r"|дай\s+(?:мені\s+)?(?:кілька\s+секунд|трохи\s+часу|хвилин)"
+    r"|поверну[сc]ь\s+(?:до\s+тебе|з\s+резуль)"
+    # Ukrainian "I'll continue / I've started / I'm checking … in order to give/find":
+    # future-tense promise of work that isn't happening this turn.
+    r"|я\s+(?:про|роз)?(?:довжу|почну|почав|розпочав)\s+(?:новий\s+)?пошук"
+    r"|продовж(?:у|ую)\s+(?:пошук|шукати)"
+    r"|(?:зараз|вже)\s+(?:про|з|роз)?(?:веду|роблю|йду|шукаю|почав|почну|розпочав)"
+    r".{0,40}(?:повернус|звіт|надам|зберу|знайти|надати|перевір)"
+    r"|перевіряю\s+джерел.{0,30}(?:щоб\s+)?надати"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _detect_broken_promise(text: str, tools_ran: bool) -> bool:
+    """True when the reply promises imminent work but no tool ran this turn.
+
+    Conservative: only fires on explicit "wait / I'll get back / зачекай"
+    phrasing AND zero tool activity, so a normal answer that merely contains
+    the word "wait" in another sense is not flagged.
+    """
+    if tools_ran or not text:
+        return False
+    return bool(_PROMISE_PHRASE_RE.search(text))
+
+
+def _broken_promise_note(locale: str) -> str:
+    if locale == "ua":
+        return (
+            "\n\n⚠️ Насправді я не можу працювати у фоні між повідомленнями — "
+            "щойно я зупиняюсь, хід завершено й нічого більше не виконується. "
+            "Якщо це разова задача — попроси мене зробити її, і я виконаю одразу. "
+            "Якщо це щоденний моніторинг — створи автоматизацію у вкладці "
+            "Automations, і вона працюватиме за розкладом і сама звітуватиме."
+        )
+    return (
+        "\n\n⚠️ I can't actually work in the background between messages — once I "
+        "stop, the turn is over and nothing else runs. If this is a one-off, ask me "
+        "and I'll do it right away. If it's recurring (e.g. daily monitoring), set "
+        "up an Automation in the Automations tab — it will run on schedule and "
+        "report back on its own."
+    )
+
+
 def _needs_factuality_contract(messages: list, session_log: list) -> bool:
     user_text = _latest_human_text(messages)
     text_lower = user_text.lower()
@@ -1962,6 +2021,21 @@ async def _invoke_agent_inner(
 
     updated_log = list(result.get("session_log", session_log))
 
+    # Broken-promise guard (non-streaming path). tools_ran is derived from the
+    # turn's session log: any real tool_call added beyond what we started with.
+    _tools_ran_ns = len(updated_log) > len(session_log) and any(
+        isinstance(e, dict)
+        and e.get("type") == "tool_call"
+        and not str(e.get("tool", "")).startswith("_")
+        for e in updated_log[len(session_log):]
+    )
+    if _detect_broken_promise(response_text, _tools_ran_ns):
+        logger.warning(
+            "Broken promise detected (no tools ran) session=%s — appended correction.",
+            (session_id or "?")[:8],
+        )
+        response_text += _broken_promise_note(_detect_turn_locale(user_message))
+
     # Pre-mouth epistemic governance (Phase A.7 Step 4 — brain-native mouth).
     #
     # Block path: brain decides epistemic state via decide_governance(), then
@@ -2376,20 +2450,57 @@ async def invoke_agent_stream(
         logger.info(f"Fallback extracted final_text length={len(final_text)}")
 
     # If we ended up with no text for any reason (recursion limit, tool-iteration
-    # hard-stop, streaming anomaly), surface a visible message instead of silence.
+    # hard-stop, streaming anomaly, or a model turn that only made tool calls and
+    # never wrote a reply), surface a visible message instead of silence. Pick
+    # the message from the ACTUAL signals rather than guessing "tool-call limit",
+    # which was misleading — most empty turns are not limit hits at all.
     if not final_text:
         if _recursion_hit:
             final_text = (
                 "I reached the step limit while working on your request. "
                 "Please send a follow-up message to continue where I left off."
             )
-        else:
+        elif _tools_ran or _model_had_tool_calls:
+            # The model ran/emitted tools but never produced a closing reply.
+            # This is the common case (e.g. it created a task but didn't
+            # summarize) — do NOT tell the user to rephrase; the action may
+            # well have happened.
             final_text = (
-                "I couldn't produce a final answer this turn (likely hit the "
-                "tool-call limit while searching). Please rephrase or narrow "
-                "the request."
+                "I ran some actions but didn't write a summary this turn. "
+                "Ask me what I just did, or send a follow-up to continue."
+            )
+            logger.warning(
+                "Empty final_text after tools ran (tools_ran=%s had_tool_calls=%s "
+                "has_last_ai=%s) session=%s — model produced no closing reply.",
+                _tools_ran, _model_had_tool_calls, last_ai_message is not None,
+                (session_id or "?")[:8],
+            )
+        else:
+            # No tools, no recursion hit, no text — a genuine streaming/model
+            # anomaly (empty completion). Log it so the real cause is visible.
+            final_text = (
+                "I didn't manage to generate a reply this turn. "
+                "Please try again — if it keeps happening, rephrase the request."
+            )
+            logger.warning(
+                "Empty final_text with no tools and no recursion hit "
+                "(has_last_ai=%s) session=%s — likely an empty model completion "
+                "or streaming anomaly.",
+                last_ai_message is not None, (session_id or "?")[:8],
             )
         yield {"type": "token", "content": final_text}
+
+    # Broken-promise guard: the model wrote "wait, I'll do X" but ran no tool.
+    # We can't re-invoke mid-stream, so append a truthful correction telling the
+    # user nothing is running in the background and how to actually get it done.
+    if _detect_broken_promise(final_text, _tools_ran):
+        _note = _broken_promise_note(_detect_turn_locale(user_message))
+        logger.warning(
+            "Broken promise detected (no tools ran) session=%s — appended correction.",
+            (session_id or "?")[:8],
+        )
+        yield {"type": "token", "content": _note}
+        final_text += _note
 
     # Pre-mouth epistemic governance for streaming path too.
     stream_governance_decision = None

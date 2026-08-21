@@ -166,7 +166,7 @@ def tier_of(level) -> str:
     return "core"
 
 
-def _apply_factual_recall_filter(items):
+def _apply_factual_recall_filter(items, *, allow_conversation_memory: bool = False):
     """Phase 3 Step 2: apply promotion/conflict/supersession gate to recall output.
 
     Delegates to hybrid_search._is_factual_forbidden so tag/admission-class/
@@ -175,6 +175,10 @@ def _apply_factual_recall_filter(items):
 
     Step 4: each blocked record emits a structured promotion_audit event so
     we can see *why* something didn't reach the LLM, not just that it didn't.
+
+    ``allow_conversation_memory``: pass True on the general conversation-recall
+    surface so session summaries / scratchpad (what we discussed) stay
+    retrievable; keep False on factual/citation/verify paths.
     """
     try:
         from remy.core.hybrid_search import _is_factual_forbidden
@@ -185,7 +189,7 @@ def _apply_factual_recall_filter(items):
     kept = []
     blocked = []
     for item in items:
-        if _is_factual_forbidden(item):
+        if _is_factual_forbidden(item, allow_conversation_memory=allow_conversation_memory):
             blocked.append(item)
         else:
             kept.append(item)

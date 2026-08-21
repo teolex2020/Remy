@@ -412,7 +412,7 @@ BRAIN_TOOLS = [
     # ---- Scheduler tools ----
     types.FunctionDeclaration(
         name="schedule_task",
-        description="Schedule a reminder or recurring task. ONLY use when the user EXPLICITLY asks to be reminded or to schedule something. Never create tasks on your own initiative — always wait for a direct user request like 'remind me to...', 'schedule...', 'set a reminder for...'.",
+        description="Schedule a reminder or recurring task. Use it whenever the user explicitly asks to schedule, be reminded, or do something on a repeating basis — 'remind me to...', 'schedule...', 'monitor X every day', 'do Y each morning'. For recurring requests set repeat='daily'/'weekly'/'monthly' (or cron). Act on the request and confirm; do not re-ask whether they want a reminder. Do NOT create tasks the user did not ask for on your own initiative.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -1603,6 +1603,13 @@ CORE_TOOL_NAMES = frozenset(
         "enable_tools",
         # Scratchpad
         "scratchpad",
+        # Tasks & reminders (users routinely ask to schedule/track things in
+        # chat; keeping these out of CORE made the agent unable to act on an
+        # explicit "remind me / do this every day" request).
+        "schedule_task",
+        "add_todo",
+        "list_todos",
+        "update_todo",
     }
 )
 
