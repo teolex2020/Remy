@@ -56,6 +56,10 @@ def test_build_script_uses_isolated_environment_and_all_features():
 def test_release_workflow_builds_and_uploads_installer():
     workflow = _read(Path(".github/workflows/windows-installer.yml"))
 
+    assert "workflow_dispatch:" in workflow
+    assert "pull_request:" in workflow
+    assert "      - main" in workflow
+    assert '      - "v*"' in workflow
     assert "runs-on: windows-latest" in workflow
     assert "./packaging/windows/build.ps1" in workflow
     assert "release/RemySetup.exe" in workflow
