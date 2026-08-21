@@ -42,7 +42,7 @@ try {
     }
 
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
-        throw "Version must use semantic version syntax, for example 0.8.0. Received: $Version"
+        throw "Version must use semantic version syntax, for example 0.9.0. Received: $Version"
     }
 
     if (-not (Test-Path -LiteralPath (Join-Path $VenvDir "Scripts\python.exe"))) {

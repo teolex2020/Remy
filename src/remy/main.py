@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from . import __version__
 from .config.settings import settings
 from .core.logging_config import setup_logging
 from .optional_dependencies import require_extra
@@ -97,6 +98,11 @@ def _sandbox_approve():
 def _build_parser() -> argparse.ArgumentParser:
     parser_arg = argparse.ArgumentParser(
         description="Remy - local-first AI workflow automation",
+    )
+    parser_arg.add_argument(
+        "--version",
+        action="version",
+        version=f"Remy {__version__}",
     )
     parser_arg.add_argument(
         "command",
