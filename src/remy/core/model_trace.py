@@ -13,6 +13,50 @@ def _metadata_value(meta: dict[str, Any], *keys: str) -> Any:
     return ""
 
 
+def extract_token_usage(response: Any) -> dict[str, int] | None:
+    """Normalize token usage reported by LangChain model integrations.
+
+    Providers expose usage either on ``AIMessage.usage_metadata`` or inside
+    ``response_metadata`` using OpenAI, Gemini, or Anthropic field names.
+    Returning ``None`` is intentional: callers must not present an estimate as
+    provider-reported usage.
+    """
+    direct = getattr(response, "usage_metadata", None)
+    meta = getattr(response, "response_metadata", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    usage = direct if isinstance(direct, dict) and direct else (
+        meta.get("usage_metadata") or meta.get("token_usage") or {}
+    )
+    if not isinstance(usage, dict) or not usage:
+        return None
+
+    def _integer(*keys: str) -> int:
+        for key in keys:
+            value = usage.get(key)
+            if value not in (None, ""):
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    input_tokens = _integer("input_tokens", "prompt_tokens", "prompt_token_count")
+    output_tokens = _integer(
+        "output_tokens", "completion_tokens", "candidates_tokens", "candidates_token_count"
+    )
+    total_tokens = _integer("total_tokens", "total_token_count")
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    if not total_tokens:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
 def model_call_event(
     response: Any,
     *,
@@ -55,6 +99,9 @@ def model_call_event(
         "fallback_used": fallback_used,
         "tool_calls_requested": len(tool_calls),
     }
+    token_usage = extract_token_usage(response)
+    if token_usage:
+        event["token_usage"] = token_usage
     if channel:
         event["channel"] = channel
     if duration_ms:

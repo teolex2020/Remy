@@ -58,9 +58,171 @@ async def get_research_projects():
             return api.brain.search(query="", tags=["research-project", "completed"], limit=50)
 
     completed_recs = await run_in_thread(_query)
-    completed = [serialize_completed_research_project(r) for r in completed_recs]
+    completed = []
+    seen = set()
+    for rec in completed_recs:
+        meta = rec.metadata or {}
+        project_id = str(meta.get("project_id") or "")
+        if meta.get("type") != "research_project" or meta.get("status") != "complete":
+            continue
+        if not project_id or project_id in seen:
+            continue
+        seen.add(project_id)
+        completed.append(serialize_completed_research_project(rec))
 
     return {"active": active, "completed": completed}
+
+
+@router.post("/knowledge/research/{project_id}/pause")
+async def pause_research(project_id: str):
+    """Pause safely after the current query commits."""
+    from remy.core.research_supervisor import pause_research_project
+
+    try:
+        project = await run_in_thread(pause_research_project, project_id)
+        return {"paused": True, "project_id": project_id, "job_state": project.get("job_state")}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Research project not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/knowledge/research/{project_id}/resume")
+async def resume_research(project_id: str):
+    """Resume from the last committed query checkpoint."""
+    from remy.core.research_supervisor import resume_research_project
+
+    try:
+        project = await run_in_thread(resume_research_project, project_id)
+        return {"resumed": True, "project_id": project_id, "job_state": project.get("job_state")}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Research project not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/knowledge/research/notifications")
+async def get_research_notifications(limit: int = 20):
+    """Durable completion/failure outbox for clients that were offline."""
+    from remy.core.microbrain import current_project_id
+    from remy.core.notification_router import get_recent_notifications
+    from remy.core.project_store import LEGACY_PROJECT_ID
+
+    owner_project_id = current_project_id()
+    completed = get_recent_notifications(event_type="research.complete", limit=limit)
+    failed = get_recent_notifications(event_type="research.failed", limit=limit)
+    items = [
+        item
+        for item in completed + failed
+        if (
+            str(item.get("owner_project_id") or "")
+            == owner_project_id
+            or (
+                owner_project_id == LEGACY_PROJECT_ID
+                and not item.get("owner_project_id")
+            )
+        )
+        and not item.get("acknowledged")
+        and not item.get("resolved")
+    ]
+    items = sorted(items, key=lambda item: float(item.get("timestamp", 0) or 0), reverse=True)
+    return {"items": items[:limit]}
+
+
+@router.get("/knowledge/learning-reviews")
+async def get_learning_reviews(status: str = "pending", limit: int = 100):
+    """List post-turn learning candidates. They are inert until approved."""
+    from remy.core.learning_review import list_learning_reviews
+
+    normalized = status.strip().lower()
+    if normalized not in {"pending", "approved", "rejected", "all"}:
+        raise HTTPException(status_code=400, detail="Unsupported review status")
+    return {
+        "items": list_learning_reviews(
+            status=None if normalized == "all" else normalized,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/knowledge/execution-attempts")
+async def get_execution_attempts(state: str = "", kind: str = "", limit: int = 100):
+    """Expose durable background/worker attempts to the local operator."""
+    from remy.core.execution_ledger import TERMINAL_STATES, ACTIVE_STATES, get_execution_ledger
+
+    normalized_state = state.strip().lower()
+    if normalized_state and normalized_state not in TERMINAL_STATES | ACTIVE_STATES:
+        raise HTTPException(status_code=400, detail="Unsupported attempt state")
+    return {
+        "items": await run_in_thread(
+            get_execution_ledger().list_attempts,
+            state=normalized_state,
+            kind=kind.strip(),
+            limit=limit,
+        )
+    }
+
+
+@router.get("/knowledge/transcripts/search")
+async def search_transcripts(q: str, session_id: str = "", limit: int = 20):
+    """Search exact conversation text using the local FTS5 index."""
+    if not q.strip():
+        return {"items": []}
+    from remy.core.transcript_store import get_transcript_store
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import LEGACY_PROJECT_ID
+
+    project_id = current_project_id()
+    return {
+        "items": await run_in_thread(
+            get_transcript_store().search,
+            q,
+            session_id=session_id.strip(),
+            owner_project_id=project_id,
+            include_legacy_unscoped=project_id == LEGACY_PROJECT_ID,
+            limit=limit,
+        )
+    }
+
+
+@router.post("/knowledge/learning-reviews/{review_id}/decision")
+async def decide_learning_review_route(review_id: str, body: dict):
+    """Approve a candidate into verified memory, or reject it without deletion."""
+    from remy.core.agent_tools import Level, brain, brain_lock
+    from remy.core.learning_review import decide_learning_review, list_learning_reviews
+
+    decision = str(body.get("decision") or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="decision must be approve or reject")
+    matches = [item for item in list_learning_reviews(status=None, limit=500) if item.get("review_id") == review_id]
+    if not matches:
+        raise HTTPException(status_code=404, detail="Learning review not found")
+    item = matches[0]
+    if item.get("status") != "pending":
+        return item
+    record_id = ""
+    if decision == "approve":
+        with brain_lock:
+            record = brain.store(
+                content=item["candidate_text"],
+                level=Level.DOMAIN,
+                tags=["user-confirmed", "learning-review", item.get("category", "learning")],
+                metadata={
+                    "type": "approved_learning",
+                    "verified": True,
+                    "source": "explicit-user-approval",
+                    "review_id": review_id,
+                    "session_id": item.get("session_id", ""),
+                },
+            )
+            brain.flush()
+        record_id = str(record.id)
+    decided = decide_learning_review(
+        review_id,
+        status="approved" if decision == "approve" else "rejected",
+        memory_record_id=record_id,
+    )
+    return decided
 
 
 # ============== METRICS ==============

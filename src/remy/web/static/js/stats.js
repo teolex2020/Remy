@@ -49,7 +49,17 @@ export function stopHealthRefresh() {
 }
 
 function renderStats(cardsEl, metricsEl, statsData, metricsData, execData, evalData) {
+    const scope = statsData.scope || metricsData.scope || execData.scope || evalData.scope || {};
+    const projectName = scope.project_name || "Active project";
+    const observedProjectIds = [
+        statsData.scope?.project_id,
+        metricsData.scope?.project_id,
+        execData.scope?.project_id,
+        evalData.scope?.project_id,
+    ].filter(Boolean);
+    const scopeMismatch = new Set(observedProjectIds).size > 1;
     const usage = statsData.usage || {};
+    const usageScope = statsData.usage_scope || { kind: "server", label: "All Remy projects" };
     const lifetime = usage.lifetime || {};
     const session = usage.session || {};
     const lifetimeTotalTokens = lifetime.total_tokens ?? usage.total_tokens ?? 0;
@@ -70,6 +80,15 @@ function renderStats(cardsEl, metricsEl, statsData, metricsData, execData, evalD
     const blockedPct = Math.round((metrics.blocked_rate || 0) * 100);
 
     cardsEl.innerHTML = `
+        <div class="stats-scope-bar ${scopeMismatch ? "stats-scope-warning" : ""}">
+            <div>
+                <span class="stats-scope-kicker">Project analytics</span>
+                <strong>${escapeHtml(projectName)}</strong>
+            </div>
+            <span>${scopeMismatch
+                ? "Project changed while metrics were loading. Refreshing will synchronize the view."
+                : "Tasks, runs, memory quality, and records belong only to this MicroBrain."}</span>
+        </div>
         <div class="dash-grid">
 
             <!-- Hero: success rate -->
@@ -111,9 +130,9 @@ function renderStats(cardsEl, metricsEl, statsData, metricsData, execData, evalD
             <!-- Tokens -->
             <div class="dash-card">
                 <div class="dash-card-icon">&#128201;</div>
-                <div class="dash-card-label">Tokens used</div>
+                <div class="dash-card-label">Remy-wide tokens</div>
                 <div class="dash-card-big">${formatTokensShort(lifetimeTotalTokens)}</div>
-                <div class="dash-card-sub">lifetime · ${formatTokensShort(sessionTotalTokens)} this session</div>
+                <div class="dash-card-sub">${escapeHtml(usageScope.label || "All Remy projects")} · ${formatTokensShort(sessionTotalTokens)} this session</div>
             </div>
 
         </div>

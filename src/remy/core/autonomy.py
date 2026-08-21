@@ -1357,6 +1357,13 @@ class AutonomousLoop:
         except Exception:
             pass  # Logger setup is non-critical
 
+        from remy.core.microbrain import current_project_id
+        from remy.core.project_store import get_project_store
+
+        owner = get_project_store().require_project(current_project_id())
+        self.owner_project_id = owner.project_id
+        self.brain_id = owner.brain_id
+
         self.budget = ResourceBudget(
             daily_limit=settings.AUTONOMY_DAILY_TOKEN_LIMIT,
             hourly_limit=settings.AUTONOMY_HOURLY_TOKEN_LIMIT,
@@ -1412,6 +1419,13 @@ class AutonomousLoop:
         self._cycle_count: int = 0
 
     async def start(self):
+        """Run this autonomy instance only inside its creating MicroBrain."""
+        from remy.core.microbrain import bind_project
+
+        with bind_project(self.owner_project_id):
+            await self._start_owned()
+
+    async def _start_owned(self):
         """Start the autonomous loop."""
         from remy.core.logging_config import ctx_channel, ctx_session_id
         ctx_session_id.set(self.session_id)
@@ -2024,7 +2038,7 @@ class AutonomousLoop:
         event_bus.emit("cycle_delay", {"delay_sec": delay, "reason": f"failure_{failures}"})
         return delay
 
-    async def _cycle(self):
+    async def _cycle_impl(self):
         """One cycle of autonomous decision-making."""
         # -1. Daily digest (fire-and-forget, non-blocking)
         try:
@@ -2182,6 +2196,42 @@ class AutonomousLoop:
                 "session_id": self.session_id,
                 "budget": self.budget.to_dict(),
             })
+
+    async def _cycle(self):
+        """Run one autonomy cycle with a durable attempt and terminal receipt."""
+        import uuid
+
+        from remy.core.execution_ledger import get_execution_ledger
+
+        ledger = get_execution_ledger()
+        attempt = ledger.claim(
+            kind="autonomy_cycle",
+            job_id=f"{self.session_id}:{uuid.uuid4().hex}",
+            idempotency_class="side_effecting",
+            owner_project_id=self.owner_project_id,
+            brain_id=self.brain_id,
+            session_id=self.session_id,
+            channel="autonomous",
+            metadata={"cycle": len(self.action_log) + 1},
+        )
+        attempt_id = attempt["attempt_id"]
+        ledger.mark_running(attempt_id)
+        failures_before = self.consecutive_failures
+        try:
+            result = await self._cycle_impl()
+            state = "completed_with_limits" if self.consecutive_failures > failures_before else "completed"
+            ledger.finish(
+                attempt_id,
+                state,
+                metadata={"scheduler_reason": self._last_scheduler_reason},
+            )
+            return result
+        except asyncio.CancelledError:
+            ledger.finish(attempt_id, "cancelled", error="Autonomy cycle cancelled")
+            raise
+        except Exception as exc:
+            ledger.finish(attempt_id, "failed", error=str(exc))
+            raise
 
     @staticmethod
     def _coerce_research_progress_evaluation(

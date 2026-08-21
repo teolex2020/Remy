@@ -54,6 +54,10 @@ class MemoryRecord:
     score: float = 0.0             # Recall relevance score
     level: str = ""                # Raw Aura level name
     timestamp: float = 0.0
+    valid_from: float | None = None
+    valid_until: float | None = None
+    superseded_at: float | None = None
+    namespace: str = "default"
 
     @property
     def record_type(self) -> str:
@@ -89,6 +93,9 @@ class MemoryBackend(Protocol):
         metadata: dict[str, Any] | None = None,
         memory_class: MemoryClass = MemoryClass.WORKING,
         deduplicate: bool = False,
+        valid_from: float | None = None,
+        valid_until: float | None = None,
+        namespace: str | None = None,
     ) -> str:
         """Store a record. Returns record ID.
 
@@ -99,6 +106,29 @@ class MemoryBackend(Protocol):
         (outcome/failure/goal/research) where identical content is a true
         repeat, not a distinct fact.
         """
+        ...
+
+    def recall_as_of(
+        self,
+        query: str,
+        timestamp: float,
+        limit: int = 20,
+        namespace: str | None = None,
+    ) -> list[MemoryRecord]:
+        """Recall the memory versions valid at a historical business time."""
+        ...
+
+    def supersede(
+        self,
+        record_id: str,
+        new_content: str,
+        *,
+        effective_at: float | None = None,
+        tags: list[str] | None = None,
+        memory_class: MemoryClass | None = None,
+        namespace: str | None = None,
+    ) -> str:
+        """Replace a record while preserving its temporal version chain."""
         ...
 
     def capture_consequence(
@@ -218,11 +248,16 @@ class AuraMemoryBackend:
         """Convert Aura record to MemoryRecord."""
         from remy.core.memory_policy import infer_semantic_type
 
-        content = getattr(record, "content", "") or ""
-        tags = list(getattr(record, "tags", []) or [])
-        metadata = dict(getattr(record, "metadata", {}) or {})
-        level_name = str(getattr(record, "level", ""))
-        rec_id = getattr(record, "id", "") or str(getattr(record, "record_id", ""))
+        def value(name: str, default=None):
+            if isinstance(record, dict):
+                return record.get(name, default)
+            return getattr(record, name, default)
+
+        content = value("content", "") or ""
+        tags = list(value("tags", []) or [])
+        metadata = dict(value("metadata", {}) or {})
+        level_name = str(value("level", ""))
+        rec_id = value("id", "") or str(value("record_id", ""))
 
         # Infer memory class from level
         mc = MemoryClass.WORKING
@@ -237,7 +272,7 @@ class AuraMemoryBackend:
         semantic_type = infer_semantic_type(
             explicit=metadata.get("semantic_type"),
             tags=tags,
-            level=getattr(record, "level", None),
+            level=value("level"),
             content=content,
         )
         metadata.setdefault("semantic_type", semantic_type)
@@ -249,9 +284,13 @@ class AuraMemoryBackend:
             metadata=metadata,
             memory_class=mc,
             semantic_type=semantic_type,
-            score=score,
+            score=float(value("score", score) or score),
             level=level_name,
-            timestamp=float(metadata.get("created_at", 0)),
+            timestamp=float(value("created_at", metadata.get("created_at", 0)) or 0),
+            valid_from=value("valid_from"),
+            valid_until=value("valid_until"),
+            superseded_at=value("superseded_at"),
+            namespace=str(value("namespace", metadata.get("namespace", "default")) or "default"),
         )
 
     # --- MemoryBackend implementation ---
@@ -263,6 +302,9 @@ class AuraMemoryBackend:
         metadata: dict[str, Any] | None = None,
         memory_class: MemoryClass = MemoryClass.WORKING,
         deduplicate: bool = False,
+        valid_from: float | None = None,
+        valid_until: float | None = None,
+        namespace: str | None = None,
     ) -> str:
         from remy.core.memory_policy import infer_semantic_type
 
@@ -282,6 +324,9 @@ class AuraMemoryBackend:
                 metadata=meta,
                 semantic_type=semantic_type,
                 deduplicate=deduplicate,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                namespace=namespace,
             )
         except TypeError:
             # Older Aura surface without the deduplicate kwarg — fail safe to a
@@ -293,6 +338,63 @@ class AuraMemoryBackend:
                 semantic_type=semantic_type,
             )
         return getattr(result, "id", str(result))
+
+    def recall_as_of(
+        self,
+        query: str,
+        timestamp: float,
+        limit: int = 20,
+        namespace: str | None = None,
+    ) -> list[MemoryRecord]:
+        raw = self._aura.recall_as_of(
+            query,
+            timestamp,
+            top_k=limit,
+            namespace=namespace,
+        )
+        return [self._wrap_record(item) for item in raw][:limit]
+
+    def supersede(
+        self,
+        record_id: str,
+        new_content: str,
+        *,
+        effective_at: float | None = None,
+        tags: list[str] | None = None,
+        memory_class: MemoryClass | None = None,
+        namespace: str | None = None,
+    ) -> str:
+        result = self._aura.supersede(
+            record_id,
+            new_content,
+            level=self._to_level(memory_class) if memory_class else None,
+            tags=tags,
+            namespace=namespace,
+            effective_at=effective_at,
+        )
+        return str(getattr(result, "id", result))
+
+    def explain_recall(
+        self,
+        query: str,
+        limit: int = 10,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        return self._aura.explain_recall(query, top_k=limit, namespace=namespace)
+
+    def build_context_capsule(
+        self,
+        purpose: str,
+        token_budget: int = 2000,
+        namespace: str | None = None,
+        valid_at: float | None = None,
+    ) -> dict[str, Any]:
+        return self._aura.build_context_capsule(
+            purpose,
+            token_budget=token_budget,
+            namespace=namespace,
+            valid_at=valid_at,
+        )
 
     def _resolve_existing_record_link(self, relation: str, logical_id: str) -> str:
         """Resolve a Remy runtime id to an existing Aura record id when possible."""

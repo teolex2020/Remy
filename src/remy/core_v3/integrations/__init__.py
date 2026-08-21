@@ -12,6 +12,15 @@ from .contracts import (
 )
 from .gateway import GatewayOutcome, IntegrationGateway
 from .health import IntegrationHealthBook
+from .plugin_context import (
+    DisposeFailure,
+    DisposeReport,
+    PluginContextDisposed,
+    PluginResourceConflict,
+    PluginResourceKind,
+    PluginResourceRecord,
+    PluginResourceRegistry,
+)
 from .registry import IntegrationRegistry
 
 __all__ = [
@@ -27,6 +36,13 @@ __all__ = [
     "IntegrationRegistry",
     "PluginCapability",
     "PluginContext",
+    "PluginContextDisposed",
     "PluginRequest",
+    "PluginResourceConflict",
+    "PluginResourceKind",
+    "PluginResourceRecord",
+    "PluginResourceRegistry",
     "PluginResult",
+    "DisposeFailure",
+    "DisposeReport",
 ]

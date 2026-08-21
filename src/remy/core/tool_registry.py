@@ -138,8 +138,21 @@ class ToolRegistry:
         if not tool_path.exists():
             return f"Tool file missing: {tool['file']}"
 
+        from remy.core.project_store import local_brain_path
+
+        try:
+            scoped_brain_path = str(local_brain_path())
+        except RuntimeError:
+            # Provider-neutral sandbox tools may still run. A tool that asks
+            # for a direct Aura object will receive the explicit no-path error
+            # from the isolated runner instead of opening Legacy memory.
+            scoped_brain_path = None
         start = time.perf_counter()
-        success, result = execute_tool(tool_path, args, brain_path=str(settings.AURA_BRAIN_PATH))
+        success, result = execute_tool(
+            tool_path,
+            args,
+            brain_path=scoped_brain_path,
+        )
         duration_ms = int((time.perf_counter() - start) * 1000)
 
         # Update the in-memory tool entry directly so callers/tests holding the

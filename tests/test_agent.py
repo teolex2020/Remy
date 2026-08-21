@@ -4,7 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 
 from remy.core.agent import (
     AgentState,
@@ -18,6 +18,7 @@ from remy.core.agent import (
     call_model,
     check_session_insights,
     compact_history,
+    invoke_agent_stream,
     should_continue,
 )
 
@@ -47,6 +48,135 @@ def patch_brain_and_registry(mock_brain, tmp_path):
 
 
 # ============== GRAPH STRUCTURE ==============
+
+
+@pytest.mark.asyncio
+async def test_stream_exposes_and_commits_provisional_model_text(monkeypatch):
+    """A final model call is visible token-by-token before it completes."""
+
+    class FakeGraph:
+        async def astream_events(self, state, version, config):
+            yield {"event": "on_chat_model_start", "name": "model", "data": {}}
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "model",
+                "data": {"chunk": AIMessageChunk(content="Hello")},
+            }
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "model",
+                "data": {"chunk": AIMessageChunk(content=" world")},
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "model",
+                "data": {"output": {"messages": [AIMessage(content="Hello world")]}},
+            }
+
+    monkeypatch.setattr("remy.core.agent.build_agent_graph", lambda channel: FakeGraph())
+    monkeypatch.setattr("remy.core.agent.check_session_insights", lambda session_id, messages: messages)
+
+    events = [
+        event
+        async for event in invoke_agent_stream(
+            user_message="Say hello",
+            session_id="stream-visible",
+            channel="desktop",
+            session_log=[],
+            history=[],
+        )
+    ]
+
+    provisional = [event["content"] for event in events if event["type"] == "provisional_token"]
+    assert provisional == ["Hello", " world"]
+    assert sum(event["type"] == "provisional_commit" for event in events) == 1
+    assert not any(event["type"] == "provisional_reset" for event in events)
+    final = next(event for event in events if event["type"] == "final")
+    assert final["text"].startswith("Hello world")
+
+
+@pytest.mark.asyncio
+async def test_stream_retracts_intermediate_draft_before_tool_call(monkeypatch):
+    """Text from a planning call disappears if that call chooses a tool."""
+
+    class FakeGraph:
+        async def astream_events(self, state, version, config):
+            yield {"event": "on_chat_model_start", "name": "model", "data": {}}
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "model",
+                "data": {"chunk": AIMessageChunk(content="I will search")},
+            }
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "model",
+                "data": {
+                    "chunk": AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[{
+                            "name": "web_search",
+                            "args": "{}",
+                            "id": "call-1",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }],
+                    )
+                },
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "model",
+                "data": {
+                    "output": {
+                        "messages": [AIMessage(
+                            content="I will search",
+                            tool_calls=[{
+                                "id": "call-1",
+                                "name": "web_search",
+                                "args": {},
+                            }],
+                        )]
+                    }
+                },
+            }
+            yield {"event": "on_tool_start", "name": "web_search", "data": {"input": {}}}
+            yield {"event": "on_tool_end", "name": "web_search", "data": {"output": "result"}}
+            yield {"event": "on_chat_model_start", "name": "model", "data": {}}
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "model",
+                "data": {"chunk": AIMessageChunk(content="Verified answer")},
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "model",
+                "data": {"output": {"messages": [AIMessage(content="Verified answer")]}},
+            }
+
+    monkeypatch.setattr("remy.core.agent.build_agent_graph", lambda channel: FakeGraph())
+    monkeypatch.setattr("remy.core.agent.check_session_insights", lambda session_id, messages: messages)
+
+    events = [
+        event
+        async for event in invoke_agent_stream(
+            user_message="Research this",
+            session_id="stream-tool-reset",
+            channel="desktop",
+            session_log=[],
+            history=[],
+        )
+    ]
+
+    event_types = [event["type"] for event in events]
+    first_draft = event_types.index("provisional_token")
+    reset = event_types.index("provisional_reset")
+    tool_start = event_types.index("tool_start")
+    commit = event_types.index("provisional_commit")
+    assert first_draft < reset < tool_start < commit
+    visible_chunks = [event["content"] for event in events if event["type"] == "provisional_token"]
+    assert visible_chunks == ["I will search", "Verified answer"]
+    final = next(event for event in events if event["type"] == "final")
+    assert final["text"].startswith("Verified answer")
 
 
 class TestGraphStructure:
@@ -213,6 +343,57 @@ class TestFactualityContract:
 
 
 class TestPiiShield:
+
+    def test_interactive_turn_honors_selected_model_when_optimization_is_off(self, monkeypatch):
+        from remy.config.settings import settings
+
+        monkeypatch.setattr(settings, "PII_SHIELD_ENABLED", False)
+        routing_calls = []
+        monkeypatch.setattr(
+            "remy.core.adaptive_model_router.build_adaptive_model_routing",
+            lambda **kwargs: routing_calls.append(kwargs) or {"preferred_model": "other-model"},
+        )
+        monkeypatch.setattr(
+            "remy.core.llm.call_llm",
+            lambda messages, **kwargs: AIMessage(content="selected model response"),
+        )
+        state = AgentState(
+            messages=[HumanMessage(content="Analyze this long request")],
+            session_id="selected-model-test",
+            channel="desktop",
+            session_log=[],
+            model_routing_enabled=False,
+        )
+
+        result = call_model(state)
+
+        assert result["messages"][0].content == "selected model response"
+        assert routing_calls == []
+
+    def test_interactive_turn_routes_only_when_optimization_is_on(self, monkeypatch):
+        from remy.config.settings import settings
+
+        monkeypatch.setattr(settings, "PII_SHIELD_ENABLED", False)
+        routing_calls = []
+        monkeypatch.setattr(
+            "remy.core.adaptive_model_router.build_adaptive_model_routing",
+            lambda **kwargs: routing_calls.append(kwargs) or {"preferred_model": "optimized-model"},
+        )
+        monkeypatch.setattr(
+            "remy.core.llm.call_llm",
+            lambda messages, **kwargs: AIMessage(content="optimized response"),
+        )
+        state = AgentState(
+            messages=[HumanMessage(content="Analyze this long request")],
+            session_id="optimized-model-test",
+            channel="desktop",
+            session_log=[],
+            model_routing_enabled=True,
+        )
+
+        call_model(state)
+
+        assert len(routing_calls) == 1
 
     def test_call_model_shields_llm_payload_and_restores_response(self, monkeypatch):
         from remy.config.settings import settings

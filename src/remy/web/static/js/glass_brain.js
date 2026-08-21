@@ -11,6 +11,16 @@ let _container = null;
 let _activeTab = "graph";
 let _fg3dLoaded = false;
 let _lastGraphHadNodes = false;
+let _allGraphData = { nodes: [], links: [] };
+let _graphAudit = {};
+let _selectedNodeId = "";
+let _resizeHandler = null;
+let _filterTimer = null;
+let _highlightNodeIds = new Set();
+let _highlightLinkKeys = new Set();
+const _localFocus = { id: "", depth: 0 };
+const _graphFilters = { query: "", level: "all", hideIsolated: false, edgeLimit: 2000 };
+const _LAYOUT_STORAGE_KEY = "remy_glass_brain_layout_v1";
 const _REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 // ── Thermal colour gradient (identical to graph.js) ───────────────────────────
@@ -169,7 +179,7 @@ async function _loadGraph(options = {}) {
         for (const bn of beliefNodes) {
             const parts = (bn.key || "").split(":");
             const tagSegment = parts[1] || "";
-            const tags = tagSegment.split(",").map(t => t.trim()).filter(Boolean);
+            const tags = tagSegment.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
             const temp = rescale(bn.temp);
             for (const tag of tags) {
                 const prev = tagTempMap.get(tag) || 0;
@@ -178,14 +188,21 @@ async function _loadGraph(options = {}) {
         }
 
         // Assign temperature to each memory node via its tags
+        const savedLayout = _readSavedLayout();
+        let thermallyMatched = 0;
         const nodes = memNodes.map(n => {
             const nodeTags = (n.tags || []).map(t => String(t).trim().toLowerCase());
             let temp = 0;
+            let thermalMatched = false;
             for (const tag of nodeTags) {
+                if (!tagTempMap.has(tag)) continue;
+                thermalMatched = true;
                 const t = tagTempMap.get(tag) || 0;
                 if (t > temp) temp = t;
             }
+            if (thermalMatched) thermallyMatched += 1;
             const displayTemp = temp || 0.04; // cold nodes show blue
+            const saved = savedLayout[n.id];
             return {
                 id:        n.id,
                 _label:    (n.label || "").slice(0, 60),
@@ -193,20 +210,34 @@ async function _loadGraph(options = {}) {
                 _level:    n.level || "",
                 _tags:     n.tags || [],
                 _strength: n.strength || 0.1,
+                _importance: n.importance || 0,
+                _excerpt: n.excerpt || n.label || "",
+                _type: n.record_type || "memory",
+                _timestamp: n.timestamp || "",
+                _thermalMatched: thermalMatched,
                 _color:    _thermalColorHex(displayTemp),
+                ...(saved && Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.z)
+                    ? { x: saved.x, y: saved.y, z: saved.z }
+                    : {}),
             };
         });
 
-        // Cap edges at 2000 strongest
-        const MAX_EDGES = 2000;
         const links = memEdges
             .sort((a, b) => (b.weight || 0) - (a.weight || 0))
-            .slice(0, MAX_EDGES)
             .map(e => ({ source: e.source, target: e.target, _weight: e.weight || 0.1 }));
 
         const hotCount = nodes.filter(n => n._temp > 0.6).length;
-
-        await _render3d({ nodes, links }, {
+        _allGraphData = { nodes, links };
+        _graphAudit = {
+            ...(graphData.coverage || {}),
+            hotCount,
+            thermallyMatched,
+            thermalUnmatched: Math.max(0, nodes.length - thermallyMatched),
+            beliefNodes: beliefNodes.length,
+            weakenedCount: plasticityStats.weakened,
+            prunedCount: plasticityStats.pruned,
+        };
+        await _render3d(_filteredGraphData(), {
             hotCount,
             weakenedCount: plasticityStats.weakened,
             prunedCount:   plasticityStats.pruned,
@@ -247,6 +278,154 @@ async function _load3dLib() {
     _fg3dLoaded = true;
 }
 
+function _endpointId(value) {
+    return typeof value === "object" && value ? value.id : value;
+}
+
+function _linkKey(source, target) {
+    return [String(_endpointId(source)), String(_endpointId(target))].sort().join("::");
+}
+
+function _readSavedLayout() {
+    try {
+        const value = JSON.parse(localStorage.getItem(_LAYOUT_STORAGE_KEY) || "{}");
+        return value && typeof value === "object" ? value : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function _saveCurrentLayout() {
+    if (!_graph3d) return;
+    try {
+        const positions = {};
+        for (const node of _graph3d.graphData().nodes.slice(0, 10000)) {
+            if (![node.x, node.y, node.z].every(Number.isFinite)) continue;
+            positions[node.id] = {
+                x: Math.round(node.x * 100) / 100,
+                y: Math.round(node.y * 100) / 100,
+                z: Math.round(node.z * 100) / 100,
+            };
+        }
+        localStorage.setItem(_LAYOUT_STORAGE_KEY, JSON.stringify(positions));
+    } catch (_) {}
+}
+
+function _localNodeIds(focusId, depth) {
+    if (!focusId || depth < 1) return null;
+    const visited = new Set([focusId]);
+    let frontier = new Set([focusId]);
+    for (let hop = 0; hop < depth; hop++) {
+        const next = new Set();
+        for (const link of _allGraphData.links) {
+            const source = _endpointId(link.source);
+            const target = _endpointId(link.target);
+            if (frontier.has(source) && !visited.has(target)) next.add(target);
+            if (frontier.has(target) && !visited.has(source)) next.add(source);
+        }
+        for (const id of next) visited.add(id);
+        frontier = next;
+        if (!frontier.size) break;
+    }
+    return visited;
+}
+
+function _filteredGraphData() {
+    const query = _graphFilters.query.trim().toLowerCase();
+    const localIds = _localNodeIds(_localFocus.id, _localFocus.depth);
+    const connected = new Set();
+    for (const link of _allGraphData.links) {
+        connected.add(_endpointId(link.source));
+        connected.add(_endpointId(link.target));
+    }
+    const nodes = _allGraphData.nodes.filter(node => {
+        if (localIds && !localIds.has(node.id)) return false;
+        if (_graphFilters.level !== "all" && node._level !== _graphFilters.level) return false;
+        if (_graphFilters.hideIsolated && !connected.has(node.id)) return false;
+        if (!query) return true;
+        const haystack = [
+            node._label, node._excerpt, node._level, node._type, ...(node._tags || []),
+        ].join(" ").toLowerCase();
+        return haystack.includes(query);
+    });
+    const ids = new Set(nodes.map(node => node.id));
+    let links = _allGraphData.links.filter(link => (
+        ids.has(_endpointId(link.source)) && ids.has(_endpointId(link.target))
+    ));
+    if (Number.isFinite(_graphFilters.edgeLimit)) {
+        links = links.slice(0, _graphFilters.edgeLimit);
+    }
+    return {
+        nodes,
+        links: links.map(link => ({
+            source: _endpointId(link.source),
+            target: _endpointId(link.target),
+            _weight: link._weight,
+        })),
+    };
+}
+
+function _applyGraphFilters() {
+    if (!_graph3d) return;
+    const data = _filteredGraphData();
+    if (_selectedNodeId && !data.nodes.some(node => node.id === _selectedNodeId)) {
+        _selectedNodeId = "";
+    }
+    _graph3d.graphData(data);
+    _setGraphHighlight(
+        data.nodes.find(node => node.id === _selectedNodeId) || null
+    );
+    _updateGraphHud(data);
+    _updateLocalIndicator();
+    if (!_selectedNodeId) _hideNodeDetail();
+    window.setTimeout(() => _graph3d?.zoomToFit(350, 42), 80);
+}
+
+function _baseNodeColor(node) {
+    return "#" + node._color.toString(16).padStart(6, "0");
+}
+
+function _nodeDisplayColor(node) {
+    if (!_highlightNodeIds.size) return _baseNodeColor(node);
+    if (node.id === _selectedNodeId) return "#f8fafc";
+    return _highlightNodeIds.has(node.id) ? _baseNodeColor(node) : "#111c2c";
+}
+
+function _linkDisplayColor(link) {
+    if (!_highlightLinkKeys.size) {
+        const alpha = Math.max(0.06, Math.min(0.28, (link._weight || 0.1) * 0.35));
+        return `rgba(148,163,184,${alpha})`;
+    }
+    return _highlightLinkKeys.has(_linkKey(link.source, link.target))
+        ? "rgba(147,197,253,0.9)"
+        : "rgba(51,65,85,0.025)";
+}
+
+function _linkDisplayWidth(link) {
+    const base = Math.max(0.15, (link._weight || 0.1) * 0.5);
+    if (!_highlightLinkKeys.size) return base;
+    return _highlightLinkKeys.has(_linkKey(link.source, link.target)) ? Math.max(1.4, base * 2.5) : 0.08;
+}
+
+function _setGraphHighlight(node) {
+    _highlightNodeIds = new Set();
+    _highlightLinkKeys = new Set();
+    if (node && _graph3d) {
+        _highlightNodeIds.add(node.id);
+        for (const link of _graph3d.graphData().links) {
+            const source = _endpointId(link.source);
+            const target = _endpointId(link.target);
+            if (source !== node.id && target !== node.id) continue;
+            _highlightNodeIds.add(source);
+            _highlightNodeIds.add(target);
+            _highlightLinkKeys.add(_linkKey(source, target));
+        }
+    }
+    _graph3d?.nodeColor(_nodeDisplayColor);
+    _graph3d?.linkColor(_linkDisplayColor);
+    _graph3d?.linkWidth(_linkDisplayWidth);
+}
+
 async function _render3d({ nodes, links }, stats) {
     const gc = document.getElementById("gb-graph-container");
     if (!gc) return;
@@ -269,9 +448,12 @@ async function _render3d({ nodes, links }, stats) {
         .warmupTicks(40)
         .onEngineStop((() => {
             let done = false;
-            return () => { if (!done && _graph3d) { done = true; _graph3d.zoomToFit(400, 30); } };
+            return () => {
+                _saveCurrentLayout();
+                if (!done && _graph3d) { done = true; _graph3d.zoomToFit(400, 30); }
+            };
         })())
-        .nodeColor(n => "#" + n._color.toString(16).padStart(6, "0"))
+        .nodeColor(_nodeDisplayColor)
         .nodeVal(n => {
             const base = { IDENTITY: 5, DOMAIN: 3, DECISIONS: 2 }[n._level] ?? 1.5;
             const heat = n._temp > 0.6 ? 1.5 : 1.0;
@@ -280,12 +462,8 @@ async function _render3d({ nodes, links }, stats) {
         .nodeOpacity(0.92)
         .nodeResolution(12)
         .nodeLabel(n => `${n._label} | Temp: ${(n._temp * 100).toFixed(0)}%`)
-        .linkColor(l => {
-            const w = l._weight || 0.1;
-            const a = Math.max(0.06, Math.min(0.28, w * 0.35));
-            return `rgba(148,163,184,${a})`;
-        })
-        .linkWidth(l => Math.max(0.15, (l._weight || 0.1) * 0.5))
+        .linkColor(_linkDisplayColor)
+        .linkWidth(_linkDisplayWidth)
         .linkOpacity(1)
         .linkCurvature(0.08)
         .linkDirectionalParticles(l => (l._weight || 0) > 0.6 ? 1 : 0)
@@ -294,39 +472,226 @@ async function _render3d({ nodes, links }, stats) {
         .linkDirectionalParticleColor(() => "#93c5fd")
         .onNodeHover((node, prev, event) => {
             gc.style.cursor = node ? "pointer" : "default";
-            if (node && event) _showTooltip(node, event);
-            else _hideTooltip();
+            if (node) {
+                _setGraphHighlight(node);
+                if (event) _showTooltip(node, event);
+            } else {
+                _hideTooltip();
+                _setGraphHighlight(
+                    _graph3d?.graphData().nodes.find(item => item.id === _selectedNodeId) || null
+                );
+            }
+        })
+        .onNodeClick(node => {
+            _selectedNodeId = node.id;
+            _setGraphHighlight(node);
+            _showNodeDetail(node);
+            const distance = 110;
+            const length = Math.hypot(node.x || 0, node.y || 0, node.z || 0) || 1;
+            const ratio = 1 + distance / length;
+            _graph3d?.cameraPosition(
+                { x: (node.x || 0) * ratio, y: (node.y || 0) * ratio, z: (node.z || 0) * ratio },
+                node,
+                700,
+            );
+        })
+        .onBackgroundClick(() => {
+            _selectedNodeId = "";
+            _setGraphHighlight(null);
+            _hideNodeDetail();
         })
         .graphData({ nodes, links });
+
+    const levels = [...new Set(_allGraphData.nodes.map(node => node._level).filter(Boolean))].sort();
+    gc.insertAdjacentHTML("beforeend", `
+        <div class="gb-graph-tools">
+            <input id="gb-search" class="gb-search" type="search" placeholder="Search memories or tags" value="${_esc(_graphFilters.query)}">
+            <select id="gb-level-filter" class="gb-filter-select" aria-label="Memory level">
+                <option value="all">All levels</option>
+                ${levels.map(level => `<option value="${_esc(level)}" ${_graphFilters.level === level ? "selected" : ""}>${_esc(level)}</option>`).join("")}
+            </select>
+            <select id="gb-edge-limit" class="gb-filter-select" aria-label="Connection detail">
+                <option value="2000" ${_graphFilters.edgeLimit === 2000 ? "selected" : ""}>2k connections</option>
+                <option value="10000" ${_graphFilters.edgeLimit === 10000 ? "selected" : ""}>10k connections</option>
+                <option value="all" ${!Number.isFinite(_graphFilters.edgeLimit) ? "selected" : ""}>All connections</option>
+            </select>
+            <label class="gb-check"><input id="gb-hide-isolated" type="checkbox" ${_graphFilters.hideIsolated ? "checked" : ""}> Hide isolated</label>
+            <button id="gb-fit" class="gb-tool-button">Fit</button>
+            <button id="gb-reset-layout" class="gb-tool-button">Reset layout</button>
+            <div id="gb-local-mode" class="gb-local-mode"></div>
+        </div>
+        <details class="gb-coverage">
+            <summary>Coverage audit</summary>
+            <div class="gb-coverage-body">
+                <div><span>Record store</span><strong>${_graphAudit.records_returned ?? _allGraphData.nodes.length}/${_graphAudit.records_scanned ?? _allGraphData.nodes.length}</strong></div>
+                <div><span>Connected records</span><strong>${_graphAudit.connected_records ?? "—"}</strong></div>
+                <div><span>Isolated records</span><strong>${_graphAudit.isolated_records ?? "—"}</strong></div>
+                <div><span>Thermal mapping</span><strong>${_graphAudit.thermallyMatched ?? 0}/${_allGraphData.nodes.length}</strong></div>
+                <div><span>ACL belief layer</span><strong>${_graphAudit.beliefNodes ?? 0}</strong></div>
+                <div><span>Dangling references</span><strong>${_graphAudit.dangling_connections ?? 0}</strong></div>
+                <p>The graph shows Aura memory records. Thermal beliefs are a separate ACL layer matched to records by normalized tags. Activity and event logs remain in their dedicated views.</p>
+            </div>
+        </details>
+        <aside id="gb-node-detail" class="gb-node-detail gb-node-detail-overlay hidden"></aside>`);
 
     gc.insertAdjacentHTML("beforeend", `
         <div class="gb-hud">
             <div class="gb-hud-chip"><span>Nodes</span><strong>${nodes.length}</strong></div>
             <div class="gb-hud-chip"><span>Edges</span><strong>${links.length}</strong></div>
             <div class="gb-hud-chip"><span>Hot (&gt;60%)</span><strong>${stats.hotCount}</strong></div>
-            <div class="gb-hud-chip"><span>Weakened</span><strong>${stats.weakenedCount}</strong></div>
-            <div class="gb-hud-chip"><span>Pruned</span><strong>${stats.prunedCount}</strong></div>
+            <div class="gb-hud-chip"><span>ACL weak</span><strong>${stats.weakenedCount}</strong></div>
+            <div class="gb-hud-chip"><span>ACL pruned</span><strong>${stats.prunedCount}</strong></div>
         </div>
         <div class="gb-legend-bar">
             <span class="gb-lgd cold"></span><span>Cold</span>
             <span class="gb-lgd warm"></span><span>Warm</span>
             <span class="gb-lgd hot"></span><span>Hot</span>
-            <span style="margin-left:14px;color:rgba(250,204,21,0.9)">— Weakened</span>
-            <span style="margin-left:8px;color:rgba(239,68,68,0.9)">— Pruned</span>
+            <span class="gb-legend-note">Colour = thermal match · size = level/strength</span>
         </div>`);
+    _updateGraphHud({ nodes, links });
+    _bindGraphControls();
+    _updateLocalIndicator();
 
     gc.addEventListener("mousemove", evt => {
         const tip = document.getElementById("gb-tooltip");
         if (tip?.style.display === "block") _positionTooltip(tip, evt);
     }, { passive: true });
 
-    window.addEventListener("resize", () => {
+    _resizeHandler = () => {
         if (_graph3d && gc) { _graph3d.width(gc.clientWidth); _graph3d.height(gc.clientHeight); }
+    };
+    window.addEventListener("resize", _resizeHandler);
+}
+
+function _updateGraphHud(data) {
+    const hud = document.querySelector("#gb-graph-container .gb-hud");
+    if (!hud) return;
+    const visibleHot = data.nodes.filter(node => node._temp > 0.6).length;
+    const visibleMapped = data.nodes.filter(node => node._thermalMatched).length;
+    hud.innerHTML = `
+        <div class="gb-hud-chip"><span>Records</span><strong>${data.nodes.length}/${_allGraphData.nodes.length}</strong></div>
+        <div class="gb-hud-chip"><span>Connections</span><strong>${data.links.length}/${_allGraphData.links.length}</strong></div>
+        <div class="gb-hud-chip"><span>Thermal match</span><strong>${visibleMapped}</strong></div>
+        <div class="gb-hud-chip"><span>Hot (&gt;60%)</span><strong>${visibleHot}</strong></div>
+        <div class="gb-hud-chip"><span>ACL weak</span><strong>${_graphAudit.weakenedCount || 0}</strong></div>
+        <div class="gb-hud-chip"><span>ACL pruned</span><strong>${_graphAudit.prunedCount || 0}</strong></div>`;
+}
+
+function _bindGraphControls() {
+    const search = document.getElementById("gb-search");
+    search?.addEventListener("input", () => {
+        clearTimeout(_filterTimer);
+        _filterTimer = window.setTimeout(() => {
+            _graphFilters.query = search.value;
+            _applyGraphFilters();
+        }, 160);
     });
+    document.getElementById("gb-level-filter")?.addEventListener("change", event => {
+        _graphFilters.level = event.target.value;
+        _applyGraphFilters();
+    });
+    document.getElementById("gb-edge-limit")?.addEventListener("change", event => {
+        _graphFilters.edgeLimit = event.target.value === "all" ? Infinity : Number(event.target.value);
+        _applyGraphFilters();
+    });
+    document.getElementById("gb-hide-isolated")?.addEventListener("change", event => {
+        _graphFilters.hideIsolated = event.target.checked;
+        _applyGraphFilters();
+    });
+    document.getElementById("gb-fit")?.addEventListener("click", () => _graph3d?.zoomToFit(350, 42));
+    document.getElementById("gb-reset-layout")?.addEventListener("click", () => {
+        localStorage.removeItem(_LAYOUT_STORAGE_KEY);
+        for (const node of _allGraphData.nodes) {
+            delete node.fx; delete node.fy; delete node.fz;
+            node.x = (Math.random() - 0.5) * 20;
+            node.y = (Math.random() - 0.5) * 20;
+            node.z = (Math.random() - 0.5) * 20;
+        }
+        _graph3d?.graphData(_filteredGraphData());
+        _graph3d?.d3ReheatSimulation?.();
+    });
+}
+
+function _setLocalFocus(nodeId, depth) {
+    _localFocus.id = nodeId;
+    _localFocus.depth = Math.max(1, Math.min(3, Number(depth) || 1));
+    _graphFilters.query = "";
+    const search = document.getElementById("gb-search");
+    if (search) search.value = "";
+    _applyGraphFilters();
+}
+
+function _clearLocalFocus() {
+    _localFocus.id = "";
+    _localFocus.depth = 0;
+    _applyGraphFilters();
+}
+
+function _updateLocalIndicator() {
+    const indicator = document.getElementById("gb-local-mode");
+    if (!indicator) return;
+    if (!_localFocus.id) {
+        indicator.innerHTML = "";
+        indicator.classList.remove("active");
+        return;
+    }
+    const node = _allGraphData.nodes.find(item => item.id === _localFocus.id);
+    indicator.classList.add("active");
+    indicator.innerHTML = `<span>Local ${_localFocus.depth}-hop: ${_esc(node?._label || _localFocus.id)}</span><button id="gb-local-clear" aria-label="Show full graph">×</button>`;
+    document.getElementById("gb-local-clear")?.addEventListener("click", _clearLocalFocus);
+}
+
+function _showNodeDetail(node) {
+    const panel = document.getElementById("gb-node-detail");
+    if (!panel) return;
+    const related = new Set();
+    for (const link of _allGraphData.links) {
+        const source = _endpointId(link.source);
+        const target = _endpointId(link.target);
+        if (source === node.id) related.add(target);
+        if (target === node.id) related.add(source);
+    }
+    const tags = (node._tags || []).map(tag => `<span class="gb-node-tag">${_esc(tag)}</span>`).join("");
+    panel.innerHTML = `
+        <button id="gb-node-close" class="gb-node-close" aria-label="Close">×</button>
+        <div class="gb-node-key">${_esc(node._label)}</div>
+        <div class="gb-node-stats">
+            <div>Level <strong>${_esc(node._level || "—")}</strong></div>
+            <div>Type <strong>${_esc(node._type || "memory")}</strong></div>
+            <div>Strength <strong>${(node._strength * 100).toFixed(0)}%</strong></div>
+            <div>Importance <strong>${Number(node._importance || 0).toFixed(2)}</strong></div>
+            <div>Thermal match <strong>${(node._temp * 100).toFixed(0)}%</strong></div>
+            <div>Connections <strong>${related.size}</strong></div>
+            ${node._timestamp ? `<div>Updated <strong>${_esc(String(node._timestamp))}</strong></div>` : ""}
+        </div>
+        ${tags ? `<div class="gb-node-tags">${tags}</div>` : ""}
+        <div class="gb-node-excerpt">${_esc(node._excerpt || node._label)}</div>
+        <div class="gb-local-actions">
+            <span>Local Brain</span>
+            <button class="gb-tool-button gb-local-depth" data-depth="1">1 hop</button>
+            <button class="gb-tool-button gb-local-depth" data-depth="2">2 hops</button>
+            <button class="gb-tool-button gb-local-depth" data-depth="3">3 hops</button>
+        </div>
+        <button id="gb-copy-node-id" class="gb-tool-button gb-copy-id">Copy memory ID</button>`;
+    panel.classList.remove("hidden");
+    document.getElementById("gb-node-close")?.addEventListener("click", _hideNodeDetail);
+    panel.querySelectorAll(".gb-local-depth").forEach(button => {
+        button.addEventListener("click", () => _setLocalFocus(node.id, Number(button.dataset.depth)));
+    });
+    document.getElementById("gb-copy-node-id")?.addEventListener("click", async event => {
+        await navigator.clipboard.writeText(String(node.id));
+        event.currentTarget.textContent = "Copied";
+    });
+}
+
+function _hideNodeDetail() {
+    document.getElementById("gb-node-detail")?.classList.add("hidden");
 }
 
 function _destroyGraph() {
     if (_graph3d) { try { _graph3d._destructor?.(); } catch (_) {} _graph3d = null; }
+    if (_resizeHandler) window.removeEventListener("resize", _resizeHandler);
+    _resizeHandler = null;
 }
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────

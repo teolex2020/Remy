@@ -23,27 +23,40 @@ _TIMEOUT_SLOW = 30.0   # bulk import, graph build, consolidation
 _TIMEOUT_EVAL = 120.0  # benchmark runs, live validation packs
 
 
-async def run_in_thread(fn, *args, timeout: float = _TIMEOUT_NORMAL, error_msg: str = "Operation timed out", **kwargs):
+async def run_in_thread(
+    fn,
+    *args,
+    timeout: float | None = _TIMEOUT_NORMAL,
+    error_msg: str = "Operation timed out",
+    **kwargs,
+):
     """Run a sync function in a thread with a timeout.
 
     Raises HTTP 504 if the operation exceeds the timeout.
     All asyncio.to_thread() calls in web routes should use this wrapper.
     """
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(fn, *args, **kwargs),
-            timeout=timeout,
-        )
+        operation = asyncio.to_thread(fn, *args, **kwargs)
+        # Human-controlled native dialogs must wait until the user chooses or
+        # cancels. A wait_for timeout would only cancel the HTTP coroutine; the
+        # native dialog thread would remain alive and orphaned.
+        if timeout is None:
+            return await operation
+        return await asyncio.wait_for(operation, timeout=timeout)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=error_msg)
 
 
-async def run_lambda_in_thread(fn, timeout: float = _TIMEOUT_NORMAL, error_msg: str = "Operation timed out"):
+async def run_lambda_in_thread(
+    fn,
+    timeout: float | None = _TIMEOUT_NORMAL,
+    error_msg: str = "Operation timed out",
+):
     """Same as run_in_thread but for lambdas (no positional args unpacking)."""
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(fn),
-            timeout=timeout,
-        )
+        operation = asyncio.to_thread(fn)
+        if timeout is None:
+            return await operation
+        return await asyncio.wait_for(operation, timeout=timeout)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail=error_msg)

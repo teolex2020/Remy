@@ -8,6 +8,123 @@ const contentEl = document.getElementById("settings-content");
 
 // Cached registered models — used to auto-fill API key when adding a new model
 let _cachedRegisteredModels = [];
+let _activeSettingsCategory = localStorage.getItem("remy.settings.category") || "overview";
+
+const SETTINGS_CATEGORIES = [
+    {
+        id: "overview",
+        icon: "◎",
+        label: "Overview",
+        description: "Runtime health and installed memory version",
+        sections: ["System Status", "Aura Memory"],
+    },
+    {
+        id: "models",
+        icon: "AI",
+        label: "AI & Models",
+        description: "Providers, cloud models and local GGUF runtime",
+        sections: ["Local Secrets", "Models", "Local Models (llama.cpp)"],
+    },
+    {
+        id: "personalization",
+        icon: "✦",
+        label: "Personalization",
+        description: "Instructions, theme and voice",
+        sections: ["Custom Instructions", "Appearance & Voice"],
+    },
+    {
+        id: "connections",
+        icon: "↗",
+        label: "Connections",
+        description: "Telegram, email and push delivery",
+        sections: ["Integrations"],
+    },
+    {
+        id: "workspace",
+        icon: "▣",
+        label: "Workspace & Data",
+        description: "Folder permissions, import and export",
+        sections: ["Local Workspaces", "Data"],
+    },
+];
+
+function setActiveSettingsCategory(categoryId, { focus = false } = {}) {
+    const category = SETTINGS_CATEGORIES.find((item) => item.id === categoryId)
+        || SETTINGS_CATEGORIES[0];
+    _activeSettingsCategory = category.id;
+    localStorage.setItem("remy.settings.category", category.id);
+    contentEl.querySelectorAll("[data-settings-category]").forEach((button) => {
+        const active = button.dataset.settingsCategory === category.id;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+        button.tabIndex = active ? 0 : -1;
+        if (active && focus) button.focus();
+    });
+    contentEl.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.settingsPanel !== category.id;
+    });
+    const title = contentEl.querySelector("#settings-panel-title");
+    const description = contentEl.querySelector("#settings-panel-description");
+    if (title) title.textContent = category.label;
+    if (description) description.textContent = category.description;
+    contentEl.querySelector(".settings-hub-main")?.scrollTo({ top: 0, behavior: "auto" });
+}
+
+function buildSettingsNavigation() {
+    const sections = [...contentEl.querySelectorAll(":scope > .settings-section")];
+    if (!sections.length) return;
+    const byTitle = new Map(sections.map((section) => [
+        section.querySelector(".settings-section-title")?.textContent.trim() || "",
+        section,
+    ]));
+    const hub = document.createElement("div");
+    hub.className = "settings-hub";
+    hub.innerHTML = `
+        <nav class="settings-hub-nav" aria-label="Settings categories">
+            <div class="settings-hub-nav-heading"><strong>Settings</strong><span>Choose one area to configure</span></div>
+            <div class="settings-hub-tabs" role="tablist" aria-orientation="vertical">
+                ${SETTINGS_CATEGORIES.map((category) => `<button type="button" role="tab" data-settings-category="${category.id}" aria-controls="settings-panel-${category.id}"><i>${category.icon}</i><span><b>${category.label}</b><small>${category.description}</small></span></button>`).join("")}
+            </div>
+        </nav>
+        <main class="settings-hub-main">
+            <header class="settings-hub-panel-header"><div><span>Settings</span><h3 id="settings-panel-title"></h3><p id="settings-panel-description"></p></div></header>
+            <div class="settings-hub-panels"></div>
+        </main>`;
+    const panels = hub.querySelector(".settings-hub-panels");
+    SETTINGS_CATEGORIES.forEach((category) => {
+        const panel = document.createElement("section");
+        panel.id = `settings-panel-${category.id}`;
+        panel.className = "settings-hub-panel";
+        panel.dataset.settingsPanel = category.id;
+        panel.setAttribute("role", "tabpanel");
+        panel.setAttribute("aria-label", category.label);
+        category.sections.forEach((title) => {
+            const section = byTitle.get(title);
+            if (section) panel.append(section);
+        });
+        panels.append(panel);
+    });
+    contentEl.prepend(hub);
+    const valid = SETTINGS_CATEGORIES.some((item) => item.id === _activeSettingsCategory);
+    setActiveSettingsCategory(valid ? _activeSettingsCategory : "overview");
+    const tabs = [...hub.querySelectorAll("[data-settings-category]")];
+    tabs.forEach((button, index) => {
+        button.addEventListener("click", () => {
+            setActiveSettingsCategory(button.dataset.settingsCategory);
+        });
+        button.addEventListener("keydown", (event) => {
+            const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
+            if (!keys.includes(event.key)) return;
+            event.preventDefault();
+            let next = index;
+            if (["ArrowDown", "ArrowRight"].includes(event.key)) next = (index + 1) % tabs.length;
+            if (["ArrowUp", "ArrowLeft"].includes(event.key)) next = (index - 1 + tabs.length) % tabs.length;
+            if (event.key === "Home") next = 0;
+            if (event.key === "End") next = tabs.length - 1;
+            setActiveSettingsCategory(tabs[next].dataset.settingsCategory, { focus: true });
+        });
+    });
+}
 
 export async function loadSettings() {
     contentEl.innerHTML = `
@@ -30,18 +147,19 @@ export async function loadSettings() {
             <div class="skeleton skeleton-block" style="height:200px;border-radius:6px"></div>
         </div>`;
     try {
-        const [settingsData, diagData, secretsData] = await Promise.all([
+        const [settingsData, diagData, secretsData, workspacesData] = await Promise.all([
             fetch("/api/settings").then((r) => r.json()),
             fetch("/api/diagnostics").then((r) => r.json()),
             fetch("/api/secrets").then((r) => r.json()),
+            fetch("/api/workspaces").then((r) => r.json()),
         ]);
-        renderSettings(settingsData, diagData, secretsData);
+        renderSettings(settingsData, diagData, secretsData, workspacesData);
     } catch (e) {
         contentEl.innerHTML = `<p style="color:var(--red)">Failed to load settings: ${e.message}</p>`;
     }
 }
 
-function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
+function renderSettings(cfg, diag, secretsData = { secrets: [] }, workspacesData = { workspaces: [] }) {
     const statusColor = diag.status === "ok" ? "var(--green)" : "var(--yellow)";
 
     contentEl.innerHTML = `
@@ -94,9 +212,9 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
                             <option value="openai">OpenAI</option>
                             <option value="anthropic">Anthropic</option>
                             <option value="openrouter">OpenRouter</option>
+                            <option value="nvidia">NVIDIA NIM</option>
                             <option value="deepseek">DeepSeek</option>
                             <option value="xai">xAI</option>
-                            <option value="ollama">Ollama</option>
                         </select>
                         <input type="text" id="add-model-name" class="input" placeholder="Model name" style="flex:1;min-width:180px;padding:6px 8px">
                     </div>
@@ -110,6 +228,7 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
                         <button class="btn btn-primary" id="btn-add-model">Add</button>
                     </div>
                     <div id="add-model-reuse-hint" style="display:none;font-size:12px;color:var(--accent);margin-top:-2px"></div>
+                    <div id="add-model-provider-note" class="settings-hint"></div>
                 </div>
             </details>
 
@@ -141,38 +260,54 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
 
         <!-- Local Models -->
         <div class="settings-section" id="local-models-section">
-            <h3 class="settings-section-title">Local Models (Ollama)</h3>
+            <h3 class="settings-section-title">Local Models (llama.cpp)</h3>
             <p class="settings-hint" style="margin-bottom:14px">
-                Run models directly on your computer — no internet, no API keys, full privacy.
-                Remy will download everything needed automatically.
+                Download GGUF models to your computer and run them fully locally. No cloud account or API key is required.
             </p>
-            <div id="ollama-status-bar" style="margin-bottom:14px"></div>
-            <div id="ollama-installed-list" style="margin-bottom:16px"></div>
-            <div class="settings-subsection-title" style="margin-bottom:10px">Recommended models</div>
-            <div id="ollama-popular-grid" class="ollama-popular-grid">
-                <span class="settings-hint">Loading…</span>
+            <div id="llamacpp-status-bar" style="margin-bottom:14px"></div>
+            <div id="llamacpp-installed-list" style="margin-bottom:16px"></div>
+
+            <div class="settings-subsection-title" style="margin-bottom:8px">Models folder</div>
+            <p class="settings-hint" style="margin-bottom:10px">
+                Choose where Remy should keep downloaded GGUF models. Existing GGUF files in that folder are discovered automatically.
+            </p>
+            <div id="llamacpp-models-dir-current" class="settings-current" style="margin-bottom:10px">Loading models folder...</div>
+            <div class="llamacpp-model-install">
+                <button class="btn btn-primary btn-sm" id="btn-llamacpp-local-folder">Choose models folder</button>
             </div>
-            <details style="margin-top:14px">
-                <summary style="cursor:pointer;color:var(--accent);font-size:13px;font-weight:600">Install any model manually</summary>
-                <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
-                    <input type="text" id="ollama-custom-name" class="input" placeholder="gemma3:4b" style="flex:1;padding:6px 10px;max-width:260px">
-                    <button class="btn btn-primary btn-sm" id="btn-ollama-custom-pull">Install</button>
-                    <span style="color:var(--text-muted);font-size:12px">
-                        Model names: <a href="https://ollama.com/library" target="_blank" style="color:var(--accent)">ollama.com/library</a>
-                    </span>
-                </div>
-            </details>
+            <div id="llamacpp-local-file-row" class="llamacpp-model-install hidden" style="margin-top:10px">
+                <select id="llamacpp-local-file" class="input" aria-label="Model in selected folder"></select>
+                <button class="btn btn-primary btn-sm" id="btn-llamacpp-add-model">Add to chat models</button>
+            </div>
+            <div id="llamacpp-local-status" class="settings-hint" style="margin:8px 0 18px"></div>
+
+            <div class="settings-subsection-title" style="margin-bottom:8px">Download from Hugging Face</div>
+            <p class="settings-hint" style="margin-bottom:10px">
+                Paste a public Hugging Face repository ID, inspect its available GGUF files, then choose a quantization.
+            </p>
+            <div class="llamacpp-model-install">
+                <input type="text" id="llamacpp-repo" class="input"
+                    placeholder="owner/model-GGUF" autocomplete="off">
+                <button class="btn btn-outline btn-sm" id="btn-llamacpp-find">Show repository files</button>
+                <a class="btn btn-outline btn-sm" href="https://huggingface.co/models?library=gguf&amp;sort=trending"
+                    target="_blank" rel="noopener noreferrer">Browse GGUF models</a>
+            </div>
+            <div id="llamacpp-file-row" class="llamacpp-model-install hidden" style="margin-top:8px">
+                <select id="llamacpp-file" class="input" aria-label="GGUF quantization"></select>
+                <button class="btn btn-primary btn-sm" id="btn-llamacpp-download">Download model</button>
+            </div>
+            <div id="llamacpp-repo-status" class="settings-hint" style="margin-top:8px"></div>
         </div>
 
-        <!-- Ollama pull progress modal -->
-        <div id="ollama-pull-modal" class="ollama-modal hidden">
-            <div class="ollama-modal-box">
-                <div class="ollama-modal-title" id="ollama-pull-title">Downloading model…</div>
+        <!-- llama.cpp install and download progress modal -->
+        <div id="llamacpp-progress-modal" class="llamacpp-modal hidden">
+            <div class="llamacpp-modal-box">
+                <div class="llamacpp-modal-title" id="llamacpp-progress-title">Preparing local runtime…</div>
                 <div class="bulk-progress-bar-track" style="margin:12px 0">
-                    <div id="ollama-pull-bar" class="bulk-progress-bar" style="width:0%"></div>
+                    <div id="llamacpp-progress-bar" class="bulk-progress-bar" style="width:0%"></div>
                 </div>
-                <div id="ollama-pull-log" class="bulk-log" style="max-height:160px"></div>
-                <button id="ollama-pull-close" class="btn btn-outline btn-sm hidden" style="margin-top:10px">Close</button>
+                <div id="llamacpp-progress-log" class="bulk-log" style="max-height:160px"></div>
+                <button id="llamacpp-progress-close" class="btn btn-outline btn-sm hidden" style="margin-top:10px">Close</button>
             </div>
         </div>
 
@@ -277,6 +412,29 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
             </div>
         </div>
 
+        <!-- Local Workspaces -->
+        <div class="settings-section">
+            <h3 class="settings-section-title">Local Workspaces</h3>
+            <p class="settings-hint" style="margin-bottom:12px">
+                Give Remy access only to folders you choose. Read, Write, and Execute are separate capabilities and can be revoked at any time.
+            </p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+                <label><input id="workspace-read" type="checkbox" checked disabled> Read</label>
+                <label><input id="workspace-write" type="checkbox"> Write</label>
+                <label title="Commands run with your Windows user privileges"><input id="workspace-execute" type="checkbox"> Execute</label>
+                <button class="btn btn-primary" id="btn-workspace-choose">Choose folder</button>
+            </div>
+            <details style="margin-bottom:12px">
+                <summary style="cursor:pointer;color:var(--accent);font-size:13px">Enter a path manually</summary>
+                <div style="display:flex;gap:8px;margin-top:9px">
+                    <input id="workspace-manual-path" class="input" style="flex:1" placeholder="D:\\Projects\\my-project">
+                    <button class="btn btn-outline" id="btn-workspace-add-path">Add</button>
+                </div>
+            </details>
+            <div id="workspace-warning" class="settings-hint" style="margin:8px 0;color:var(--yellow)"></div>
+            <div id="workspace-list">${renderWorkspaces(workspacesData.workspaces || [])}</div>
+        </div>
+
         <!-- Data -->
         <div class="settings-section">
             <h3 class="settings-section-title">Data</h3>
@@ -300,6 +458,8 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
         <div id="settings-status" class="settings-status"></div>
     `;
 
+    buildSettingsNavigation();
+
     // Theme
     const themeSelect = document.getElementById("set-theme");
     const currentTheme = localStorage.getItem("theme") || "dark";
@@ -313,6 +473,7 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
     }
 
     loadModelRegistry();
+    loadAvailableModelOptions();
     bindLocalSecrets();
     document.getElementById("btn-add-model")?.addEventListener("click", addModel);
     document.getElementById("add-model-provider")?.addEventListener("change", _onProviderChange);
@@ -320,6 +481,7 @@ function renderSettings(cfg, diag, secretsData = { secrets: [] }) {
     initPushSection();
     loadAuraStatus();
     loadLocalModels();
+    bindWorkspaces();
 
     document.getElementById("btn-save-model").addEventListener("click", async () => {
         const val = document.getElementById("set-model").value.trim();
@@ -535,7 +697,7 @@ async function loadModelRegistry() {
 
         if (models.length === 0) {
             container.innerHTML = `<span class="settings-hint">No custom models added yet. Use "+ Add model" below.</span>`;
-            _populateModelSelects(models);
+            loadAvailableModelOptions();
             return;
         }
 
@@ -617,7 +779,7 @@ async function loadModelRegistry() {
             });
         });
 
-        _populateModelSelects(models);
+        loadAvailableModelOptions();
     } catch (e) {
         container.innerHTML = `<span class="settings-hint" style="color:var(--red)">Failed to load models.</span>`;
     }
@@ -634,7 +796,7 @@ function _populateModelSelects(models) {
         for (const m of models) {
             const opt = document.createElement("option");
             opt.value = m.name;
-            opt.textContent = `${m.name}  [${m.provider}]`;
+            opt.textContent = `${m.label || m.name}  [${m.provider}]`;
             if (m.name === current) opt.selected = true;
             sel.appendChild(opt);
         }
@@ -655,6 +817,25 @@ function _onProviderChange() {
     const keyInput = document.getElementById("add-model-key");
     const hintEl = document.getElementById("add-model-reuse-hint");
     if (!provider || !keyInput || !hintEl) return;
+    const nameInput = document.getElementById("add-model-name");
+    const providerNote = document.getElementById("add-model-provider-note");
+    const providerUi = {
+        nvidia: {
+            key: "NVIDIA API key (nvapi-...)",
+            model: "e.g. deepseek-ai/deepseek-v4-flash",
+            note: "NVIDIA hosted NIM trial endpoint. Development use may be rate limited.",
+        },
+        openrouter: {
+            key: "OpenRouter API key (sk-or-...)",
+            model: "e.g. moonshotai/kimi-k3",
+            note: "OpenRouter model identifier in publisher/model format.",
+        },
+    };
+    const ui = providerUi[provider] || {};
+    if (nameInput) nameInput.placeholder = ui.model || "Model name";
+    if (providerNote) providerNote.textContent = ui.note || "";
+    keyInput.dataset.reuseFrom = "";
+    keyInput.placeholder = ui.key || "API key";
 
     // Find an existing model with a key for this provider
     const existing = _cachedRegisteredModels.find(m => m.provider === provider && m.has_key);
@@ -671,8 +852,17 @@ function _onProviderChange() {
         });
     } else {
         hintEl.style.display = "none";
-        keyInput.dataset.reuseFrom = "";
-        keyInput.placeholder = "API key";
+    }
+}
+
+async function loadAvailableModelOptions() {
+    try {
+        const response = await fetch("/api/models");
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not load models");
+        _populateModelSelects(data.models || []);
+    } catch (_) {
+        // Keep the current selection when the catalog is temporarily unavailable.
     }
 }
 
@@ -687,7 +877,7 @@ async function addModel() {
     const reuseFrom = keyInput?.dataset.reuseFrom || "";
 
     if (!name) { alert("Model name is required."); return; }
-    if (!key && provider !== "ollama" && !reuseFrom) { alert("API key is required."); return; }
+    if (!key && !reuseFrom) { alert("API key is required."); return; }
 
     try {
         // If reusing a key from another model of the same provider, copy it server-side
@@ -696,11 +886,15 @@ async function addModel() {
         if (inputPrice != null) payload.input_price = inputPrice;
         if (outputPrice != null) payload.output_price = outputPrice;
 
-        await fetch("/api/model-registry", {
+        const response = await fetch("/api/model-registry", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.detail || `Could not add model (HTTP ${response.status}).`);
+        }
         document.getElementById("add-model-name").value = "";
         const ki = document.getElementById("add-model-key");
         if (ki) { ki.value = ""; ki.dataset.reuseFrom = ""; ki.placeholder = "API key"; }
@@ -1055,225 +1249,434 @@ async function _waitForRestart() {
     if (block) block.innerHTML = `<span class="settings-hint" style="color:var(--red)">Remy did not respond after restart. Please reopen the app.</span>`;
 }
 
-// ============== Local Models (Ollama) ==============
+// ============== Local Models (llama.cpp) ==============
 
 async function loadLocalModels() {
-    await Promise.all([_renderOllamaStatus(), _renderPopularModels()]);
-    _bindOllamaControls();
+    await _renderLlamaCppStatus();
+    _bindLlamaCppControls();
 }
 
-async function _renderOllamaStatus() {
-    const bar = document.getElementById("ollama-status-bar");
-    const list = document.getElementById("ollama-installed-list");
-    if (!bar) return;
-
-    let status;
+async function _renderLlamaCppStatus() {
+    const bar = document.getElementById("llamacpp-status-bar");
+    const list = document.getElementById("llamacpp-installed-list");
+    if (!bar || !list) return;
     try {
-        status = await fetch("/api/ollama/status").then(r => r.json());
-    } catch {
-        bar.innerHTML = `<span class="settings-hint" style="color:var(--red)">Could not check Ollama status.</span>`;
-        return;
-    }
-
-    if (status.running) {
-        bar.innerHTML = `
-            <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-                <span style="color:var(--green);font-size:16px">●</span>
-                <span style="color:var(--green);font-weight:600">Ollama is running</span>
-                <span style="color:var(--text-muted)">${status.binary_path ? `(${status.binary_path})` : ''}</span>
+        const status = await fetch("/api/llamacpp/status").then(async response => {
+            if (!response.ok) throw new Error(await response.text());
+            return response.json();
+        });
+        const modelsDirectory = document.getElementById("llamacpp-models-dir-current");
+        if (modelsDirectory) {
+            const prefix = status.models_dir_configured ? "Selected folder" : "Default folder";
+            modelsDirectory.textContent = `${prefix}: ${status.models_dir}`;
+        }
+        _renderLocalFolderFiles(status.local_files || []);
+        if (status.runtime_installed) {
+            bar.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="color:var(--green);font-weight:600">llama.cpp runtime ready</span>
+                <span class="settings-hint">${status.running ? "Model server running" : "No model loaded"}</span>
+                ${status.running ? '<button class="btn btn-outline btn-mini" id="btn-llamacpp-stop">Stop model</button>' : ''}
             </div>`;
-    } else {
-        bar.innerHTML = `
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                <span style="color:var(--text-muted);font-size:13px">● Ollama is not running</span>
-                <button class="btn btn-outline btn-sm" id="btn-ollama-start">
-                    ${status.binary_found ? 'Start' : 'Install &amp; Start'}
-                </button>
-            </div>`;
-    }
-
-    // Installed models list
-    if (list) {
-        if (status.models && status.models.length > 0) {
-            list.innerHTML = `
-                <div class="settings-subsection-title" style="margin-bottom:8px">Installed models</div>
-                <div class="ollama-installed-models">
-                    ${status.models.map(m => `
-                        <div class="ollama-installed-row">
-                            <span class="ollama-model-name">${esc(m.name)}</span>
-                            <span class="ollama-model-size">${m.size_gb} GB</span>
-                            <button class="btn btn-outline btn-mini ollama-use-btn" data-model="ollama:${esc(m.name)}">Use</button>
-                            <button class="btn-icon ollama-delete-btn" data-model="${esc(m.name)}" title="Delete">🗑</button>
-                        </div>
-                    `).join('')}
-                </div>`;
-        } else if (status.running) {
-            list.innerHTML = `<p class="settings-hint">No models yet. Choose one below.</p>`;
         } else {
-            list.innerHTML = "";
+            bar.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span class="settings-hint">llama.cpp runtime is not installed</span>
+                <button class="btn btn-primary btn-sm" id="btn-llamacpp-runtime">Install local runtime</button>
+            </div>`;
+        }
+        if (status.models?.length) {
+            list.innerHTML = `<div class="settings-subsection-title" style="margin-bottom:8px">Installed GGUF models</div>
+                <div class="llamacpp-installed-models">${status.models.map(model => `
+                    <div class="llamacpp-installed-row">
+                        <span class="llamacpp-model-name" title="${esc(model.repo_id || '')}">${esc(model.filename)}</span>
+                        <span class="llamacpp-model-size">${Number(model.size_gb || 0).toFixed(2)} GB</span>
+                        ${model.managed === false ? '<span class="settings-hint">linked</span>' : ''}
+                        <button class="btn btn-outline btn-mini llamacpp-use-btn" data-model="${esc(model.name)}">Use in chat</button>
+                        <button class="btn-icon llamacpp-delete-btn" data-model="${esc(model.id)}"
+                            data-managed="${model.managed !== false}" title="${model.managed === false ? 'Remove from Remy' : 'Delete downloaded model'}">x</button>
+                    </div>`).join('')}</div>`;
+        } else {
+            list.innerHTML = `<p class="settings-hint">No GGUF models downloaded yet.</p>`;
+        }
+    } catch (error) {
+        bar.innerHTML = `<span class="settings-hint" style="color:var(--red)">Could not read llama.cpp status.</span>`;
+        list.innerHTML = "";
+        const modelsDirectory = document.getElementById("llamacpp-models-dir-current");
+        if (modelsDirectory) {
+            modelsDirectory.textContent = "Models folder unavailable. Restart Remy, then refresh this page.";
+            modelsDirectory.style.color = "var(--red)";
         }
     }
 }
 
-async function _renderPopularModels() {
-    const grid = document.getElementById("ollama-popular-grid");
-    if (!grid) return;
-    let data;
-    try {
-        data = await fetch("/api/ollama/models/popular").then(r => r.json());
-    } catch {
-        grid.innerHTML = `<span class="settings-hint" style="color:var(--red)">Could not load model list.</span>`;
-        return;
-    }
-
-    const TAG_LABELS = { fast: "⚡ Fast", balanced: "⚖ Balanced", powerful: "💪 Powerful", reasoning: "🧠 Reasoning", multilingual: "🌍 Multilingual", small: "🪶 Small", popular: "⭐ Popular" };
-
-    grid.innerHTML = (data.models || []).map(m => `
-        <div class="ollama-model-card ${m.installed ? 'installed' : ''}">
-            <div class="ollama-card-header">
-                <span class="ollama-card-name">${esc(m.label)}</span>
-                <span class="ollama-card-size">${esc(m.size)}</span>
-            </div>
-            <p class="ollama-card-desc">${esc(m.description)}</p>
-            <div class="ollama-card-footer">
-                <div class="ollama-card-tags">
-                    ${(m.tags || []).map(t => `<span class="ollama-tag">${TAG_LABELS[t] || t}</span>`).join('')}
-                </div>
-                ${m.installed
-                    ? `<span class="ollama-installed-badge">✓ Installed</span>`
-                    : `<button class="btn btn-primary btn-sm ollama-pull-btn" data-model="${esc(m.name)}" data-label="${esc(m.label)}">Install</button>`
-                }
-            </div>
-        </div>
-    `).join('');
-}
-
-function _bindOllamaControls() {
-    // Start button
-    document.getElementById("btn-ollama-start")?.addEventListener("click", async () => {
-        const modal = document.getElementById("ollama-pull-modal");
-        const title = document.getElementById("ollama-pull-title");
-        const log = document.getElementById("ollama-pull-log");
-        const bar = document.getElementById("ollama-pull-bar");
-        const closeBtn = document.getElementById("ollama-pull-close");
-        if (title) title.textContent = "Starting Ollama…";
-        if (log) log.innerHTML = "";
-        if (bar) bar.style.width = "0%";
-        if (closeBtn) closeBtn.classList.add("hidden");
-        modal?.classList.remove("hidden");
-
-        const resp = await fetch("/api/ollama/start", { method: "POST" });
-        const reader = resp.body.getReader();
-        await _consumeSSE(reader, log, bar, closeBtn, async () => {
-            modal?.classList.add("hidden");
-            await loadLocalModels();
-        });
-    });
-
-    // Install buttons on popular cards
-    document.querySelectorAll(".ollama-pull-btn").forEach(btn => {
-        btn.addEventListener("click", () => _startPull(btn.dataset.model, btn.dataset.label));
-    });
-
-    // Custom model pull
-    document.getElementById("btn-ollama-custom-pull")?.addEventListener("click", () => {
-        const name = document.getElementById("ollama-custom-name")?.value.trim();
-        if (name) _startPull(name, name);
-    });
-
-    // Delete buttons
-    document.querySelectorAll(".ollama-delete-btn").forEach(btn => {
-        btn.addEventListener("click", async () => {
-            const name = btn.dataset.model;
-            if (!confirm(`Delete model "${name}"?\nThis will free up disk space.`)) return;
-            btn.disabled = true;
-            try {
-                await fetch("/api/ollama/model", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-            } finally {
-                await loadLocalModels();
-            }
-        });
-    });
-
-    // "Use" buttons — set as active model
-    document.querySelectorAll(".ollama-use-btn").forEach(btn => {
-        btn.addEventListener("click", async () => {
-            const model = btn.dataset.model;
-            await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ summary_model: model }) });
-            btn.textContent = "✓ Active";
-            btn.disabled = true;
-        });
-    });
-}
-
-async function _startPull(modelName, modelLabel) {
-    const modal = document.getElementById("ollama-pull-modal");
-    const title = document.getElementById("ollama-pull-title");
-    const log = document.getElementById("ollama-pull-log");
-    const bar = document.getElementById("ollama-pull-bar");
-    const closeBtn = document.getElementById("ollama-pull-close");
-
-    if (title) title.textContent = `Installing ${modelLabel}…`;
+function _localProgressElements(title) {
+    const modal = document.getElementById("llamacpp-progress-modal");
+    const titleEl = document.getElementById("llamacpp-progress-title");
+    const log = document.getElementById("llamacpp-progress-log");
+    const bar = document.getElementById("llamacpp-progress-bar");
+    const close = document.getElementById("llamacpp-progress-close");
+    if (titleEl) titleEl.textContent = title;
     if (log) log.innerHTML = "";
     if (bar) bar.style.width = "0%";
-    if (closeBtn) closeBtn.classList.add("hidden");
+    close?.classList.add("hidden");
     modal?.classList.remove("hidden");
-
-    const resp = await fetch("/api/ollama/pull", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: modelName }),
-    });
-    const reader = resp.body.getReader();
-    await _consumeSSE(reader, log, bar, closeBtn, async () => {
-        await loadLocalModels();
-    });
+    return { modal, log, bar, close };
 }
 
-async function _consumeSSE(reader, log, bar, closeBtn, onDone) {
+function _renderLocalFolderFiles(files) {
+    const row = document.getElementById("llamacpp-local-file-row");
+    const select = document.getElementById("llamacpp-local-file");
+    const status = document.getElementById("llamacpp-local-status");
+    if (!row || !select) return;
+    const available = files.filter(file => !file.added);
+    if (!files.length) {
+        row.classList.add("hidden");
+        if (status) status.textContent = "No GGUF files found in this folder.";
+        return;
+    }
+    if (!available.length) {
+        row.classList.add("hidden");
+        if (status) status.textContent = "All GGUF models in this folder are already added.";
+        return;
+    }
+    select.innerHTML = available.map(file => {
+        const size = file.size ? ` (${(file.size / 1024 ** 3).toFixed(2)} GB)` : "";
+        const shards = file.shards > 1 ? ` · ${file.shards} files` : "";
+        return `<option value="${esc(file.relative_path)}">${esc(file.filename)}${size}${shards}</option>`;
+    }).join("");
+    row.classList.remove("hidden");
+    if (status) status.textContent = `Choose one of ${available.length} available GGUF model(s).`;
+}
+
+async function _consumeLlamaCppSSE(response, ui) {
+    if (!response.ok || !response.body) throw new Error(await response.text());
+    const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let buf = "";
-
-    const _logLine = (text, cls = "") => {
-        if (!log) return;
-        const line = document.createElement("div");
-        line.className = "bulk-log-line" + (cls ? " " + cls : "");
-        line.textContent = text;
-        log.appendChild(line);
-        log.scrollTop = log.scrollHeight;
-    };
-
+    let buffer = "";
     while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop();
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
         for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
-            let evt;
-            try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-            const phase = evt.phase || "";
-            const msg = evt.message || "";
-            if (phase === "error") {
-                _logLine(msg || "Error", "error");
-            } else if (phase === "done") {
-                if (bar) bar.style.width = "100%";
-                _logLine(msg || "Done!", "done");
-            } else if (msg) {
-                if (bar && evt.pct != null) bar.style.width = evt.pct + "%";
-                _logLine(msg);
+            const event = JSON.parse(line.slice(6));
+            if (event.pct != null && ui.bar) ui.bar.style.width = `${event.pct}%`;
+            if (event.message && ui.log) {
+                const row = document.createElement("div");
+                row.className = `bulk-log-line${event.phase === "error" ? " error" : ""}`;
+                row.textContent = event.message;
+                ui.log.appendChild(row);
+                ui.log.scrollTop = ui.log.scrollHeight;
             }
         }
     }
+    ui.close?.classList.remove("hidden");
+    if (ui.close) ui.close.onclick = async () => {
+        ui.modal?.classList.add("hidden");
+        await loadLocalModels();
+    };
+}
 
-    if (closeBtn) {
-        closeBtn.classList.remove("hidden");
-        closeBtn.onclick = async () => {
-            document.getElementById("ollama-pull-modal")?.classList.add("hidden");
-            if (onDone) await onDone();
-        };
-    }
+function _bindLlamaCppControls() {
+    const localStatus = document.getElementById("llamacpp-local-status");
+    const chooseFolder = async () => {
+        if (localStatus) {
+            localStatus.style.color = "var(--text-muted)";
+            localStatus.textContent = "Waiting for the Windows folder picker...";
+        }
+        const response = await fetch("/api/llamacpp/local/select-folder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            if (response.status === 404 || response.status === 405) {
+                throw new Error("The running Remy server is outdated. Restart Remy and refresh the page.");
+            }
+            throw new Error(data.detail || "Could not choose the models folder");
+        }
+        if (data.cancelled) {
+            if (localStatus) localStatus.textContent = "Folder selection cancelled.";
+            return;
+        }
+        if (localStatus) {
+            localStatus.style.color = "var(--green)";
+            localStatus.textContent = `Folder selected: ${data.path}. Now choose a model below.`;
+        }
+        const modelsDirectory = document.getElementById("llamacpp-models-dir-current");
+        if (modelsDirectory) modelsDirectory.textContent = `Selected folder: ${data.path}`;
+        _renderLocalFolderFiles(data.files || []);
+    };
+    document.getElementById("btn-llamacpp-local-folder")?.addEventListener("click", async event => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+            await chooseFolder();
+        } catch (error) {
+            if (localStatus) {
+                localStatus.style.color = "var(--red)";
+                localStatus.textContent = error.message || String(error);
+            }
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById("btn-llamacpp-add-model")?.addEventListener("click", async event => {
+        const relativePath = document.getElementById("llamacpp-local-file")?.value;
+        if (!relativePath) return;
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+            const response = await fetch("/api/llamacpp/local/model", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ relative_path: relativePath }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || "Could not add the selected model");
+            await loadLocalModels();
+            await loadAvailableModelOptions();
+            document.dispatchEvent(new CustomEvent("models-changed"));
+            if (localStatus) {
+                localStatus.style.color = "var(--green)";
+                localStatus.textContent = `${data.model?.filename || "Model"} added to chat models. Click “Use in chat” to activate it.`;
+            }
+        } catch (error) {
+            if (localStatus) {
+                localStatus.style.color = "var(--red)";
+                localStatus.textContent = error.message || String(error);
+            }
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById("btn-llamacpp-runtime")?.addEventListener("click", async () => {
+        const ui = _localProgressElements("Installing llama.cpp runtime...");
+        try {
+            await _consumeLlamaCppSSE(await fetch("/api/llamacpp/runtime/install", { method: "POST" }), ui);
+        } catch (error) {
+            if (ui.log) ui.log.textContent = error.message || String(error);
+            ui.close?.classList.remove("hidden");
+        }
+    });
+    document.getElementById("btn-llamacpp-stop")?.addEventListener("click", async () => {
+        await fetch("/api/llamacpp/stop", { method: "POST" });
+        await loadLocalModels();
+    });
+    document.getElementById("btn-llamacpp-find")?.addEventListener("click", async () => {
+        const repo = document.getElementById("llamacpp-repo")?.value.trim();
+        const row = document.getElementById("llamacpp-file-row");
+        const select = document.getElementById("llamacpp-file");
+        const status = document.getElementById("llamacpp-repo-status");
+        if (!repo || !select) {
+            if (status) status.textContent = "Paste a Hugging Face repository ID first.";
+            return;
+        }
+        if (status) status.textContent = "Reading repository...";
+        select.innerHTML = '<option>Loading repository...</option>';
+        row?.classList.remove("hidden");
+        try {
+            const response = await fetch(`/api/llamacpp/repository?repo_id=${encodeURIComponent(repo)}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || "Repository lookup failed");
+            if (!data.files?.length) throw new Error("No GGUF files found in this repository");
+            select.innerHTML = data.files.filter(file => file.selectable !== false).map(file => {
+                const size = file.size ? ` (${(file.size / 1024 ** 3).toFixed(2)} GB)` : "";
+                const shards = file.shards > 1 ? ` · ${file.shards} files` : "";
+                return `<option value="${esc(file.filename)}">${esc(file.filename)}${size}${shards}</option>`;
+            }).join("");
+            if (status) {
+                status.style.color = "var(--green)";
+                status.textContent = `${select.options.length} GGUF option(s) found.`;
+            }
+        } catch (error) {
+            select.innerHTML = `<option value="">${esc(error.message || String(error))}</option>`;
+            if (status) {
+                status.style.color = "var(--red)";
+                status.textContent = error.message || String(error);
+            }
+        }
+    });
+    document.getElementById("btn-llamacpp-download")?.addEventListener("click", async () => {
+        const repo = document.getElementById("llamacpp-repo")?.value.trim();
+        const filename = document.getElementById("llamacpp-file")?.value;
+        if (!repo || !filename) return;
+        const ui = _localProgressElements(`Downloading ${filename}...`);
+        try {
+            const response = await fetch("/api/llamacpp/models/download", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ repo_id: repo, filename }),
+            });
+            await _consumeLlamaCppSSE(response, ui);
+        } catch (error) {
+            if (ui.log) ui.log.textContent = error.message || String(error);
+            ui.close?.classList.remove("hidden");
+        }
+    });
+    document.querySelectorAll(".llamacpp-use-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+            button.disabled = true;
+            const model = button.dataset.model;
+            const response = await fetch("/api/llamacpp/models/start", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ model_id: model }),
+            });
+            const data = await response.json();
+            if (!response.ok) { alert(data.detail || "Could not load model"); button.disabled = false; return; }
+            await fetch("/api/settings", {
+                method: "PUT", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ summary_model: model }),
+            });
+            await loadLocalModels();
+            await loadAvailableModelOptions();
+            document.dispatchEvent(new CustomEvent("models-changed"));
+            if (localStatus) {
+                localStatus.style.color = "var(--green)";
+                localStatus.textContent = "Local model loaded and selected for chat.";
+            }
+        });
+    });
+    document.querySelectorAll(".llamacpp-delete-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+            const managed = button.dataset.managed === "true";
+            const question = managed
+                ? "Delete this downloaded GGUF model from disk?"
+                : "Remove this model from Remy? The original GGUF file will remain untouched.";
+            if (!confirm(question)) return;
+            await fetch(`/api/llamacpp/models/${encodeURIComponent(button.dataset.model)}`, { method: "DELETE" });
+            await loadLocalModels();
+            await loadAvailableModelOptions();
+            document.dispatchEvent(new CustomEvent("models-changed"));
+        });
+    });
+}
+
+// ============== Local Workspaces ==============
+
+function renderWorkspaces(workspaces) {
+    if (!workspaces.length) return `<span class="settings-hint">No folders connected.</span>`;
+    return workspaces.map((workspace) => {
+        const perms = new Set(workspace.permissions || []);
+        const builtin = workspace.source === "builtin";
+        const badge = (name) => builtin
+            ? `<span style="padding:2px 7px;border:1px solid var(--border);border-radius:999px;font-size:11px;color:${perms.has(name) ? "var(--green)" : "var(--text-muted)"}">${name}</span>`
+            : `<label style="font-size:12px"><input class="workspace-cap" data-cap="${name}" type="checkbox" ${perms.has(name) ? "checked" : ""}> ${name}</label>`;
+        return `<div class="diag-item workspace-card" data-id="${esc(workspace.workspace_id)}" style="display:block;margin-bottom:8px;padding:11px 12px">
+            <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+                <div style="min-width:0">
+                    <div style="font-weight:600">${esc(workspace.name)}</div>
+                    <div class="settings-hint" style="word-break:break-all;margin:3px 0 7px">${esc(workspace.root_path)}</div>
+                    <div style="display:flex;gap:5px">${badge("read")}${badge("write")}${badge("execute")}</div>
+                </div>
+                ${builtin ? `<span class="settings-hint">built-in</span>` : `<button class="btn btn-outline btn-mini workspace-revoke" data-id="${esc(workspace.workspace_id)}">Revoke</button>`}
+            </div>
+        </div>`;
+    }).join("");
+}
+
+function workspacePayload(path = null) {
+    return {
+        path,
+        read: true,
+        write: Boolean(document.getElementById("workspace-write")?.checked),
+        execute: Boolean(document.getElementById("workspace-execute")?.checked),
+    };
+}
+
+async function workspaceRequest(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "Workspace request failed.");
+    return data;
+}
+
+function bindWorkspaces() {
+    const execute = document.getElementById("workspace-execute");
+    const warning = document.getElementById("workspace-warning");
+    execute?.addEventListener("change", () => {
+        warning.textContent = execute.checked
+            ? "Execute is powerful: approved commands run with your Windows user privileges and each run still requires confirmation."
+            : "";
+    });
+    document.getElementById("btn-workspace-choose")?.addEventListener("click", async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        warning.textContent = "Waiting for the Windows folder picker…";
+        try {
+            const data = await workspaceRequest("/api/workspaces/select-folder", {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(workspacePayload()),
+            });
+            warning.textContent = data.cancelled ? "Folder selection cancelled." : "Workspace connected.";
+            if (!data.cancelled) setTimeout(() => loadSettings(), 350);
+        } catch (error) {
+            warning.textContent = error.message;
+            warning.style.color = "var(--red)";
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById("btn-workspace-add-path")?.addEventListener("click", async () => {
+        const input = document.getElementById("workspace-manual-path");
+        const path = input?.value.trim();
+        if (!path) return;
+        try {
+            await workspaceRequest("/api/workspaces", {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(workspacePayload(path)),
+            });
+            setTimeout(() => loadSettings(), 350);
+        } catch (error) {
+            warning.textContent = error.message;
+            warning.style.color = "var(--red)";
+        }
+    });
+    document.querySelectorAll(".workspace-revoke").forEach((button) => button.addEventListener("click", async () => {
+        const confirmed = await showConfirm("Revoke workspace", "Remove Remy's access to this folder?");
+        if (!confirmed) return;
+        try {
+            await workspaceRequest(`/api/workspaces/${encodeURIComponent(button.dataset.id)}`, { method: "DELETE" });
+            setTimeout(() => loadSettings(), 250);
+        } catch (error) {
+            warning.textContent = error.message;
+            warning.style.color = "var(--red)";
+        }
+    }));
+    document.querySelectorAll(".workspace-cap").forEach((checkbox) => checkbox.addEventListener("change", async () => {
+        const card = checkbox.closest(".workspace-card");
+        const id = card?.dataset.id;
+        if (!id) return;
+        if (checkbox.dataset.cap === "execute" && checkbox.checked) {
+            const confirmed = await showConfirm(
+                "Enable Execute",
+                "Commands in this folder will run with your Windows user privileges. Each command will still require approval. Continue?",
+            );
+            if (!confirmed) {
+                checkbox.checked = false;
+                return;
+            }
+        }
+        const enabled = [...card.querySelectorAll(".workspace-cap:checked")].map((item) => item.dataset.cap);
+        if (!enabled.length) {
+            checkbox.checked = true;
+            warning.textContent = "Keep at least one capability or revoke the workspace.";
+            return;
+        }
+        try {
+            await workspaceRequest(`/api/workspaces/${encodeURIComponent(id)}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    read: enabled.includes("read"), write: enabled.includes("write"), execute: enabled.includes("execute"),
+                }),
+            });
+            warning.textContent = "Workspace permissions updated.";
+        } catch (error) {
+            checkbox.checked = !checkbox.checked;
+            warning.textContent = error.message;
+            warning.style.color = "var(--red)";
+        }
+    }));
 }
 
 // ============== Helpers ==============

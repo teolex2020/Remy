@@ -120,6 +120,9 @@ htmlcov/
 # ============== BUILD ==============
 *.manifest
 *.spec
+!packaging/windows/remy.spec
+.build/
+/release/
 
 # ============== AUDIO TEMP FILES ==============
 trigger_check.wav

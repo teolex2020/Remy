@@ -44,6 +44,14 @@ BRAIN_TOOLS = [
                     type="STRING",
                     description="Optional semantic type: fact, decision, preference, contradiction, trend, serendipity",
                 ),
+                "valid_from": types.Schema(
+                    type="STRING",
+                    description="Optional business-time start as ISO-8601 or Unix timestamp.",
+                ),
+                "valid_until": types.Schema(
+                    type="STRING",
+                    description="Optional exclusive business-time end as ISO-8601 or Unix timestamp.",
+                ),
             },
             required=["content"],
         ),
@@ -412,7 +420,7 @@ BRAIN_TOOLS = [
     # ---- Scheduler tools ----
     types.FunctionDeclaration(
         name="schedule_task",
-        description="Schedule a reminder or recurring task. ONLY use when the user EXPLICITLY asks to be reminded or to schedule something. Never create tasks on your own initiative — always wait for a direct user request like 'remind me to...', 'schedule...', 'set a reminder for...'.",
+        description="Schedule a reminder or recurring task. Use it whenever the user explicitly asks to schedule, be reminded, or do something on a repeating basis — 'remind me to...', 'schedule...', 'monitor X every day', 'do Y each morning'. For recurring requests set repeat='daily'/'weekly'/'monthly' (or cron). Act on the request and confirm; do not re-ask whether they want a reminder. Do NOT create tasks the user did not ask for on your own initiative.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -453,6 +461,80 @@ BRAIN_TOOLS = [
                     type="STRING", description="Memory level: working, decisions, domain, identity"
                 ),
             },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="recall_memory_as_of",
+        description="Recall the memory versions that were valid at a historical date/time. Use for questions such as 'what did we know then?' without activating old records.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(type="STRING", description="Topic to recall"),
+                "timestamp": types.Schema(type="STRING", description="Historical ISO-8601 datetime or Unix timestamp"),
+                "top_k": types.Schema(type="INTEGER", description="Maximum records, default 10, maximum 20"),
+                "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+            },
+            required=["query", "timestamp"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="search_transcript_history",
+        description=(
+            "Search the exact local conversation transcript. Use this when the user refers "
+            "to something said in an earlier turn and semantic memory is insufficient."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(type="STRING", description="Words or phrase to find"),
+                "session_id": types.Schema(type="STRING", description="Optional session filter"),
+                "limit": types.Schema(type="INTEGER", description="Maximum matches, default 10"),
+            },
+            required=["query"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="supersede_memory",
+        description="Replace an outdated memory while preserving its audit/history chain. Prefer this over update_record when a fact changes over time.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "record_id": types.Schema(type="STRING", description="Existing record ID"),
+                "new_content": types.Schema(type="STRING", description="Replacement fact or memory"),
+                "effective_at": types.Schema(type="STRING", description="Optional effective ISO-8601 datetime or Unix timestamp; defaults to now"),
+                "tags": types.Schema(type="STRING", description="Optional comma-separated replacement tags; defaults to existing tags"),
+                "level": types.Schema(type="STRING", description="Optional memory level; defaults to existing level"),
+                "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+            },
+            required=["record_id", "new_content"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="explain_memory_recall",
+        description="Explain why memories were selected or rejected, including trace_id and temporal/conflict gate reasons. Use to audit surprising or missing recall results.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(type="STRING", description="Recall query to audit"),
+                "top_k": types.Schema(type="INTEGER", description="Maximum selected records, default 10, maximum 20"),
+                "min_strength": types.Schema(type="NUMBER", description="Optional minimum strength"),
+                "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+            },
+            required=["query"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="build_memory_context",
+        description="Build a deterministic token-bounded Aura context capsule for a purpose, optionally as it existed at a historical time.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "purpose": types.Schema(type="STRING", description="What the context will be used for"),
+                "token_budget": types.Schema(type="INTEGER", description="Token budget, default 2000, maximum 8000"),
+                "valid_at": types.Schema(type="STRING", description="Optional historical ISO-8601 datetime or Unix timestamp"),
+                "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+            },
+            required=["purpose"],
         ),
     ),
     types.FunctionDeclaration(
@@ -640,8 +722,13 @@ BRAIN_TOOLS = [
     ),
     # ---- External tools ----
     types.FunctionDeclaration(
+        name="list_local_workspaces",
+        description="List folders the user explicitly connected and their Read, Write, Execute capabilities. This tool cannot grant access.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
         name="read_file",
-        description="Read the contents of a file. Restricted to data directory and allowed paths.",
+        description="Read a file inside a user-approved Local Workspace with Read permission.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -655,7 +742,7 @@ BRAIN_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="write_file",
-        description="Write content to a file. Only allowed in the data directory.",
+        description="Write content inside a user-approved Local Workspace with Write permission.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -669,7 +756,7 @@ BRAIN_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="list_directory",
-        description="List contents of a directory. Restricted to data directory and allowed paths.",
+        description="List a directory inside a user-approved Local Workspace with Read permission.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -1085,8 +1172,86 @@ BRAIN_TOOLS = [
                     ),
                     description="List of task objects. Each MUST have 'role' and 'instruction' fields (max 3 tasks)",
                 ),
+                "background": types.Schema(
+                    type="BOOLEAN",
+                    description=(
+                        "Optional. Run workers asynchronously and return a durable task ID immediately. "
+                        "Use only when the user can continue without the result in this turn."
+                    ),
+                ),
             },
             required=["tasks"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_child_sessions",
+        description="List durable delegated child sessions and their current lifecycle state.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "parent_session_id": types.Schema(
+                    type="STRING",
+                    description="Optional parent conversation filter.",
+                ),
+                "limit": types.Schema(type="INTEGER", description="Maximum results, up to 100."),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_child_report",
+        description="Inspect a child session's attempt history, inbox, report, and settlements.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+            },
+            required=["child_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="follow_up_child_session",
+        description=(
+            "Send durable follow-up instructions to a delegated child. If it is running, "
+            "the follow-up starts at the next safe attempt boundary."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "message": types.Schema(type="STRING", description="Follow-up instruction."),
+                "confirm_side_effects": types.Schema(
+                    type="BOOLEAN",
+                    description="Required when continuing an executor child.",
+                ),
+            },
+            required=["child_id", "message"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="interrupt_child_session",
+        description="Cooperatively interrupt an active delegated child without deleting its state.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "reason": types.Schema(type="STRING", description="Operator-visible reason."),
+            },
+            required=["child_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="resume_child_session",
+        description="Cold-resume a continuable child under the same stable child ID.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "confirm_side_effects": types.Schema(
+                    type="BOOLEAN",
+                    description="Required when resuming an executor child.",
+                ),
+            },
+            required=["child_id"],
         ),
     ),
     # Browser automation (Playwright)
@@ -1096,7 +1261,8 @@ BRAIN_TOOLS = [
             "Open a web page in a real browser (Playwright) and analyze it visually. "
             "Use when you need JS-rendered content, forms, or interactive sites. "
             "For static articles/docs prefer extract_content (faster, cheaper). "
-            "Returns page description, interactive elements with CSS selectors, forms. ~500 tokens."
+            "Returns verified status plus extracted page_text, page description, interactive elements, and forms. "
+            "Only page_text is factual grounding for summaries; never infer site content from the URL or screenshot description alone."
         ),
         parameters=types.Schema(
             type="OBJECT",
@@ -1177,6 +1343,93 @@ BRAIN_TOOLS = [
                 ),
             },
             required=["tool_names"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_available_skills",
+        description="List progressive capability bundles that can be activated for the current task.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="list_pipeline_candidates",
+        description="List workflow drafts inferred from repeated successful tasks, including dry-run and approval state.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "status": types.Schema(type="STRING", description="draft, dry_run_passed, activated, rejected, or all"),
+        }),
+    ),
+    types.FunctionDeclaration(
+        name="propose_pipeline_candidate",
+        description="Create an approval-gated pipeline draft for an explicitly requested repeatable task. This never activates it.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"task": types.Schema(type="STRING", description="Repeatable task to compile into a draft")},
+            required=["task"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_ptc_tools",
+        description="List the strict read-only tool allowlist for the bounded PTC pilot.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="validate_ptc_program",
+        description=(
+            "Statically validate a bounded JSON PTC program without running it. "
+            "Only prior-step $ref values and the read-only allowlist are accepted."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "program": types.Schema(type="OBJECT", description="PTC JSON program with version and steps"),
+                "limits": types.Schema(type="OBJECT", description="Optional max_calls, time_budget_ms, output_chars"),
+            },
+            required=["program"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="run_ptc_program",
+        description=(
+            "Run a statically validated, sequential, read-only PTC program with hard call, "
+            "time, and output budgets. Every step still passes through ToolPipeline."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "program": types.Schema(type="OBJECT", description="Validated PTC JSON program"),
+                "limits": types.Schema(type="OBJECT", description="Optional bounded execution limits"),
+            },
+            required=["program"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="enable_skill",
+        description="Enable one capability bundle and its relevant tools for this conversation.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"skill_name": types.Schema(type="STRING", description="Skill bundle name")},
+            required=["skill_name"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_capability_profiles",
+        description="List validated runtime profiles and their capability bundle overlays.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="activate_capability_profile",
+        description=(
+            "Activate a validated capability profile for this turn. Profiles change tool visibility "
+            "but never bypass approvals, provenance, permissions, or policy guards."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "profile_id": types.Schema(
+                    type="STRING",
+                    description="Profile ID such as standard, research, read_only, or operator",
+                ),
+            },
+            required=["profile_id"],
         ),
     ),
     # ============== SCRATCHPAD (v2.3, Rec 14.3) ==============
@@ -1504,8 +1757,10 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="fs_read",
         description=(
-            "Read any file on the server. No path restrictions — you can read configs, logs, "
-            "source code, data files, etc. Binary files return base64-encoded content. "
+            "Read a file only inside a user-approved Local Workspace with Read permission. "
+            "The built-in project workspace exposes only Documents explicitly shared with the agent "
+            "and Sandbox working files; Remy's internal state is never exposed. "
+            "Use workspace://<id>/path when possible. Binary files return base64-encoded content. "
             "Large files are truncated; use offset/limit for paging."
         ),
         parameters=types.Schema(
@@ -1522,8 +1777,9 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="fs_write",
         description=(
-            "Write or append content to a file. RESTRICTED to safe directories: data/, tmp/, output/. "
-            "Creates parent directories automatically. Cannot overwrite source code or system files."
+            "Write or append content only inside a Local Workspace with Write permission. "
+            "In the built-in project workspace, write only under Documents or Sandbox. "
+            "Creates parent directories automatically and audits the access."
         ),
         parameters=types.Schema(
             type="OBJECT",
@@ -1546,7 +1802,7 @@ BRAIN_TOOLS = [
             properties={
                 "mode": types.Schema(type="STRING", description="'glob' (find files by name) or 'grep' (search content by regex)"),
                 "pattern": types.Schema(type="STRING", description="Glob pattern (e.g. '**/*.log') or regex pattern for grep"),
-                "path": types.Schema(type="STRING", description="Directory to search in. Default: project root (BASE_DIR)"),
+                "path": types.Schema(type="STRING", description="Approved workspace directory. Default: workspace://data/"),
                 "max_results": types.Schema(type="INTEGER", description="Max results to return. Default: 50"),
                 "include_content": types.Schema(type="BOOLEAN", description="For grep: include matching lines. Default: true"),
             },
@@ -1556,19 +1812,17 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="shell_exec",
         description=(
-            "Execute a shell command on the server. Returns stdout, stderr, and exit code. "
-            "Use for: checking system state, running scripts, git operations, package management, etc. "
-            "Dangerous commands (rm -rf /, format, shutdown, etc.) are blocked. "
-            "Commands run with a timeout (default 30s, max 120s). Working directory is project root."
+            "Execute only in a Local Workspace with Execute permission and human approval. "
+            "Execute is not an OS sandbox; the process has the current user's privileges. Every run is audited."
         ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "command": types.Schema(type="STRING", description="Shell command to execute"),
                 "timeout": types.Schema(type="INTEGER", description="Timeout in seconds (default: 30, max: 120)"),
-                "working_dir": types.Schema(type="STRING", description="Working directory. Default: project root"),
+                "working_dir": types.Schema(type="STRING", description="Required Execute-approved workspace directory"),
             },
-            required=["command"],
+            required=["command", "working_dir"],
         ),
     ),
 ]
@@ -1585,6 +1839,10 @@ CORE_TOOL_NAMES = frozenset(
         "search_exact",
         "get_full_record",
         "get_protected_record",
+        "recall_memory_as_of",
+        "supersede_memory",
+        "explain_memory_recall",
+        "build_memory_context",
         # Utility
         "web_search",
         "get_current_datetime",
@@ -1600,9 +1858,28 @@ CORE_TOOL_NAMES = frozenset(
         # Health & Meta
         "tool_status",
         "list_available_tools",
+        "list_local_workspaces",
+        # Active code workspace inspection (read-only by default)
+        "fs_read",
+        "fs_search",
+        "list_directory",
         "enable_tools",
+        "list_capability_profiles",
+        "activate_capability_profile",
+        "list_available_skills",
+        "enable_skill",
+        "list_pipeline_candidates",
+        "propose_pipeline_candidate",
+        "search_transcript_history",
         # Scratchpad
         "scratchpad",
+        # Tasks & reminders (users routinely ask to schedule/track things in
+        # chat; keeping these out of CORE made the agent unable to act on an
+        # explicit "remind me / do this every day" request).
+        "schedule_task",
+        "add_todo",
+        "list_todos",
+        "update_todo",
     }
 )
 

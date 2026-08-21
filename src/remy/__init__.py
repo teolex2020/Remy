@@ -1,7 +1,7 @@
 """
 Remy Package
 """
-__version__ = "0.1.0"
+__version__ = "0.9.0"
 
 import json
 from enum import Enum

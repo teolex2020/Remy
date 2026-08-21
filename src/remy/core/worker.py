@@ -15,10 +15,10 @@ from typing import Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
-from langgraph.graph.message import add_messages
 
 from remy.config.settings import settings
 from remy.core.autonomy import AGENT_ROLES, AgentRole
+from remy.core.message_state import MESSAGE_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class WorkerTask:
     context: str = ""       # Optional context from orchestrator
     approval_mode: str = "none"  # "none" | "publish" | "financial" | "all_clicks"
     delegation_depth: int = 0    # 0 = top-level worker; 1 = sub-worker (max)
+    allowed_tools: tuple[str, ...] = ()  # Optional hard ceiling; empty preserves legacy role scope
 
 
 @dataclass
@@ -61,7 +62,10 @@ _COMMON_TOOLS = frozenset({
 })
 
 
-def get_worker_tools(role: AgentRole) -> list:
+def get_worker_tools(
+    role: AgentRole,
+    allowed_tools: tuple[str, ...] | list[str] | None = None,
+) -> list:
     """Build a hard-filtered tool list for a worker role.
 
     Only includes role.priority_tools + common tools, minus blocked/avoided.
@@ -69,6 +73,8 @@ def get_worker_tools(role: AgentRole) -> list:
     from remy.core.langgraph_tools import get_all_tools
 
     allowed = set(role.priority_tools) | _COMMON_TOOLS
+    if allowed_tools:
+        allowed &= {str(name) for name in allowed_tools}
     blocked = set(role.avoid_tools) | _WORKER_BLOCKED_TOOLS
 
     return [t for t in get_all_tools() if t.name in allowed and t.name not in blocked]
@@ -96,9 +102,15 @@ def _prefetch_brain_context(query: str, limit: int = 3) -> str:
 
 def build_worker_system_instruction(role: AgentRole, task: WorkerTask) -> str:
     """Build a compact system instruction for a worker agent (~500 tokens)."""
-    tool_names = [t.name for t in get_worker_tools(role)]
+    tool_names = [t.name for t in get_worker_tools(role, task.allowed_tools)]
 
     brain_context = _prefetch_brain_context(task.instruction)
+    persistence_rule = (
+        "- This team run is READ-ONLY. Do not write memory, files, browser state, "
+        "or external systems.\n"
+        if task.allowed_tools
+        else "- Store important findings in brain memory for future reference.\n"
+    )
 
     return (
         f"You are a WORKER agent with role: {role.name.upper()} — {role.description}.\n\n"
@@ -113,7 +125,7 @@ def build_worker_system_instruction(role: AgentRole, task: WorkerTask) -> str:
         "- Do NOT delegate or plan beyond your scope.\n"
         "- Do NOT greet or ask follow-up questions.\n"
         "- If you cannot complete the task, explain why.\n"
-        "- Store important findings in brain memory for future reference.\n"
+        + persistence_rule
     )
 
 
@@ -121,12 +133,13 @@ def build_worker_system_instruction(role: AgentRole, task: WorkerTask) -> str:
 
 
 class WorkerState(TypedDict):
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list, MESSAGE_CHANNEL]
     session_id: str
     channel: str
     tool_call_count: int
     _live_tool_log: list  # shared mutable list for cross-thread tool tracking
     _max_iterations: int  # per-worker iteration cap (from step_budget or settings)
+    _allowed_tools: tuple[str, ...]
 
 
 def _worker_call_model(state: WorkerState) -> dict:
@@ -137,17 +150,15 @@ def _worker_call_model(state: WorkerState) -> dict:
     # Role is encoded in channel: "worker-researcher" → "researcher"
     role_name = channel.replace("worker-", "") if channel.startswith("worker-") else "researcher"
     role = AGENT_ROLES.get(role_name, AGENT_ROLES["researcher"])
-    tools = get_worker_tools(role)
+    tools = get_worker_tools(role, state.get("_allowed_tools"))
 
-    # Strip text from intermediate AIMessages with tool_calls to prevent
-    # duplicate response generation (model repeats its own intermediate text)
-    cleaned = []
-    for msg in messages:
-        if isinstance(msg, AIMessage) and msg.tool_calls and msg.content:
-            cleaned.append(AIMessage(content="", tool_calls=msg.tool_calls, id=msg.id))
-        else:
-            cleaned.append(msg)
-    messages = cleaned
+    from remy.core.turn_middleware import TurnContext, run_before_model_middleware
+
+    middleware_result = run_before_model_middleware(
+        messages,
+        TurnContext(session_id=state.get("session_id", ""), channel=channel),
+    )
+    messages = middleware_result.messages
 
     from remy.core.llm import call_llm
     from remy.core.model_trace import model_call_event
@@ -175,8 +186,10 @@ def _worker_call_model(state: WorkerState) -> dict:
                 duration_ms=llm_duration_ms,
             )
         )
+        for artifact in middleware_result.artifacts:
+            live_log.append({"type": "artifact", **artifact})
 
-    return {"messages": [response]}
+    return {"messages": [*middleware_result.state_updates, response]}
 
 
 def _worker_call_tools(state: WorkerState) -> dict:
@@ -197,7 +210,9 @@ def _worker_call_tools(state: WorkerState) -> dict:
     # Build tool map from scoped tools
     role_name = channel.replace("worker-", "") if channel.startswith("worker-") else "researcher"
     role = AGENT_ROLES.get(role_name, AGENT_ROLES["researcher"])
-    tool_map = {t.name: t for t in get_worker_tools(role)}
+    tool_map = {
+        t.name: t for t in get_worker_tools(role, state.get("_allowed_tools"))
+    }
 
     tool_messages = []
     count = state.get("tool_call_count", 0)
@@ -322,7 +337,7 @@ def _build_worker_graph():
 # ============== EXECUTION ==============
 
 
-async def execute_single_worker(
+async def _execute_single_worker_impl(
     task: WorkerTask,
     session_id: str,
     channel: str,
@@ -437,6 +452,12 @@ async def execute_single_worker(
     )
 
     start_time = time.time()
+    from remy.core.cancellation import (
+        CancellationToken,
+        bind_cancellation_token,
+        current_cancellation_token,
+    )
+    operation_token = current_cancellation_token() or CancellationToken()
     try:
         graph = _build_worker_graph()
         sys_instruction = build_worker_system_instruction(role, task)
@@ -453,13 +474,17 @@ async def execute_single_worker(
             "_max_iterations": effective_iterations,
             "_approval_mode": task.approval_mode,
             "_delegation_depth": task.delegation_depth,
+            "_allowed_tools": tuple(task.allowed_tools),
         }
 
         config = {"recursion_limit": effective_iterations * 2 + 5}
 
+        def _invoke_worker_graph():
+            with bind_cancellation_token(operation_token):
+                return graph.invoke(state, config)
+
         result_state = await asyncio.wait_for(
-            asyncio.to_thread(graph.invoke, state, config),
-            timeout=effective_timeout,
+            asyncio.to_thread(_invoke_worker_graph), timeout=effective_timeout
         )
 
         elapsed = time.time() - start_time
@@ -503,6 +528,7 @@ async def execute_single_worker(
         )
 
     except asyncio.TimeoutError:
+        operation_token.cancel("Worker timeout reached")
         elapsed = time.time() - start_time
         # Snapshot tool calls made before timeout
         recovered_tool_count = sum(
@@ -554,10 +580,69 @@ async def execute_single_worker(
         )
 
 
+async def execute_single_worker(
+    task: WorkerTask,
+    session_id: str,
+    channel: str,
+    step_budget: int = 0,
+    timeout_override: float | None = None,
+) -> WorkerResult:
+    """Run a delegated worker with a durable terminal execution receipt."""
+    import uuid
+
+    from remy.core.execution_ledger import get_execution_ledger
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
+
+    ledger = get_execution_ledger()
+    owner = get_project_store().require_project(current_project_id())
+    attempt = ledger.claim(
+        kind="worker",
+        job_id=f"{session_id}:{task.role}:{uuid.uuid4().hex}",
+        idempotency_class="side_effecting" if task.role == "executor" else "read_only",
+        owner_project_id=owner.project_id,
+        brain_id=owner.brain_id,
+        session_id=session_id,
+        channel=channel,
+        metadata={"role": task.role, "instruction": task.instruction[:500]},
+    )
+    attempt_id = attempt["attempt_id"]
+    ledger.mark_running(attempt_id)
+    try:
+        result = await _execute_single_worker_impl(
+            task,
+            session_id,
+            channel,
+            step_budget=step_budget,
+            timeout_override=timeout_override,
+        )
+        terminal = {
+            "success": "completed",
+            "timeout": "completed_with_limits",
+            "cancelled": "cancelled",
+        }.get(result.status, "failed")
+        ledger.finish(
+            attempt_id,
+            terminal,
+            error=result.output if terminal == "failed" else "",
+            metadata={"tool_calls": result.tool_calls, "elapsed_sec": result.elapsed_sec},
+        )
+        return result
+    except asyncio.CancelledError:
+        ledger.finish(attempt_id, "cancelled", error="Worker task cancelled")
+        raise
+    except Exception as exc:
+        ledger.finish(attempt_id, "failed", error=str(exc))
+        raise
+
+
 async def execute_workers(
     tasks: list[WorkerTask],
     session_id: str,
     channel: str,
+    *,
+    step_budget: int = 0,
+    timeout_override: float | None = None,
 ) -> list[WorkerResult]:
     """Execute multiple worker tasks in parallel (fan-out/fan-in)."""
     from remy.core.event_bus import event_bus
@@ -574,7 +659,16 @@ async def execute_workers(
     })
 
     results = await asyncio.gather(
-        *[execute_single_worker(t, session_id, channel) for t in tasks],
+        *[
+            execute_single_worker(
+                t,
+                session_id,
+                channel,
+                step_budget=step_budget,
+                timeout_override=timeout_override,
+            )
+            for t in tasks
+        ],
         return_exceptions=True,
     )
 

@@ -266,11 +266,10 @@ def _get_proactive_context_locked() -> str:
 
     # 2b. Last dialogue from previous session (cheap — JSON file read, no LLM)
     try:
-        brain_path = str(getattr(brain, "path", ""))
-        if brain_path and brain_path == str(settings.AURA_BRAIN_PATH):
-            history_dir = settings.DATA_DIR / "history"
-        else:
-            history_dir = None
+        from remy.core.microbrain import current_project_id
+        from remy.core.project_store import project_data_root
+
+        history_dir = project_data_root(current_project_id()) / "history"
         if history_dir and history_dir.exists():
             files = sorted(history_dir.glob("*.json"), key=lambda f: f.name, reverse=True)
             if files:

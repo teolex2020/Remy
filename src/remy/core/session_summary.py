@@ -60,12 +60,23 @@ async def generate_session_summary(client, session_log: list[dict], session_id: 
     )
 
     try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=settings.SUMMARY_MODEL,
-            contents=prompt,
+        # Use the same provider-aware layer as chat. SUMMARY_MODEL may be an
+        # NVIDIA, OpenRouter, Anthropic, Ollama, or Gemini model; sending every
+        # name through the Google SDK produces invalid /generateContent URLs.
+        from remy.core.llm import call_llm_async
+
+        response = await call_llm_async(
+            prompt,
+            purpose="session_summary",
+            channel="web",
         )
-        summary = response.text.strip() if response.text else None
+        content = getattr(response, "content", "") or ""
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        summary = str(content).strip() or None
 
         if summary:
             from remy.core.agent_tools import Level, brain_lock

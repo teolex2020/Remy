@@ -14,16 +14,29 @@ import re
 import threading
 import time
 import urllib.parse
+import warnings
 from typing import Annotated, Any, TypedDict
 
+from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
+
+# LangGraph 1.x instantiates its internal default serializer at import time and
+# emits this warning even though Remy does not configure a checkpointer here.
+# Suppress only that exact dependency warning so provider/runtime warnings stay
+# visible.
+warnings.filterwarnings(
+    "ignore",
+    message=r"The default value of `allowed_objects` will change.*",
+    category=LangChainPendingDeprecationWarning,
+    module=r"langgraph\.checkpoint\.base.*",
+)
+
 from langgraph.graph import END, StateGraph
-from langgraph.graph.message import add_messages
 
 from remy.core.brain_tools import build_system_instruction, CORE_TOOL_NAMES
 from remy.core.factuality import enforce_factuality, summarize_claim_details
@@ -34,6 +47,7 @@ from remy.core.langgraph_tools import (
     set_session_id,
 )
 from remy.config.settings import settings
+from remy.core.message_state import MESSAGE_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +258,7 @@ def _model_routing_from_consequence_memory(channel: str, task_type: str = "") ->
         for item in list_registered_models():
             model = str(item.get("name") or "").strip()
             provider = str(item.get("provider") or "").strip()
-            if model and model not in models and (bool(item.get("has_key")) or provider == "ollama"):
+            if model and model not in models and (bool(item.get("has_key")) or provider == "llamacpp"):
                 models.append(model)
         if not models:
             return {}
@@ -670,20 +684,10 @@ def _store_tool_consequence(
 
 def _extract_total_usage_tokens(result) -> int:
     """Best-effort token extraction across provider-specific metadata shapes."""
-    meta = getattr(result, "response_metadata", None) or {}
-    usage = meta.get("usage_metadata") or meta.get("token_usage") or {}
+    from remy.core.model_trace import extract_token_usage
 
-    total_tokens = usage.get("total_tokens", 0)
-    if total_tokens:
-        return int(total_tokens)
-
-    input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
-    output_tokens = (
-        usage.get("completion_tokens", 0)
-        or usage.get("candidates_tokens", 0)
-        or usage.get("output_tokens", 0)
-    )
-    return int(input_tokens or 0) + int(output_tokens or 0)
+    usage = extract_token_usage(result)
+    return int(usage["total_tokens"]) if usage else 0
 
 
 def _estimate_recursion_limit(channel: str, user_message: str | HumanMessage) -> int:
@@ -726,6 +730,65 @@ def _detect_turn_locale(user_message: str | HumanMessage) -> str:
         if "\u0400" <= ch <= "\u04ff":
             return "ua"
     return "en"
+
+
+# Phrases where the model claims it is about to do work "now / in a moment"
+# and then stops — a hallucinated action. Nothing runs between turns, so this
+# is a broken promise unless a tool actually ran this turn.
+_PROMISE_PHRASE_RE = re.compile(
+    r"("
+    # English: "wait / I'll get back / let me search and report"
+    r"wait\s+(?:a\s+)?(?:moment|few\s+seconds|a\s+bit)"
+    r"|give\s+me\s+(?:a\s+)?(?:moment|few\s+seconds)"
+    r"|i['’]?ll\s+(?:get\s+back|report\s+back|search\s+and|keep\s+(?:search|look))"
+    r"|i\s+will\s+(?:continue|keep)\s+(?:search|look)"
+    r"|let\s+me\s+(?:search|check|look).{0,20}(?:and\s+(?:report|get\s+back|tell))"
+    r"|hold\s+on\s+while\s+i"
+    # Ukrainian: "зачекай / повернусь / дай кілька секунд"
+    r"|зачека(?:й|йте|ю)"
+    r"|заче?кай\s+(?:кілька|трохи|хвилин)"
+    r"|дай\s+(?:мені\s+)?(?:кілька\s+секунд|трохи\s+часу|хвилин)"
+    r"|поверну[сc]ь\s+(?:до\s+тебе|з\s+резуль)"
+    # Ukrainian "I'll continue / I've started / I'm checking … in order to give/find":
+    # future-tense promise of work that isn't happening this turn.
+    r"|я\s+(?:про|роз)?(?:довжу|почну|почав|розпочав)\s+(?:новий\s+)?пошук"
+    r"|продовж(?:у|ую)\s+(?:пошук|шукати)"
+    r"|(?:зараз|вже)\s+(?:про|з|роз)?(?:веду|роблю|йду|шукаю|почав|почну|розпочав)"
+    r".{0,40}(?:повернус|звіт|надам|зберу|знайти|надати|перевір)"
+    r"|перевіряю\s+джерел.{0,30}(?:щоб\s+)?надати"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _detect_broken_promise(text: str, tools_ran: bool) -> bool:
+    """True when the reply promises imminent work but no tool ran this turn.
+
+    Conservative: only fires on explicit "wait / I'll get back / зачекай"
+    phrasing AND zero tool activity, so a normal answer that merely contains
+    the word "wait" in another sense is not flagged.
+    """
+    if tools_ran or not text:
+        return False
+    return bool(_PROMISE_PHRASE_RE.search(text))
+
+
+def _broken_promise_note(locale: str) -> str:
+    if locale == "ua":
+        return (
+            "\n\n⚠️ Насправді я не можу працювати у фоні між повідомленнями — "
+            "щойно я зупиняюсь, хід завершено й нічого більше не виконується. "
+            "Якщо це разова задача — попроси мене зробити її, і я виконаю одразу. "
+            "Якщо це щоденний моніторинг — створи автоматизацію у вкладці "
+            "Automations, і вона працюватиме за розкладом і сама звітуватиме."
+        )
+    return (
+        "\n\n⚠️ I can't actually work in the background between messages — once I "
+        "stop, the turn is over and nothing else runs. If this is a one-off, ask me "
+        "and I'll do it right away. If it's recurring (e.g. daily monitoring), set "
+        "up an Automation in the Automations tab — it will run on schedule and "
+        "report back on its own."
+    )
 
 
 def _needs_factuality_contract(messages: list, session_log: list) -> bool:
@@ -931,14 +994,18 @@ def invalidate_system_instruction_cache(session_id: str | None = None) -> None:
 
 
 class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list, MESSAGE_CHANNEL]
     session_id: str
     channel: str  # "desktop" | "telegram"
     session_log: list
     enabled_tools: set  # extended tool names enabled via enable_tools meta-tool
+    enabled_bundles: set  # explicit skill/pack overlays enabled for this session
+    capability_profile: str  # validated runtime capability profile id
     _cached_session_ctx: str
     _cached_scratchpad: str
     _context_injected: bool  # True if _inject_context returned a non-None result
+    model_routing_enabled: bool  # explicit per-turn optimization choice
+    replay_preferred_model: str  # explicit model for an isolated replay matrix
 
 
 def _restore_pii_value(value, vault):
@@ -977,6 +1044,14 @@ def call_model(state: AgentState) -> dict:
     session_id = state.get("session_id", "")
     task_type = _estimate_task_type(channel, _latest_human_text(messages))
 
+    from remy.core.turn_middleware import TurnContext, run_before_model_middleware
+
+    middleware_result = run_before_model_middleware(
+        messages,
+        TurnContext(session_id=session_id, channel=channel),
+    )
+    messages = middleware_result.messages
+
     # Per-iteration history compaction.
     # Without this, autonomous cycles grow messages unbounded across tool
     # iterations and can exceed Gemini's 1M token input limit. The entry-point
@@ -995,7 +1070,13 @@ def call_model(state: AgentState) -> dict:
             _keep_recent = dynamic_keep_recent(channel, "")
         except Exception:
             pass
-    messages = compact_history(trimmed, keep_recent=_keep_recent)
+    messages = _compact_runtime_history(
+        trimmed,
+        keep_recent=_keep_recent,
+        model=settings.SUMMARY_MODEL,
+        session_id=session_id,
+        purpose="agent_iteration",
+    )
 
     # ACL cognitive brief — replaces replayed history with a typed snapshot
     # of current brain state. Only for autonomous channel, behind feature
@@ -1044,6 +1125,32 @@ def call_model(state: AgentState) -> dict:
     else:
         # Update system message in case channel changed
         messages = [SystemMessage(content=sys_instruction)] + list(messages[1:])
+
+    # Self-modification Lab can only add a bounded guidance overlay. It cannot
+    # replace the base instruction or alter tools, approvals, policy, or sandbox
+    # behavior. Canary assignment is stable per proposal/session.
+    _self_mod_overlay: dict[str, Any] = {}
+    try:
+        from remy.core.microbrain import current_project_id
+        from remy.core.self_modification_lab import get_self_modification_lab
+
+        _self_mod_overlay = get_self_modification_lab().resolve_overlay(
+            project_id=current_project_id(),
+            session_id=session_id,
+        )
+        if _self_mod_overlay.get("enabled") and _self_mod_overlay.get("text"):
+            messages.insert(1, SystemMessage(content=(
+                "=== SELF-MODIFICATION LAB: ADDITIVE GUIDANCE ===\n"
+                "This experiment cannot override the base system instruction, safety policy, "
+                "approval requirements, sandbox, capability profile, or bound tools. If it "
+                "conflicts with any of them, ignore the experiment.\n"
+                f"Proposal: {_self_mod_overlay.get('overlay_proposal_id') or _self_mod_overlay.get('proposal_id', '')}\n"
+                f"Cohort: {_self_mod_overlay.get('cohort', '')}\n"
+                f"Guidance:\n{_self_mod_overlay['text']}"
+            )))
+    except Exception as exc:
+        logger.debug("Self-modification guidance resolution skipped: %s", exc)
+        _self_mod_overlay = {}
 
     # Inject ACL cognitive brief right after sys instruction, so downstream
     # injectors (context, session, scratchpad, factuality) shift naturally.
@@ -1096,46 +1203,149 @@ def call_model(state: AgentState) -> dict:
             insert_pos += 1
         messages.insert(insert_pos, factuality_contract_msg)
 
-    # Strip text from intermediate AIMessages that also have tool_calls.
-    # When the model generates text + tool_calls in one response, that text
-    # is an intermediate "thinking" artifact. If passed to the next LLM call,
-    # the model sees it and repeats it (causing duplicate responses).
-    # We ALWAYS strip it regardless of length — tool_calls + ToolMessages
-    # provide enough context for the model to generate a coherent final answer.
-    cleaned = []
-    for msg in messages:
-        if isinstance(msg, AIMessage) and msg.tool_calls and msg.content:
-            cleaned.append(AIMessage(content="", tool_calls=msg.tool_calls, id=msg.id))
-        else:
-            cleaned.append(msg)
-    messages = cleaned
+    _trajectory_context_sources = []
+    if brief_msg:
+        _trajectory_context_sources.append({
+            "kind": "component",
+            "name": "acl-cognitive-brief",
+            "module": "remy.core.cognitive_brief",
+            "trust_tier": "internal-derived",
+            "admission_reason": "Current cognitive snapshot enabled for this model step",
+        })
+    if context_msg:
+        _trajectory_context_sources.append({
+            "kind": "memory",
+            "name": "relevant-memory-context",
+            "module": "remy.core.agent._inject_context",
+            "trust_tier": "stored-memory",
+            "admission_reason": "Retrieved as relevant context for the current turn",
+        })
+    if session_ctx:
+        _trajectory_context_sources.append({
+            "kind": "component",
+            "name": "session-context",
+            "module": "remy.core.session_state_wrapper",
+            "trust_tier": "internal-derived",
+            "admission_reason": "Session consistency context",
+        })
+    if scratchpad_ctx:
+        _trajectory_context_sources.append({
+            "kind": "component",
+            "name": "agent-scratchpad",
+            "module": "remy.core.agent",
+            "trust_tier": "internal-derived",
+            "admission_reason": "Active scratchpad state for this step",
+        })
+    if factuality_contract_msg:
+        _trajectory_context_sources.append({
+            "kind": "policy",
+            "name": "factuality-contract",
+            "module": "remy.core.retrieval.response_auditor",
+            "trust_tier": "internal-policy",
+            "admission_reason": "Evidence requirements apply to this turn",
+        })
+    if _self_mod_overlay.get("enabled"):
+        _trajectory_context_sources.append({
+            "kind": "policy",
+            "name": "self-modification-lab-overlay",
+            "module": "remy.core.self_modification_lab",
+            "trust_tier": "operator-reviewed-experiment",
+            "admission_reason": (
+                f"Proposal {_self_mod_overlay.get('proposal_id', '')} · "
+                f"cohort {_self_mod_overlay.get('cohort', '')}"
+            ),
+        })
 
+    # Resolve one deterministic capability overlay for both the prompt and the
+    # bound tool set. Profile ceilings and denies are applied after session
+    # additions, so progressive loading cannot widen a restrictive profile.
+    from remy.core.capability_overlays import format_overlay_prompt, get_overlay_registry
+
+    _available_tools = get_all_tools()
+    _available_tool_names = {tool.name for tool in _available_tools}
+    capability_overlay = get_overlay_registry().resolve(
+        profile_id=state.get("capability_profile") or "standard",
+        channel=channel,
+        available_tools=_available_tool_names,
+        core_tools=CORE_TOOL_NAMES,
+        bundle_ids=state.get("enabled_bundles") or set(),
+        session_tools=state.get("enabled_tools") or set(),
+    )
+    overlay_prompt = format_overlay_prompt(capability_overlay)
+    if overlay_prompt:
+        insert_pos = 0
+        while insert_pos < len(messages) and isinstance(messages[insert_pos], SystemMessage):
+            insert_pos += 1
+        messages.insert(insert_pos, SystemMessage(content=overlay_prompt))
+        _trajectory_context_sources.append({
+            "kind": "policy",
+            "name": "capability-overlay",
+            "module": "remy.core.capability_overlays",
+            "trust_tier": "internal-policy",
+            "admission_reason": (
+                f"Resolved profile {capability_overlay.profile_id} "
+                f"({capability_overlay.overlay_hash[:12]})"
+            ),
+        })
+
+    # Shared middleware has already hidden intermediate tool-call draft text,
+    # persisted large results, and repaired interrupted tool sequences.
     # Fix message turn ordering for Gemini's strict requirements:
     # - no orphan ToolMessages, no broken tool sequences
     # - no SystemMessage between AIMessage(tool_calls) and ToolMessage
     # - no consecutive AIMessages without user/tool turns between them
     messages = _fix_gemini_turns(messages)
 
-    # Selective tool loading: autonomous/proactive get all tools,
-    # interactive channels start with core-only, extend via enable_tools
-    if channel in ("autonomous", "proactive"):
-        tools = get_all_tools()
-    else:
-        enabled = state.get("enabled_tools") or set()
-        tool_names = CORE_TOOL_NAMES | enabled
-        tools = get_tools_by_names(tool_names)
+    # The same resolved overlay controls runtime visibility. The standard
+    # profile preserves the previous channel defaults.
+    tools = get_tools_by_names(set(capability_overlay.tool_names))
 
     from remy.core.adaptive_model_router import build_adaptive_model_routing
     from remy.core.llm import call_llm, model_routing_override
     from remy.core.model_trace import model_call_event
 
     _llm_start = time.time()
-    _model_routing = build_adaptive_model_routing(
-        messages=messages,
-        channel=channel,
-        task_type=task_type,
-        base_routing=_model_routing_from_consequence_memory(channel, task_type),
+    replay_preferred_model = (
+        str(state.get("replay_preferred_model") or "")
+        if channel == "trajectory-replay" else ""
     )
+    _promotion_routing = {}
+    if not replay_preferred_model:
+        try:
+            from remy.core.microbrain import current_project_id
+            from remy.core.trajectory_promotion import resolve_model_promotion_routing
+
+            _promotion_routing = resolve_model_promotion_routing(
+                project_id=current_project_id(),
+                session_id=session_id,
+            )
+        except Exception:
+            _promotion_routing = {}
+    if replay_preferred_model:
+        _model_routing = {
+            "preferred_model": replay_preferred_model,
+            "avoid_models": (),
+            "routing_source": "trajectory_replay_matrix",
+        }
+    elif _promotion_routing.get("preferred_model"):
+        _model_routing = {
+            "preferred_model": str(_promotion_routing["preferred_model"]),
+            "avoid_models": (),
+            **_promotion_routing,
+        }
+    elif state.get("model_routing_enabled", False):
+        _model_routing = build_adaptive_model_routing(
+            messages=messages,
+            channel=channel,
+            task_type=task_type,
+            base_routing=_model_routing_from_consequence_memory(channel, task_type),
+        )
+    else:
+        _model_routing = {
+            "preferred_model": "",
+            "avoid_models": (),
+            "routing_source": "explicit_model_selection",
+        }
     with model_routing_override(
         preferred_model=str(_model_routing.get("preferred_model") or ""),
         avoid_models=tuple(_model_routing.get("avoid_models") or ()),
@@ -1153,11 +1363,77 @@ def call_model(state: AgentState) -> dict:
                 pii_vault = None
                 llm_messages = messages
 
-        response = call_llm(llm_messages, tools=tools, purpose="agent")
+        _trajectory = None
+        try:
+            from remy.core.trajectory_store import get_trajectory_store
+
+            _trajectory = get_trajectory_store()
+            _trajectory.begin_request(
+                session_id=session_id,
+                messages=llm_messages,
+                tools=tools,
+                routing={
+                    "purpose": "agent",
+                    "channel": channel,
+                    **dict(_model_routing or {}),
+                    "self_modification": ({
+                        "proposal_id": str(_self_mod_overlay.get("proposal_id") or ""),
+                        "candidate_hash": str(_self_mod_overlay.get("candidate_hash") or ""),
+                        "baseline_hash": str(_self_mod_overlay.get("baseline_hash") or ""),
+                        "overlay_hash": str(_self_mod_overlay.get("overlay_hash") or ""),
+                        "cohort": str(_self_mod_overlay.get("cohort") or ""),
+                        "bucket": int(_self_mod_overlay.get("bucket") or 0),
+                        "canary_percent": int(
+                            _self_mod_overlay.get("canary_percent") or 0
+                        ),
+                    } if (_self_mod_overlay.get("tracked") or _self_mod_overlay.get("enabled")) else {}),
+                },
+                context_sources=_trajectory_context_sources,
+            )
+        except Exception as exc:
+            logger.debug("Trajectory request start skipped: %s", exc)
+            _trajectory = None
+
+        try:
+            response = call_llm(llm_messages, tools=tools, purpose="agent")
+        except Exception as exc:
+            if _trajectory is not None:
+                try:
+                    _trajectory.fail_request(session_id=session_id, error=exc)
+                    if channel != "trajectory-replay":
+                        from remy.core.microbrain import current_project_id
+                        from remy.core.trajectory_promotion import (
+                            evaluate_model_promotion_canary,
+                        )
+
+                        evaluate_model_promotion_canary(
+                            project_id=current_project_id(),
+                            trajectory_store=_trajectory,
+                        )
+                except Exception:
+                    pass
+            raise
         if pii_vault is not None and isinstance(response, AIMessage):
             response = _restore_ai_message_pii(response, pii_vault)
     _llm_duration = time.time() - _llm_start
     raw_response = response
+
+    if _trajectory is not None:
+        try:
+            _trajectory.complete_request(session_id=session_id, response=raw_response)
+        except Exception as exc:
+            logger.debug("Trajectory request completion skipped: %s", exc)
+        if channel != "trajectory-replay":
+            try:
+                from remy.core.microbrain import current_project_id
+                from remy.core.trajectory_promotion import evaluate_model_promotion_canary
+
+                evaluate_model_promotion_canary(
+                    project_id=current_project_id(),
+                    trajectory_store=_trajectory,
+                )
+            except Exception as exc:
+                logger.debug("Trajectory canary telemetry skipped: %s", exc)
 
     # Guard: ensure response is an AIMessage (langchain-google-genai may return raw Response)
     if not isinstance(response, AIMessage):
@@ -1200,11 +1476,26 @@ def call_model(state: AgentState) -> dict:
         "complexity_score": int(_model_routing.get("complexity_score") or 0),
         "reasons": list(_model_routing.get("routing_reasons") or ()),
         "task_type": str(_model_routing.get("task_type") or ""),
+        "promotion_id": str(_model_routing.get("promotion_id") or ""),
+        "canary_applied": bool(_model_routing.get("canary_applied")),
+        "canary_bucket": int(_model_routing.get("bucket") or 0),
     }
+    if middleware_result.artifacts:
+        _model_call_event["artifacts"] = list(middleware_result.artifacts)
+    if _self_mod_overlay.get("tracked") or _self_mod_overlay.get("enabled"):
+        _model_call_event["self_modification"] = {
+            "proposal_id": str(_self_mod_overlay.get("proposal_id") or ""),
+            "candidate_hash": str(_self_mod_overlay.get("candidate_hash") or ""),
+            "baseline_hash": str(_self_mod_overlay.get("baseline_hash") or ""),
+            "overlay_hash": str(_self_mod_overlay.get("overlay_hash") or ""),
+            "cohort": str(_self_mod_overlay.get("cohort") or ""),
+            "bucket": int(_self_mod_overlay.get("bucket") or 0),
+            "canary_percent": int(_self_mod_overlay.get("canary_percent") or 0),
+        }
     session_log.append(_model_call_event)
 
     return {
-        "messages": [response],
+        "messages": [*middleware_result.state_updates, response],
         "session_log": session_log,
         "_context_injected": _context_injected_this_turn,
     }
@@ -1231,10 +1522,31 @@ def call_tools(state: AgentState) -> dict:
     tool_messages = []
     _emit = channel == "autonomous"
     newly_enabled: set[str] = set()
+    newly_enabled_bundles: set[str] = set()
+    activated_profile = ""
 
     for tc in last_message.tool_calls:
         tool_name = tc["name"]
-        tool_args = tc["args"]
+        tool_args = dict(tc["args"])
+        _trajectory = None
+        _trajectory_tool_id = ""
+        _tool_pipeline_receipt = None
+
+        if tool_name == "start_research":
+            # Models often resolve "the site I sent" semantically but omit the
+            # literal URL from tool args. Carry recent user URLs into the
+            # durable project context so the worker researches the intended
+            # target instead of a similarly named project.
+            recent_user_text = "\n".join(
+                str(msg.content)
+                for msg in messages[-12:]
+                if isinstance(msg, HumanMessage) and isinstance(msg.content, str)
+            )
+            urls = list(dict.fromkeys(re.findall(r"https?://[^\s)\]>'\"]+", recent_user_text)))
+            if urls:
+                existing_context = str(tool_args.get("context") or "").strip()
+                url_context = "Required user-provided source(s): " + " ".join(urls[-5:])
+                tool_args["context"] = f"{existing_context}\n{url_context}".strip()
 
         logger.info("Tool call: %s(%s)", tool_name, tool_args)
 
@@ -1249,7 +1561,28 @@ def call_tools(state: AgentState) -> dict:
             })
 
         tool = tool_map.get(tool_name)
-        policy_block = (
+        try:
+            from remy.core.trajectory_store import get_trajectory_store
+
+            _trajectory = get_trajectory_store()
+            _trajectory_tool_id = _trajectory.begin_tool(
+                session_id=session_id,
+                call_id=str(tc.get("id") or ""),
+                name=tool_name,
+                payload=tool_args,
+                schema=tool,
+            )
+        except Exception as exc:
+            logger.debug("Trajectory tool start skipped: %s", exc)
+            _trajectory = None
+        try:
+            from remy.core.trajectory_replay import current_replay_sandbox
+
+            replay_sandbox = current_replay_sandbox()
+        except Exception:
+            replay_sandbox = None
+        replay_result = replay_sandbox.resolve(tool_name, tool_args) if replay_sandbox else None
+        policy_block = None if replay_result else (
             _blocked_tool_policy_hint(
                 messages=messages,
                 session_id=session_id,
@@ -1260,19 +1593,65 @@ def call_tools(state: AgentState) -> dict:
             if tool
             else None
         )
-        if policy_block:
+        if replay_result:
+            result, policy_block = replay_result
+        elif policy_block:
             result = (
                 "Blocked by consequence memory: this exact tool action was "
                 f"previously refuted. Reason: {policy_block.get('reason') or 'prior refutation'}"
             )
         elif tool:
             try:
+                try:
+                    from remy.core.tool_pipeline import get_last_tool_pipeline_snapshot
+
+                    get_last_tool_pipeline_snapshot(clear=True)
+                except Exception:
+                    pass
                 result = tool.invoke(tool_args)
+                try:
+                    from remy.core.tool_pipeline import get_last_tool_pipeline_snapshot
+
+                    _tool_pipeline_receipt = get_last_tool_pipeline_snapshot(clear=True)
+                except Exception:
+                    _tool_pipeline_receipt = None
             except Exception as e:
                 logger.error("Tool %s error: %s", tool_name, e)
                 result = f"Error: {e}"
         else:
             result = f"Unknown tool: {tool_name}"
+
+        if _trajectory is not None:
+            try:
+                _tool_error = ""
+                _result_text = str(result)
+                if _result_text.startswith("Error:") or _result_text.startswith("Unknown tool:"):
+                    _tool_error = str(result)
+                else:
+                    try:
+                        _result_payload = json.loads(_result_text)
+                        if isinstance(_result_payload, dict) and _result_payload.get("error"):
+                            _tool_error = str(_result_payload.get("error"))
+                    except (TypeError, ValueError):
+                        pass
+                _trajectory.complete_tool(
+                    event_id=_trajectory_tool_id,
+                    result=result,
+                    error=_tool_error,
+                    policy={
+                        "agent_gate": policy_block,
+                        "tool_pipeline": _tool_pipeline_receipt,
+                    }
+                    if policy_block or _tool_pipeline_receipt
+                    else None,
+                    artifacts=(
+                        _tool_pipeline_receipt.get("artifacts")
+                        if _tool_pipeline_receipt
+                        else None
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("Trajectory tool completion skipped: %s", exc)
 
         auto_extract_log_entry = None
         if not policy_block:
@@ -1394,11 +1773,15 @@ def call_tools(state: AgentState) -> dict:
             session_log.append(auto_extract_log_entry)
 
         # Track enable_tools calls — update state so next call_model sees them
-        if tool_name == "enable_tools":
+        if tool_name in {"enable_tools", "enable_skill", "activate_capability_profile"}:
             try:
                 import json as _json
                 parsed = _json.loads(result)
-                newly_enabled.update(parsed.get("enabled", []))
+                if tool_name in {"enable_tools", "enable_skill"}:
+                    newly_enabled.update(parsed.get("enabled", []))
+                    newly_enabled_bundles.update(parsed.get("enabled_bundles", []))
+                if tool_name == "activate_capability_profile":
+                    activated_profile = str(parsed.get("activated_profile") or "")
             except Exception:
                 pass
 
@@ -1407,6 +1790,11 @@ def call_tools(state: AgentState) -> dict:
     if newly_enabled:
         enabled = set(state.get("enabled_tools") or set()) | newly_enabled
         ret["enabled_tools"] = enabled
+    if newly_enabled_bundles:
+        bundles = set(state.get("enabled_bundles") or set()) | newly_enabled_bundles
+        ret["enabled_bundles"] = bundles
+    if activated_profile:
+        ret["capability_profile"] = activated_profile
 
     return ret
 
@@ -1473,7 +1861,7 @@ def should_continue(state: AgentState) -> str:
 
 # ============== GRAPH BUILDER ==============
 
-_compiled_graphs: dict[str, object] = {}
+_compiled_graphs: dict[tuple[str, int], object] = {}
 _graph_lock = threading.Lock()
 
 
@@ -1483,11 +1871,16 @@ def invalidate_graph_cache() -> None:
         _compiled_graphs.clear()
 
 
-def build_agent_graph(channel: str = "desktop"):
-    """Build and compile the LangGraph agent. Cached per channel."""
+def build_agent_graph(channel: str = "desktop", *, checkpointer=None):
+    """Build and compile the LangGraph agent.
+
+    Calls without a checkpointer remain useful for isolated tests and ephemeral
+    worker-style execution. Production chat uses ``get_durable_agent_graph``.
+    """
+    cache_key = (channel, id(checkpointer) if checkpointer is not None else 0)
     with _graph_lock:
-        if channel in _compiled_graphs:
-            return _compiled_graphs[channel]
+        if cache_key in _compiled_graphs:
+            return _compiled_graphs[cache_key]
 
         graph = StateGraph(AgentState)
 
@@ -1503,10 +1896,55 @@ def build_agent_graph(channel: str = "desktop"):
         )
         graph.add_edge("tools", "model")
 
-        compiled = graph.compile()
-        _compiled_graphs[channel] = compiled
-        logger.info("Agent graph compiled for channel: %s", channel)
+        compiled = graph.compile(checkpointer=checkpointer)
+        _compiled_graphs[cache_key] = compiled
+        logger.info(
+            "Agent graph compiled for channel: %s (durable=%s)",
+            channel,
+            checkpointer is not None,
+        )
         return compiled
+
+
+_DEFAULT_GRAPH_BUILDER = build_agent_graph
+
+
+async def get_durable_agent_graph(channel: str = "desktop"):
+    """Return the channel graph backed by Remy's local SQLite checkpointer."""
+    # Existing unit tests and integrations replace the builder with a small
+    # graph double. Do not open the production checkpoint database in that case.
+    if build_agent_graph is not _DEFAULT_GRAPH_BUILDER:
+        return build_agent_graph(channel)
+
+    from remy.core.durable_graph_runtime import get_durable_graph_runtime
+
+    saver = await get_durable_graph_runtime().get_saver()
+    return build_agent_graph(channel, checkpointer=saver)
+
+
+async def _clear_completed_chat_checkpoint(
+    session_id: str,
+    channel: str,
+) -> None:
+    """Keep durable state for an in-flight turn, not as chat history.
+
+    Completed conversation history is restored from the project-owned
+    transcript. Reusing a completed LangGraph thread while also supplying that
+    history would merge both copies through ``add_messages`` and progressively
+    duplicate the prompt.
+    """
+    if channel != "desktop" or build_agent_graph is not _DEFAULT_GRAPH_BUILDER:
+        return
+    try:
+        from remy.core.durable_graph_runtime import get_durable_graph_runtime
+
+        await get_durable_graph_runtime().delete_thread(session_id, channel)
+    except Exception as exc:
+        logger.warning(
+            "Could not clear completed chat checkpoint for %s: %s",
+            (session_id or "?")[:8],
+            exc,
+        )
 
 
 # ============== IN-SESSION THINKING ==============
@@ -1623,20 +2061,81 @@ def check_session_insights(session_id: str, messages: list) -> list:
 # ============== HISTORY COMPRESSION ==============
 
 
-def compact_history(messages: list, keep_recent: int = 16) -> list:
+def _compact_runtime_history(
+    messages: list,
+    *,
+    keep_recent: int,
+    model: str,
+    session_id: str,
+    purpose: str,
+) -> list:
+    """Apply model-aware compaction and expose every reduction in Trajectory."""
+    if not messages or not getattr(settings, "CONTEXT_COMPACTION_ENABLED", True):
+        return messages
+    from remy.core.context_compaction import (
+        compact_messages_for_model,
+        record_compaction_event,
+    )
+
+    fragmented = len(messages) > keep_recent * 2
+    result = compact_messages_for_model(
+        messages,
+        model=model,
+        max_recent_messages=keep_recent,
+        force=fragmented,
+        reason="message_overhead_ceiling" if fragmented else "threshold",
+    )
+    record_compaction_event(result, session_id=session_id, purpose=purpose)
+    return result.messages
+
+
+def compact_history(
+    messages: list,
+    keep_recent: int = 16,
+    *,
+    model: str | None = None,
+    context_window_tokens: int | None = None,
+    force: bool = False,
+    reason: str = "threshold",
+) -> list:
     """Compact history to reduce context window usage.
 
-    1. Truncate long ToolMessage content (>300 chars)
-    2. If messages > keep_recent: compress older messages into a summary
-    3. Never break tool call sequences (AIMessage+ToolMessages stay together)
+    When ``model`` is supplied, use the model-specific token budget. Calls
+    without a model retain the historical count-based behavior for compatibility
+    with stored sessions and external imports.
     """
     if not messages:
         return messages
 
+    if model and getattr(settings, "CONTEXT_COMPACTION_ENABLED", True):
+        from remy.core.context_compaction import compact_messages_for_model
+
+        return compact_messages_for_model(
+            messages,
+            model=model,
+            max_recent_messages=keep_recent,
+            context_window_tokens=context_window_tokens,
+            # Keep the existing bounded-state contract as a secondary safety
+            # ceiling. Normal compaction is token-triggered; extremely
+            # fragmented histories still cannot grow the LangGraph state
+            # without bound merely because every message is short.
+            force=force or len(messages) > keep_recent * 2,
+            reason=(
+                reason
+                if force or len(messages) <= keep_recent * 2
+                else "message_overhead_ceiling"
+            ),
+        ).messages
+
     # Step 1: Truncate tool results
     compacted = []
     for msg in messages:
-        if isinstance(msg, ToolMessage) and isinstance(msg.content, str) and len(msg.content) > 300:
+        if (
+            isinstance(msg, ToolMessage)
+            and isinstance(msg.content, str)
+            and len(msg.content) > 300
+            and not getattr(msg, "artifact", None)
+        ):
             compacted.append(ToolMessage(
                 content=msg.content[:300] + "...[truncated]",
                 tool_call_id=msg.tool_call_id,
@@ -1823,8 +2322,16 @@ async def invoke_agent(
     channel: str,
     session_log: list,
     history: list | None = None,
+    model_routing_enabled: bool | None = None,
 ) -> tuple[str, list, list]:
-    return await _invoke_agent_inner(user_message, session_id, channel, session_log, history)
+    return await _invoke_agent_inner(
+        user_message,
+        session_id,
+        channel,
+        session_log,
+        history,
+        model_routing_enabled=model_routing_enabled,
+    )
 
 
 async def _invoke_agent_inner(
@@ -1833,6 +2340,7 @@ async def _invoke_agent_inner(
     channel: str,
     session_log: list,
     history: list | None = None,
+    model_routing_enabled: bool | None = None,
 ) -> tuple[str, list, list]:
     """Run the agent and return (response_text, updated_messages, updated_session_log).
 
@@ -1859,14 +2367,24 @@ async def _invoke_agent_inner(
     # then stays cached across tool iterations within the same request.
     invalidate_system_instruction_cache(session_id)
 
-    graph = build_agent_graph(channel)
+    graph = await get_durable_agent_graph(channel)
+    # A new operator message starts a new turn. Any surviving checkpoint is
+    # from a completed or abandoned turn; transcript history below is the
+    # authoritative conversational context.
+    await _clear_completed_chat_checkpoint(session_id, channel)
 
     # Build messages list
     messages = list(history) if history else []
 
     # Compact history — truncate tool results, compress old messages
     keep_recent = _estimate_keep_recent(channel, user_message)
-    messages = compact_history(messages, keep_recent=keep_recent)
+    messages = _compact_runtime_history(
+        messages,
+        keep_recent=keep_recent,
+        model=settings.SUMMARY_MODEL,
+        session_id=session_id,
+        purpose="agent_entry",
+    )
 
     # In-session thinking — periodically inject brain insights
     messages = check_session_insights(session_id, messages)
@@ -1883,8 +2401,15 @@ async def _invoke_agent_inner(
         channel=channel,
         session_log=list(session_log),
         enabled_tools=set(),
+        enabled_bundles=set(),
+        capability_profile="standard",
         _cached_session_ctx="",
         _cached_scratchpad="",
+        model_routing_enabled=(
+            channel in {"autonomous", "proactive"}
+            if model_routing_enabled is None
+            else bool(model_routing_enabled)
+        ),
     )
 
     session_ctx = _build_session_context(messages)
@@ -1906,11 +2431,22 @@ async def _invoke_agent_inner(
     # Run graph in thread to avoid blocking event loop
     # Adaptive recursion limit based on channel + message content
     rec_limit = _estimate_recursion_limit(channel, user_message)
-    config = {"recursion_limit": rec_limit}
+    from remy.core.durable_graph_runtime import durable_config
+
+    config = durable_config(
+        session_id,
+        channel,
+        recursion_limit=rec_limit,
+    )
     logger.debug("Recursion limit: %d (channel=%s)", rec_limit, channel)
 
     try:
-        result = await asyncio.to_thread(graph.invoke, state, config)
+        if callable(getattr(type(graph), "ainvoke", None)):
+            result = await graph.ainvoke(state, config)
+        else:
+            # Compatibility for small test doubles and third-party compiled
+            # graph wrappers that only expose the synchronous API.
+            result = await asyncio.to_thread(graph.invoke, state, config)
     except Exception as e:
         # Handle GraphRecursionError — extract partial results
         if "recursion limit" in str(e).lower() or "Recursion limit" in str(e):
@@ -1962,6 +2498,21 @@ async def _invoke_agent_inner(
 
     updated_log = list(result.get("session_log", session_log))
 
+    # Broken-promise guard (non-streaming path). tools_ran is derived from the
+    # turn's session log: any real tool_call added beyond what we started with.
+    _tools_ran_ns = len(updated_log) > len(session_log) and any(
+        isinstance(e, dict)
+        and e.get("type") == "tool_call"
+        and not str(e.get("tool", "")).startswith("_")
+        for e in updated_log[len(session_log):]
+    )
+    if _detect_broken_promise(response_text, _tools_ran_ns):
+        logger.warning(
+            "Broken promise detected (no tools ran) session=%s — appended correction.",
+            (session_id or "?")[:8],
+        )
+        response_text += _broken_promise_note(_detect_turn_locale(user_message))
+
     # Pre-mouth epistemic governance (Phase A.7 Step 4 — brain-native mouth).
     #
     # Block path: brain decides epistemic state via decide_governance(), then
@@ -2004,7 +2555,10 @@ async def _invoke_agent_inner(
     if governance_decision is None or governance_decision.mode != "block":
         try:
             response_text, factuality_report = enforce_factuality(
-                response_text, updated_log, session_id=session_id,
+                response_text,
+                updated_log,
+                locale=_detect_turn_locale(user_message),
+                session_id=session_id,
             )
         except Exception:
             factuality_report = None
@@ -2112,6 +2666,7 @@ async def _invoke_agent_inner(
         except Exception:
             pass
 
+    await _clear_completed_chat_checkpoint(session_id, channel)
     return response_text, clean_messages, updated_log
 
 
@@ -2121,6 +2676,10 @@ async def invoke_agent_stream(
     channel: str,
     session_log: list,
     history: list | None = None,
+    model_routing_enabled: bool | None = None,
+    workspace_id: str | None = None,
+    replay_preferred_model: str = "",
+    capability_profile: str = "standard",
 ):
     """Run the agent and yield events for streaming response.
 
@@ -2137,14 +2696,21 @@ async def invoke_agent_stream(
     # Invalidate system instruction cache for fresh rebuild this turn
     invalidate_system_instruction_cache(session_id)
 
-    graph = build_agent_graph(channel)
+    graph = await get_durable_agent_graph(channel)
+    await _clear_completed_chat_checkpoint(session_id, channel)
 
     # Build messages list
     messages = list(history) if history else []
 
     # Compact history — truncate tool results, compress old messages
     keep_recent = _estimate_keep_recent(channel, user_message)
-    messages = compact_history(messages, keep_recent=keep_recent)
+    messages = _compact_runtime_history(
+        messages,
+        keep_recent=keep_recent,
+        model=settings.SUMMARY_MODEL,
+        session_id=session_id,
+        purpose="agent_entry_stream",
+    )
 
     # In-session thinking
     messages = check_session_insights(session_id, messages)
@@ -2161,13 +2727,33 @@ async def invoke_agent_stream(
         channel=channel,
         session_log=list(session_log),
         enabled_tools=set(),
+        enabled_bundles=set(),
+        capability_profile=str(capability_profile or "standard"),
         _cached_session_ctx="",
         _cached_scratchpad="",
+        model_routing_enabled=(
+            channel in {"autonomous", "proactive"}
+            if model_routing_enabled is None
+            else bool(model_routing_enabled)
+        ),
+        replay_preferred_model=str(replay_preferred_model or "")[:240],
     )
 
     session_ctx = _build_session_context(messages)
     if session_ctx:
         state["_cached_session_ctx"] = session_ctx.content
+    if workspace_id:
+        try:
+            from remy.core.workspace_permissions import build_code_workspace_context
+
+            workspace_ctx = build_code_workspace_context(workspace_id)
+            if workspace_ctx:
+                existing_ctx = state.get("_cached_session_ctx") or ""
+                state["_cached_session_ctx"] = (
+                    f"{existing_ctx}\n\n{workspace_ctx}" if existing_ctx else workspace_ctx
+                )
+        except Exception as exc:
+            logger.warning("Could not build code workspace context for %s: %s", workspace_id, exc)
     try:
         from remy.core.scratchpad import get_scratchpad_context
 
@@ -2184,6 +2770,7 @@ async def invoke_agent_stream(
     final_text = ""
     tool_inputs = {}
     final_session_log = list(session_log)
+    turn_log_start = len(final_session_log)
 
     # Stream events from the graph
     last_ai_message = None
@@ -2191,17 +2778,23 @@ async def invoke_agent_stream(
     # This prevents intermediate model calls (which produce text + tool calls) from
     # being streamed to the user, causing "triple response" artifacts.
     _token_buffer = []  # tokens buffered from current model call
+    # Text is shown immediately as a retractable draft. If this model call later
+    # emits a tool call, the browser removes the draft before showing tool work.
+    _provisional_text = ""
+    _provisional_active = False
     _model_had_tool_calls = False  # whether current model call produced tool calls
     _flushed = False  # guard: True after buffer was flushed, reset on new tokens
     _recursion_hit = False
     _tools_ran = False  # True after at least one tool ran — used to emit "thinking" on next LLM call
     _thinking_yielded = False  # prevent duplicate "thinking" events per model call
     _pii_stream_restorer = None
+    _pii_vault = None
     if settings.PII_SHIELD_ENABLED:
         try:
             from remy.core.pii_vault import StreamingRestorer, get_vault
 
-            _pii_stream_restorer = StreamingRestorer(get_vault(session_id or "__default__"))
+            _pii_vault = get_vault(session_id or "__default__")
+            _pii_stream_restorer = StreamingRestorer(_pii_vault)
         except Exception as exc:
             logger.debug("PII stream restorer disabled: %s", exc)
             _pii_stream_restorer = None
@@ -2216,18 +2809,73 @@ async def invoke_agent_stream(
             return ""
         return _pii_stream_restorer.flush()
 
+    def _reset_stream_restorer() -> None:
+        nonlocal _pii_stream_restorer
+        if _pii_vault is None:
+            _pii_stream_restorer = None
+            return
+        try:
+            from remy.core.pii_vault import StreamingRestorer
+
+            _pii_stream_restorer = StreamingRestorer(_pii_vault)
+        except Exception:
+            _pii_stream_restorer = None
+
     rec_limit = _estimate_recursion_limit(channel, user_message)
-    config = {"recursion_limit": rec_limit}
+    from remy.core.durable_graph_runtime import durable_config
+
+    config = durable_config(
+        session_id,
+        channel,
+        recursion_limit=rec_limit,
+    )
     logger.debug("Stream recursion limit: %d (channel=%s)", rec_limit, channel)
 
     try:
-        async for event in graph.astream_events(state, version="v1", config=config):
+        from remy.core.model_registry import get_provider_for_model
+
+        _active_model = str(settings.SUMMARY_MODEL or "unknown")
+        _active_provider = get_provider_for_model(_active_model)
+    except Exception:
+        _active_model = str(settings.SUMMARY_MODEL or "unknown")
+        _active_provider = "unknown"
+
+    yield {
+        "type": "provider_status",
+        "phase": "preparing",
+        "model": _active_model,
+        "provider": _active_provider,
+        "message": "Preparing model request",
+    }
+    _model_stream_started = False
+
+    try:
+        async for event in graph.astream_events(state, version="v2", config=config):
             kind = event["event"]
 
-            # Stream LLM tokens — buffer them, don't yield yet
-            if kind == "on_chat_model_stream":
+            if kind == "on_chat_model_start":
+                _model_stream_started = False
+                yield {
+                    "type": "provider_status",
+                    "phase": "waiting_first_token",
+                    "model": _active_model,
+                    "provider": _active_provider,
+                    "message": "Request sent; waiting for the first token",
+                }
+
+            # Stream LLM text immediately as a provisional, retractable draft.
+            elif kind == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 if isinstance(chunk, AIMessageChunk):
+                    if not _model_stream_started:
+                        _model_stream_started = True
+                        yield {
+                            "type": "provider_status",
+                            "phase": "generating",
+                            "model": _active_model,
+                            "provider": _active_provider,
+                            "message": "Response stream is active",
+                        }
                     # Emit "thinking" once when LLM starts generating after tools ran
                     if _tools_ran and not _thinking_yielded:
                         _thinking_yielded = True
@@ -2237,7 +2885,12 @@ async def invoke_agent_stream(
                     # Detect if this model call has tool calls
                     if chunk.tool_call_chunks:
                         _model_had_tool_calls = True
-                    if chunk.content and not chunk.tool_call_chunks:
+                        if _provisional_active:
+                            yield {"type": "provisional_reset"}
+                            _provisional_text = ""
+                            _provisional_active = False
+                            _reset_stream_restorer()
+                    if chunk.content and not _model_had_tool_calls:
                         content = chunk.content
                         # langchain-google-genai may return content as list of dicts
                         if isinstance(content, list):
@@ -2247,16 +2900,25 @@ async def invoke_agent_stream(
                             )
                         if isinstance(content, str) and content:
                             _token_buffer.append(content)
+                            restored = _restore_stream_token(content)
+                            if restored:
+                                _provisional_text += restored
+                                _provisional_active = True
+                                yield {"type": "provisional_token", "content": restored}
 
             # When a model call ends, decide: flush buffer or discard
             # Note: LangGraph uses NODE name ("model"), not function name ("call_model")
             elif kind == "on_chain_end":
                 if event.get("name") == "tools":
-                    output = event.get("data", {}).get("output", {})
+                    event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                    raw_output = event_data.get("output")
+                    output = raw_output if isinstance(raw_output, dict) else {}
                     if isinstance(output, dict) and output.get("session_log") is not None:
                         final_session_log = output["session_log"]
                 elif event.get("name") == "model":
-                    output = event.get("data", {}).get("output", {})
+                    event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                    raw_output = event_data.get("output")
+                    output = raw_output if isinstance(raw_output, dict) else {}
                     out_messages = output.get("messages", [])
                     if out_messages:
                         last_ai_message = out_messages[-1]
@@ -2272,20 +2934,26 @@ async def invoke_agent_stream(
                     )
 
                     if has_tools:
-                        # Intermediate model call — discard buffered tokens
+                        # Intermediate model call: retract the visible draft.
+                        if _provisional_active:
+                            yield {"type": "provisional_reset"}
+                        _provisional_text = ""
+                        _provisional_active = False
+                        _reset_stream_restorer()
                         logger.debug("Discarding %d buffered tokens from intermediate model call (has tool_calls)", len(_token_buffer))
                         _token_buffer.clear()
                     else:
-                        # Final model call: restore PII before streaming to the UI.
-                        for token in _token_buffer:
-                            restored = _restore_stream_token(token)
-                            if restored:
-                                yield {"type": "token", "content": restored}
-                                final_text += restored
+                        # Final call: commit the already-visible provisional text.
                         tail = _flush_stream_restorer()
                         if tail:
-                            yield {"type": "token", "content": tail}
-                            final_text += tail
+                            _provisional_text += tail
+                            _provisional_active = True
+                            yield {"type": "provisional_token", "content": tail}
+                        final_text += _provisional_text
+                        if _provisional_active:
+                            yield {"type": "provisional_commit"}
+                        _provisional_text = ""
+                        _provisional_active = False
                         _token_buffer.clear()
 
                     _flushed = True
@@ -2339,25 +3007,48 @@ async def invoke_agent_stream(
             logger.warning("Stream recursion limit (%d) hit — yielding partial response", rec_limit)
         elif "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
             logger.error("LLM quota exhausted during stream: %s", e)
-            final_text = (
+            quota_note = (
                 "API quota exhausted. "
                 "Please wait and try again later, or switch to a different model."
             )
-            yield {"type": "token", "content": final_text}
+            if _provisional_active:
+                tail = _flush_stream_restorer()
+                if tail:
+                    _provisional_text += tail
+                    yield {"type": "provisional_token", "content": tail}
+                yield {"type": "provisional_commit"}
+                final_text = _provisional_text + "\n\n" + quota_note
+                yield {"type": "token", "content": "\n\n" + quota_note}
+                _provisional_text = ""
+                _provisional_active = False
+                _token_buffer.clear()
+            else:
+                final_text = quota_note
+                yield {"type": "token", "content": final_text}
         else:
             raise
 
     # Flush any remaining buffered tokens (safety net)
     if _token_buffer:
-        for token in _token_buffer:
-            restored = _restore_stream_token(token)
-            if restored:
-                yield {"type": "token", "content": restored}
-                final_text += restored
-        tail = _flush_stream_restorer()
-        if tail:
-            yield {"type": "token", "content": tail}
-            final_text += tail
+        if _provisional_active:
+            tail = _flush_stream_restorer()
+            if tail:
+                _provisional_text += tail
+                yield {"type": "provisional_token", "content": tail}
+            final_text += _provisional_text
+            yield {"type": "provisional_commit"}
+            _provisional_text = ""
+            _provisional_active = False
+        else:
+            for token in _token_buffer:
+                restored = _restore_stream_token(token)
+                if restored:
+                    yield {"type": "token", "content": restored}
+                    final_text += restored
+            tail = _flush_stream_restorer()
+            if tail:
+                yield {"type": "token", "content": tail}
+                final_text += tail
         _token_buffer.clear()
 
     logger.info(f"Stream done: final_text length={len(final_text)}, has_last_ai={last_ai_message is not None}")
@@ -2368,7 +3059,17 @@ async def invoke_agent_stream(
         logger.debug(f"Fallback: last_ai_message content type={type(content).__name__}, value={repr(content)[:200]}")
         if isinstance(content, list):
             content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
+                (
+                    part.get("text")
+                    or part.get("content")
+                    or part.get("output_text")
+                    or ""
+                )
+                if isinstance(part, dict)
+                else (
+                    part if isinstance(part, str)
+                    else str(getattr(part, "text", "") or "")
+                )
                 for part in content
             )
         if isinstance(content, str):
@@ -2376,20 +3077,57 @@ async def invoke_agent_stream(
         logger.info(f"Fallback extracted final_text length={len(final_text)}")
 
     # If we ended up with no text for any reason (recursion limit, tool-iteration
-    # hard-stop, streaming anomaly), surface a visible message instead of silence.
+    # hard-stop, streaming anomaly, or a model turn that only made tool calls and
+    # never wrote a reply), surface a visible message instead of silence. Pick
+    # the message from the ACTUAL signals rather than guessing "tool-call limit",
+    # which was misleading — most empty turns are not limit hits at all.
     if not final_text:
         if _recursion_hit:
             final_text = (
                 "I reached the step limit while working on your request. "
                 "Please send a follow-up message to continue where I left off."
             )
-        else:
+        elif _tools_ran or _model_had_tool_calls:
+            # The model ran/emitted tools but never produced a closing reply.
+            # This is the common case (e.g. it created a task but didn't
+            # summarize) — do NOT tell the user to rephrase; the action may
+            # well have happened.
             final_text = (
-                "I couldn't produce a final answer this turn (likely hit the "
-                "tool-call limit while searching). Please rephrase or narrow "
-                "the request."
+                "I ran some actions but didn't write a summary this turn. "
+                "Ask me what I just did, or send a follow-up to continue."
+            )
+            logger.warning(
+                "Empty final_text after tools ran (tools_ran=%s had_tool_calls=%s "
+                "has_last_ai=%s) session=%s — model produced no closing reply.",
+                _tools_ran, _model_had_tool_calls, last_ai_message is not None,
+                (session_id or "?")[:8],
+            )
+        else:
+            # No tools, no recursion hit, no text — a genuine streaming/model
+            # anomaly (empty completion). Log it so the real cause is visible.
+            final_text = (
+                "I didn't manage to generate a reply this turn. "
+                "Please try again — if it keeps happening, rephrase the request."
+            )
+            logger.warning(
+                "Empty final_text with no tools and no recursion hit "
+                "(has_last_ai=%s) session=%s — likely an empty model completion "
+                "or streaming anomaly.",
+                last_ai_message is not None, (session_id or "?")[:8],
             )
         yield {"type": "token", "content": final_text}
+
+    # Broken-promise guard: the model wrote "wait, I'll do X" but ran no tool.
+    # We can't re-invoke mid-stream, so append a truthful correction telling the
+    # user nothing is running in the background and how to actually get it done.
+    if _detect_broken_promise(final_text, _tools_ran):
+        _note = _broken_promise_note(_detect_turn_locale(user_message))
+        logger.warning(
+            "Broken promise detected (no tools ran) session=%s — appended correction.",
+            (session_id or "?")[:8],
+        )
+        yield {"type": "token", "content": _note}
+        final_text += _note
 
     # Pre-mouth epistemic governance for streaming path too.
     stream_governance_decision = None
@@ -2408,7 +3146,10 @@ async def invoke_agent_stream(
     if stream_governance_decision is None or stream_governance_decision.mode != "block":
         try:
             final_text, factuality_report = enforce_factuality(
-                final_text, final_session_log, session_id=session_id,
+                final_text,
+                final_session_log,
+                locale=_detect_turn_locale(user_message),
+                session_id=session_id,
             )
         except Exception:
             factuality_report = None
@@ -2529,6 +3270,28 @@ async def invoke_agent_stream(
     except Exception as _e:
         logger.debug("response auditor failed: %s", _e)
 
+    turn_llm_calls = [
+        entry for entry in final_session_log[turn_log_start:]
+        if isinstance(entry, dict) and entry.get("type") == "llm_call"
+    ]
+    reported_usage = [
+        entry["token_usage"] for entry in turn_llm_calls
+        if isinstance(entry.get("token_usage"), dict)
+    ]
+    token_usage = {
+        "input_tokens": sum(int(item.get("input_tokens") or 0) for item in reported_usage),
+        "output_tokens": sum(int(item.get("output_tokens") or 0) for item in reported_usage),
+        "total_tokens": sum(int(item.get("total_tokens") or 0) for item in reported_usage),
+        "reported_calls": len(reported_usage),
+        "total_calls": len(turn_llm_calls),
+        "exact": bool(turn_llm_calls) and len(reported_usage) == len(turn_llm_calls),
+    }
+
+    # The transcript/session history now owns completed turns. Remove the
+    # operational checkpoint before handing the final packet to the caller so
+    # the next turn cannot merge a second copy of this conversation.
+    await _clear_completed_chat_checkpoint(session_id, channel)
+
     # Yield final packet so the caller (session.py) can update session history
     yield {
         "type": "final",
@@ -2537,6 +3300,7 @@ async def invoke_agent_stream(
         "session_log": final_session_log,
         "metric_render": metric_render_summary,
         "epistemic_audit": audit_summary,
+        "token_usage": token_usage,
         "factuality": (
             {
                 "unsupported_observed_claims": factuality_report.unsupported_observed_claims,
@@ -2717,6 +3481,18 @@ def _inject_context(state: AgentState) -> SystemMessage | None:
             return None
         return f"[{title}]\n" + "\n".join(lines)
 
+    # Knowledge Packs are project-owned reference sources, not episodic memory.
+    # Only query-relevant excerpts from enabled packs enter this turn.
+    project_knowledge = ""
+    try:
+        from remy.core.project_agent import build_project_knowledge_context
+
+        project_knowledge = build_project_knowledge_context(
+            recall_query, max_chars=2200
+        )
+    except Exception as e:
+        logger.debug("Project knowledge retrieval failed: %s", e)
+
     # 1. Episodic memory — Phase A.8: factual turns use evidence-safe path
     try:
         from remy.core.agent_tools import brain
@@ -2765,6 +3541,9 @@ def _inject_context(state: AgentState) -> SystemMessage | None:
             context_parts.append(cognitive_block)
     except Exception as e:
         logger.debug("Structured cognitive recall failed: %s", e)
+
+    if project_knowledge:
+        context_parts.append(project_knowledge)
 
     # 3. Cognitive state — contradictions, patterns, epistemic caution
     if context_parts:

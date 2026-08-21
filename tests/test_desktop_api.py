@@ -179,6 +179,9 @@ class TestGraphData:
         data = res.json()
         assert len(data["nodes"]) >= 2
         assert len(data["edges"]) >= 1
+        assert data["coverage"]["records_returned"] >= 2
+        assert data["coverage"]["edges_returned"] >= 1
+        assert data["coverage"]["source"] == "Aura memory record store"
 
     def test_graph_user_mode_hides_internal_records(self, client, mock_brain):
         mock_brain.store(
@@ -209,6 +212,8 @@ class TestGraphData:
         assert res_scope_full.status_code == 200
         scope_nodes = res_scope_full.json()["nodes"]
         assert any("Background insights" in node["label"] for node in scope_nodes)
+        assert res_full.json()["coverage"]["mode"] == "full"
+        assert res_full.json()["coverage"]["minimum_strength"] == 0.0
 
 
 class TestActivityApi:

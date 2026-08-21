@@ -429,6 +429,7 @@ function _renderShell(pane) {
         <div class="pf-run-final-text" id="at-run-final-text"></div>
         <div class="pf-run-final-actions">
           <button class="btn btn-outline btn-sm" id="at-copy-btn">📋 Copy</button>
+          <button class="btn btn-outline btn-sm execution-trajectory-link hidden" id="at-run-trajectory">Trajectory</button>
         </div>
       </div>
     </div>
@@ -2175,12 +2176,23 @@ async function _runAutomationById(id) {
   if (stepsEl) stepsEl.classList.remove("hidden");
   if (stepsEl) stepsEl.innerHTML = `<div class="pf-run-step pf-run-step-running">⏳ Running…</div>`;
   if (finalEl) finalEl.classList.add("hidden");
+  document.getElementById("at-run-trajectory")?.classList.add("hidden");
 
   try {
     const res  = await fetch(`/api/automations/${id}/run`, { method: "POST" });
     const data = await res.json();
+    _bindAutomationTrajectoryButton(
+      document.getElementById("at-run-trajectory"),
+      id,
+      res.ok ? data : (data.detail || {}),
+    );
     if (!res.ok) {
       const detail = data.detail || {};
+      if (detail.trajectory_run_event_id && finalEl) {
+        const textEl = document.getElementById("at-run-final-text");
+        if (textEl) textEl.textContent = detail.error || "Automation failed";
+        finalEl.classList.remove("hidden");
+      }
       _applyRunTraceToCanvas(detail.trace || [], detail);
       if (stepsEl) stepsEl.innerHTML = "";
       throw new Error(_apiError(data, "Run failed"));
@@ -2195,6 +2207,23 @@ async function _runAutomationById(id) {
   } catch (err) {
     if (stepsEl) stepsEl.innerHTML += `<div class="pf-run-step pf-run-step-error">${_esc(err.message)}</div>`;
   }
+}
+
+function _bindAutomationTrajectoryButton(button, automationId, run) {
+  if (!button || !run?.run_id || !run?.trajectory_run_event_id) return;
+  button.classList.remove("hidden");
+  button.onclick = () => {
+    document.getElementById("at-run-modal")?.classList.add("hidden");
+    document.getElementById("at-history-modal")?.classList.add("hidden");
+    document.dispatchEvent(new CustomEvent("execution-trajectory-open", {
+      detail: {
+        title: `Automation · ${_autoMeta?.name || automationId}`,
+        url: `/api/trajectory/executions/automation/${encodeURIComponent(automationId)}/${encodeURIComponent(run.run_id)}`,
+        sessionId: run.trajectory_session_id || "",
+        eventId: run.trajectory_result_event_id || run.trajectory_run_event_id,
+      },
+    }));
+  };
 }
 
 function _showRunModal(title) {
@@ -2583,11 +2612,13 @@ async function _openAutomationHistory() {
         <button type="button" class="btn btn-outline btn-sm" id="at-history-back">← Runs</button>
         <button type="button" class="btn btn-primary btn-sm" id="at-history-rerun" style="margin-left:.5rem">Run again</button>
         <button type="button" class="btn btn-outline btn-sm" id="at-history-copy-output" style="margin-left:.5rem">Copy output</button>
+        ${run.trajectory_run_event_id ? `<button type="button" class="btn btn-outline btn-sm execution-trajectory-link" id="at-history-trajectory" style="margin-left:.5rem">Trajectory</button>` : ""}
         <div class="pf-run-step">
           <strong>${_esc(run.status || "unknown")}</strong>
           <span style="opacity:.72;margin-left:.5rem">${_esc(run.run_id || "")}</span>
           <div style="opacity:.72;margin-top:.35rem">${_esc(run.started_at || "")} · ${run.duration_ms ?? "?"} ms</div>
         </div>
+        ${_renderAutomationRunEnvelope(run.run_envelope || {})}
         ${_renderMemoryEvaluation(run.memory_evaluation)}
         ${_renderRunTrace(run.trace || []) || `<div class="pf-run-step">No step trace recorded.</div>`}
         <details class="pf-run-step" open>
@@ -2603,8 +2634,24 @@ async function _openAutomationHistory() {
       body.querySelector("#at-history-copy-output")?.addEventListener("click", () => {
         navigator.clipboard?.writeText(run.output || run.error || "").then(() => _showToast("Copied"));
       });
+      _bindAutomationTrajectoryButton(
+        body.querySelector("#at-history-trajectory"),
+        _autoMeta.id,
+        run,
+      );
     });
   });
+}
+
+function _renderAutomationRunEnvelope(envelope) {
+  if (!envelope?.run_id) return "";
+  const usage = envelope.usage || {};
+  const limits = envelope.limits || {};
+  return `<div class="pf-run-step">
+    <strong>Execution envelope: ${_esc((envelope.status || "unknown").replaceAll("_", " "))}</strong>
+    <div style="opacity:.72;margin-top:.35rem">${_esc(envelope.current_step || envelope.phase || "Finished")} · ${usage.turns || 0}/${limits.max_turns || "∞"} steps · ${usage.total_tokens || 0}/${limits.token_budget || "∞"} tokens · workers ${usage.peak_workers || 0}/${limits.max_parallel_workers || 1}</div>
+    ${envelope.stop_reason ? `<div style="color:var(--yellow);margin-top:.35rem">${_esc(envelope.stop_reason.replaceAll("_", " "))}</div>` : ""}
+  </div>`;
 }
 
 async function _fetchModels() {

@@ -80,7 +80,11 @@ def test_enforce_factuality_appends_source_links_for_external_facts():
 
 def test_enforce_factuality_marks_missing_source_link_when_no_url_captured():
     session_log = [
-        {"type": "tool_call", "tool": "browse_page", "result": "Loaded successfully"},
+        {
+            "type": "tool_call",
+            "tool": "browse_page",
+            "result": '{"verified": true, "page_text": "A readable competitor page with a newly shipped feature and enough direct content for grounding."}',
+        },
     ]
     text, report = enforce_factuality(
         "I checked the page and the competitor just shipped a new feature.",
@@ -94,7 +98,11 @@ def test_enforce_factuality_marks_missing_source_link_when_no_url_captured():
 
 def test_enforce_factuality_dedupes_repeated_source_note():
     session_log = [
-        {"type": "tool_call", "tool": "browse_page", "result": "Loaded successfully"},
+        {
+            "type": "tool_call",
+            "tool": "browse_page",
+            "result": '{"verified": true, "page_text": "A readable page containing enough direct extracted text to qualify as browser evidence."}',
+        },
     ]
     original = (
         "Here is the answer.\n\n"
@@ -300,3 +308,44 @@ def test_enforce_factuality_does_not_treat_web_search_as_external_evidence():
     assert report.had_external_evidence is False
     assert report.unsupported_observed_claims == 1
     assert report.modified is True
+
+
+def test_enforce_factuality_does_not_treat_loaded_string_as_browser_evidence():
+    text, report = enforce_factuality(
+        "I reviewed the page and it is an IPFS decentralized data network.",
+        session_log=[
+            {"type": "tool_call", "tool": "browse_page", "result": "Loaded successfully"},
+        ],
+    )
+
+    assert report.had_external_evidence is False
+    assert report.unsupported_observed_claims == 1
+    assert "ipfs" not in text.lower()
+
+
+def test_enforce_factuality_blocks_ukrainian_fake_page_review():
+    draft = (
+        "Так, я переглянув сторінку. Проєкт використовує IPFS для "
+        "децентралізованого зберігання даних та токенізованої винагороди."
+    )
+
+    text, report = enforce_factuality(draft, session_log=[], locale="uk")
+
+    assert report.unsupported_observed_claims == 1
+    assert "IPFS" not in text
+    assert "Не буду описувати" in text
+
+
+def test_verified_browser_requires_extracted_page_text():
+    _text, report = enforce_factuality(
+        "I reviewed the page and found its product description.",
+        session_log=[
+            {
+                "type": "tool_call",
+                "tool": "browse_page",
+                "result": '{"verified": true, "url": "https://example.com", "page_text": ""}',
+            },
+        ],
+    )
+
+    assert report.had_external_evidence is False

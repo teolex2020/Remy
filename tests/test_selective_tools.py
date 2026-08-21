@@ -120,6 +120,49 @@ class TestListAvailableTools:
             assert len(tool["description"]) <= 120
 
 
+class TestCapabilityProfiles:
+
+    def test_profile_catalog_and_activation(self):
+        catalog = json.loads(execute_tool("list_capability_profiles", {}))
+        profile_ids = {item["id"] for item in catalog["profiles"]}
+        assert {"standard", "research", "read_only", "operator"} <= profile_ids
+
+        activated = json.loads(
+            execute_tool("activate_capability_profile", {"profile_id": "read_only"})
+        )
+        assert activated["activated_profile"] == "read_only"
+        assert activated["overlay"]["profile_id"] == "read_only"
+        assert "write_file" not in activated["overlay"]["tools"]
+
+    def test_unknown_profile_is_rejected(self):
+        result = json.loads(
+            execute_tool("activate_capability_profile", {"profile_id": "missing"})
+        )
+        assert result["error"] == "Unknown capability profile"
+        assert "standard" in result["available_profiles"]
+
+    def test_direct_dispatcher_uses_the_same_profile_contract(self):
+        from remy.core.tool_dispatch import _execute_tool_inner
+
+        result = json.loads(
+            _execute_tool_inner(
+                "activate_capability_profile",
+                {"profile_id": "research"},
+                channel="desktop",
+            )
+        )
+        assert result["activated_profile"] == "research"
+        assert result["overlay"]["bundles"] == [
+            "pack:market_research",
+            "skill:deep_research",
+        ]
+
+    def test_enable_skill_returns_bundle_identity(self):
+        result = json.loads(execute_tool("enable_skill", {"skill_name": "deep_research"}))
+        assert result["bundle"] == "skill:deep_research"
+        assert result["enabled_bundles"] == ["skill:deep_research"]
+
+
 # ============== ENABLE_TOOLS ==============
 
 
@@ -311,6 +354,123 @@ class TestAgentSelectiveLoading:
 
         assert "enabled_tools" in result
         assert extended_name in result["enabled_tools"]
+
+    def test_call_tools_tracks_skill_bundle(self):
+        """Skill activation persists both concrete tools and bundle prompt sections."""
+        from remy.core.agent import call_tools
+
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "tc-skill",
+                "name": "enable_skill",
+                "args": {"skill_name": "deep_research"},
+            }],
+        )
+        state = {
+            "messages": [ai_msg],
+            "channel": "desktop",
+            "session_id": "test-enable-skill",
+            "session_log": [],
+            "enabled_tools": set(),
+            "enabled_bundles": set(),
+        }
+        payload = json.dumps({
+            "skill": "deep_research",
+            "enabled": ["extract_content"],
+            "enabled_bundles": ["skill:deep_research"],
+        })
+
+        with patch("remy.core.agent.get_all_tools") as mock_get:
+            mock_tool = MagicMock()
+            mock_tool.name = "enable_skill"
+            mock_tool.invoke.return_value = payload
+            mock_get.return_value = [mock_tool]
+            result = call_tools(state)
+
+        assert result["enabled_tools"] == {"extract_content"}
+        assert result["enabled_bundles"] == {"skill:deep_research"}
+
+    def test_call_tools_tracks_profile_without_leaking_profile_tools(self):
+        """Profile activation updates identity, not permanent session additions."""
+        from remy.core.agent import call_tools
+
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "tc-profile",
+                "name": "activate_capability_profile",
+                "args": {"profile_id": "research"},
+            }],
+        )
+        state = {
+            "messages": [ai_msg],
+            "channel": "desktop",
+            "session_id": "test-profile",
+            "session_log": [],
+            "enabled_tools": set(),
+            "enabled_bundles": set(),
+            "capability_profile": "standard",
+        }
+        payload = json.dumps({
+            "activated_profile": "research",
+            "enabled": ["start_research"],
+            "enabled_bundles": ["skill:deep_research"],
+        })
+
+        with patch("remy.core.agent.get_all_tools") as mock_get:
+            mock_tool = MagicMock()
+            mock_tool.name = "activate_capability_profile"
+            mock_tool.invoke.return_value = payload
+            mock_get.return_value = [mock_tool]
+            result = call_tools(state)
+
+        assert result["capability_profile"] == "research"
+        assert "enabled_tools" not in result
+        assert "enabled_bundles" not in result
+
+    def test_read_only_profile_limits_tools_and_injects_policy_prompt(self):
+        """A hard profile ceiling wins over prior session tool additions."""
+        from remy.core.agent import call_model
+
+        state = {
+            "messages": [HumanMessage(content="inspect files")],
+            "channel": "desktop",
+            "session_id": "test-read-only",
+            "session_log": [],
+            "enabled_tools": {"write_file", "browser_act", "store"},
+            "enabled_bundles": {"skill:project_work"},
+            "capability_profile": "read_only",
+        }
+
+        trajectory = MagicMock()
+        with patch("remy.core.llm.call_llm") as mock_llm, \
+             patch("remy.core.agent._get_cached_system_instruction", return_value="sys"), \
+             patch("remy.core.agent._inject_context", return_value=None), \
+             patch("remy.core.agent._build_session_context", return_value=None), \
+             patch(
+                 "remy.core.trajectory_store.get_trajectory_store",
+                 return_value=trajectory,
+             ):
+            mock_llm.return_value = AIMessage(content="Hi")
+            call_model(state)
+
+        llm_messages = mock_llm.call_args.args[0]
+        tools = mock_llm.call_args.kwargs["tools"]
+        tool_names = {tool.name for tool in tools}
+        assert {"write_file", "browser_act", "store"}.isdisjoint(tool_names)
+        assert {"read_file", "list_directory"} <= tool_names
+        assert any(
+            "READ-ONLY PROFILE" in str(message.content)
+            for message in llm_messages
+            if getattr(message, "type", "") == "system"
+        )
+        context_sources = trajectory.begin_request.call_args.kwargs["context_sources"]
+        overlay_source = next(
+            item for item in context_sources if item["name"] == "capability-overlay"
+        )
+        assert overlay_source["trust_tier"] == "internal-policy"
+        assert "read_only" in overlay_source["admission_reason"]
 
     def test_call_tools_no_enable_no_state_change(self):
         """call_tools without enable_tools does not set enabled_tools."""

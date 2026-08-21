@@ -321,7 +321,7 @@ function _blockHelpHtml(type) {
 let _editor = null;           // Drawflow instance
 let _pipelineMeta = null;     // { id, name, description }
 let _selectedNodeId = null;   // currently selected node id (string)
-let _availableModels = [];    // fetched from /api/settings or /api/ollama/status
+let _availableModels = [];    // fetched from /api/settings
 let _availableSecrets = [];
 let _runAbort = null;
 let _lastRunTraceByStepId = new Map();
@@ -1925,7 +1925,7 @@ function _modelOptions(current) {
     if (lbl.includes("Gemini") || lbl.includes("gemini")) group = "Google Gemini";
     else if (lbl.includes("GPT") || lbl.includes("gpt") || lbl.includes("OpenAI")) group = "OpenAI";
     else if (lbl.includes("Claude") || lbl.includes("claude") || lbl.includes("Anthropic")) group = "Anthropic";
-    else if (lbl.includes("Ollama") || m.id.startsWith("ollama:")) group = "Ollama (local)";
+    else if (lbl.includes("llama.cpp") || m.id.startsWith("llamacpp:")) group = "llama.cpp (local)";
     else if (lbl.includes("OpenRouter") || lbl.includes("FREE") || lbl.includes("openrouter")) group = "OpenRouter";
     else if (lbl.includes("DeepSeek") || lbl.includes("Grok") || lbl.includes("Mistral")) group = "Other AI";
     else if (lbl.includes("custom")) group = "Custom";
@@ -2347,6 +2347,7 @@ async function _openPipelineHistory() {
           <span style="opacity:.72;margin-left:.5rem">${_esc(run.run_id || "")}</span>
           <div style="opacity:.72;margin-top:.35rem">${_esc(run.started_at || "")} · ${run.duration_ms ?? "?"} ms</div>
         </div>
+        ${_renderRunEnvelopeMeta(run.run_envelope || {})}
         ${_renderMemoryEvaluation(run.memory_evaluation)}
         ${_renderWorkflowRunTrace(run.trace || [])}
         <details class="pf-run-step" open>
@@ -2364,6 +2365,17 @@ async function _openPipelineHistory() {
       });
     });
   });
+}
+
+function _renderRunEnvelopeMeta(envelope) {
+  if (!envelope?.run_id) return "";
+  const usage = envelope.usage || {};
+  const limits = envelope.limits || {};
+  return `<div class="pf-run-step">
+    <strong>Execution envelope: ${_esc((envelope.status || "unknown").replaceAll("_", " "))}</strong>
+    <div style="opacity:.72;margin-top:.35rem">${_esc(envelope.current_step || envelope.phase || "Finished")} · ${usage.turns || 0}/${limits.max_turns || "∞"} steps · ${usage.total_tokens || 0}/${limits.token_budget || "∞"} tokens · workers ${usage.peak_workers || 0}/${limits.max_parallel_workers || 1}</div>
+    ${envelope.stop_reason ? `<div style="color:var(--yellow);margin-top:.35rem">${_esc(envelope.stop_reason.replaceAll("_", " "))}</div>` : ""}
+  </div>`;
 }
 
 function _renderWorkflowRunTrace(trace) {

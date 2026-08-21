@@ -163,6 +163,9 @@ def _make_tool_func(tool_name: str):
     """Create a closure that calls execute_tool with the right name and session_id."""
 
     def tool_func(**kwargs) -> str:
+        from remy.core.cancellation import check_cancelled
+
+        check_cancelled()
         # Filter out None values for optional args not provided
         # Convert Pydantic models to dicts (from nested ARRAY/OBJECT schemas)
         clean_args = {k: _deep_to_dict(v) for k, v in kwargs.items() if v is not None}
@@ -175,7 +178,9 @@ def _make_tool_func(tool_name: str):
                 import json as _json
                 clean_args["params"] = _json.dumps(p)
 
-        return execute_tool(tool_name, clean_args, session_id=get_session_id(), channel=get_channel())
+        result = execute_tool(tool_name, clean_args, session_id=get_session_id(), channel=get_channel())
+        check_cancelled()
+        return result
 
     tool_func.__name__ = tool_name
     return tool_func
@@ -217,8 +222,13 @@ def build_sandbox_tools() -> list[StructuredTool]:
 
             def _make_sandbox_func(name: str):
                 def func(**kwargs):
+                    from remy.core.cancellation import check_cancelled
+
+                    check_cancelled()
                     clean_args = {k: v for k, v in kwargs.items() if v is not None}
-                    return registry.execute_sandbox_tool(name, clean_args)
+                    result = registry.execute_sandbox_tool(name, clean_args)
+                    check_cancelled()
+                    return result
                 func.__name__ = name
                 return func
 

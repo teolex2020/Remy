@@ -24,16 +24,19 @@ export async function loadKnowledge() {
         </div>`;
 
     try {
-        const [research, metrics, facts, kb, identity, calendar] = await Promise.all([
+        const [research, metrics, facts, kb, identity, calendar, learning, attempts, candidates] = await Promise.all([
             window.apiClient.getKnowledgeResearch(),
             window.apiClient.getKnowledgeMetrics(),
             window.apiClient.getKnowledgeFacts(),
             window.apiClient.getKnowledgeBase().catch(() => ({ items: [], total: 0 })),
             window.apiClient.getIdentity().catch(() => ({ profile: {}, people: [] })),
             window.apiClient.getCalendar().catch(() => ({ tasks: [] })),
+            window.apiClient.getLearningReviews().catch(() => ({ items: [] })),
+            window.apiClient.getExecutionAttempts().catch(() => ({ items: [] })),
+            window.apiClient.getPipelineCandidates().catch(() => ({ items: [] })),
         ]);
 
-        renderKnowledgeView(container, research, metrics, facts, {}, kb, identity, calendar);
+        renderKnowledgeView(container, research, metrics, facts, {}, kb, identity, calendar, learning, attempts, candidates);
 
     } catch (err) {
         console.error("Failed to load knowledge:", err);
@@ -41,7 +44,7 @@ export async function loadKnowledge() {
     }
 }
 
-function renderKnowledgeView(container, research, metrics, facts, _stats, kb, identity, calendar) {
+function renderKnowledgeView(container, research, metrics, facts, _stats, kb, identity, calendar, learning, attempts, candidates) {
     container.innerHTML = `
         <div class="knowledge-tabs">
             <button class="tab-btn active" onclick="switchKnowledgeTab('identity')">Identity</button>
@@ -50,6 +53,7 @@ function renderKnowledgeView(container, research, metrics, facts, _stats, kb, id
             <button class="tab-btn" onclick="switchKnowledgeTab('metrics')">Metrics</button>
             <button class="tab-btn" onclick="switchKnowledgeTab('facts')">Facts</button>
             <button class="tab-btn" onclick="switchKnowledgeTab('kb')">KB</button>
+            <button class="tab-btn" onclick="switchKnowledgeTab('runtime')">Runtime</button>
         </div>
 
         <div id="tab-identity" class="tab-content active">
@@ -75,6 +79,10 @@ function renderKnowledgeView(container, research, metrics, facts, _stats, kb, id
         <div id="tab-kb" class="tab-content" style="display:none">
             ${renderKBManagerSection(kb)}
         </div>
+
+        <div id="tab-runtime" class="tab-content" style="display:none">
+            ${renderRuntimeSection(learning, attempts, candidates)}
+        </div>
     `;
 
     // Simple window global binding for tab switch
@@ -89,6 +97,97 @@ function renderKnowledgeView(container, research, metrics, facts, _stats, kb, id
     // Bind interactive events
     bindKBEvents();
     bindIdentityEvents();
+    bindRuntimeEvents();
+    bindResearchEvents();
+}
+
+function renderRuntimeSection(learning, attempts, candidates) {
+    const reviews = (learning && learning.items) || [];
+    const runs = (attempts && attempts.items) || [];
+    const pipelineCandidates = ((candidates && candidates.items) || []).filter(item => item.status !== 'observing');
+    const reviewHtml = reviews.length ? reviews.map(item => `
+        <div class="card" style="margin-bottom:10px">
+            <div class="card-header"><strong>${escapeHtml(item.category || 'learning')}</strong><span class="badge badge-primary">pending</span></div>
+            <div class="item-desc">${escapeHtml(item.candidate_text || '')}</div>
+            <div style="display:flex;gap:8px;margin-top:10px">
+                <button class="btn btn-primary learning-decision" data-id="${escapeHtml(item.review_id)}" data-decision="approve">Approve</button>
+                <button class="btn learning-decision" data-id="${escapeHtml(item.review_id)}" data-decision="reject">Reject</button>
+            </div>
+        </div>`).join('') : '<div class="empty-state">No pending learning candidates.</div>';
+    const runHtml = runs.length ? runs.map(item => `
+        <tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.state)}</td><td>${escapeHtml(item.job_id)}</td><td>${escapeHtml(item.claimed_at || '')}</td></tr>
+    `).join('') : '<tr><td colspan="4">No execution attempts.</td></tr>';
+    const candidateHtml = pipelineCandidates.length ? pipelineCandidates.map(item => {
+        const canTest = ['draft', 'dry_run_passed'].includes(item.status);
+        const canApprove = item.status === 'dry_run_passed';
+        const risk = (item.risk && item.risk.level) || 'low';
+        const trigger = (item.trigger && item.trigger.type) || 'manual';
+        const steps = (item.pipeline && item.pipeline.steps) || [];
+        return `<div class="card" style="margin-bottom:10px">
+            <div class="card-header"><strong>${escapeHtml(item.title)}</strong><span class="badge badge-primary">${escapeHtml(item.status)}</span></div>
+            <div class="item-desc">Seen ${item.occurrence_count} times · ${steps.length} steps · trigger: ${escapeHtml(trigger)} · risk: ${escapeHtml(risk)}</div>
+            <div class="item-desc">${escapeHtml((item.success_criteria || []).join(' · '))}</div>
+            ${item.dry_run && item.dry_run.output_preview ? `<details><summary>Dry-run result</summary><div>${escapeHtml(item.dry_run.output_preview)}</div></details>` : ''}
+            ${canTest ? `<div style="display:flex;gap:8px;margin-top:10px">
+                <button class="btn btn-primary pipeline-candidate-test" data-id="${escapeHtml(item.candidate_id)}">Dry-run</button>
+                <button class="btn pipeline-candidate-approve" data-id="${escapeHtml(item.candidate_id)}" ${canApprove ? '' : 'disabled'}>Approve</button>
+                <button class="btn pipeline-candidate-reject" data-id="${escapeHtml(item.candidate_id)}">Reject</button>
+            </div>` : ''}
+            ${item.pipeline_id ? `<div class="item-desc">Pipeline: ${escapeHtml(item.pipeline_id)}${item.automation_id ? ` · Automation: ${escapeHtml(item.automation_id)}` : ''}</div>` : ''}
+        </div>`;
+    }).join('') : '<div class="empty-state">No pipeline suggestions yet.</div>';
+    return `
+        <h3>Pipeline suggestions</h3>${candidateHtml}
+        <h3>Learning approvals</h3>${reviewHtml}
+        <h3 style="margin-top:20px">Execution ledger</h3>
+        <div class="table-container"><table class="data-table" style="width:100%"><thead><tr><th>Kind</th><th>State</th><th>Job</th><th>Started</th></tr></thead><tbody>${runHtml}</tbody></table></div>
+        <h3 style="margin-top:20px">Exact transcript search</h3>
+        <div style="display:flex;gap:8px"><input id="transcript-query" class="input" placeholder="Search prior conversation"><button id="transcript-search" class="btn btn-primary">Search</button></div>
+        <div id="transcript-results" style="margin-top:12px"></div>`;
+}
+
+function bindRuntimeEvents() {
+    document.querySelectorAll('.pipeline-candidate-test').forEach(button => button.addEventListener('click', async () => {
+        button.disabled = true;
+        button.textContent = 'Running…';
+        try {
+            await window.apiClient.dryRunPipelineCandidate(button.dataset.id);
+            await loadKnowledge();
+            window.switchKnowledgeTab('runtime');
+        } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Dry-run';
+            alert(error.message);
+        }
+    }));
+    document.querySelectorAll('.pipeline-candidate-approve').forEach(button => button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+            await window.apiClient.decidePipelineCandidate(button.dataset.id, 'approve');
+            await loadKnowledge();
+            window.switchKnowledgeTab('runtime');
+        } catch (error) { button.disabled = false; alert(error.message); }
+    }));
+    document.querySelectorAll('.pipeline-candidate-reject').forEach(button => button.addEventListener('click', async () => {
+        button.disabled = true;
+        await window.apiClient.decidePipelineCandidate(button.dataset.id, 'reject');
+        await loadKnowledge();
+        window.switchKnowledgeTab('runtime');
+    }));
+    document.querySelectorAll('.learning-decision').forEach(button => button.addEventListener('click', async () => {
+        button.disabled = true;
+        await window.apiClient.decideLearningReview(button.dataset.id, button.dataset.decision);
+        await loadKnowledge();
+        window.switchKnowledgeTab('runtime');
+    }));
+    const searchButton = document.getElementById('transcript-search');
+    if (searchButton) searchButton.addEventListener('click', async () => {
+        const query = document.getElementById('transcript-query').value.trim();
+        if (!query) return;
+        const data = await window.apiClient.searchTranscripts(query);
+        const target = document.getElementById('transcript-results');
+        target.innerHTML = (data.items || []).map(item => `<div class="card" style="margin-bottom:8px"><strong>${escapeHtml(item.role)}</strong><div>${escapeHtml(item.content)}</div></div>`).join('') || '<div class="empty-state">No matches.</div>';
+    });
 }
 
 function renderResearchSection(data) {
@@ -103,11 +202,15 @@ function renderResearchSection(data) {
         html += '<h3>Active Projects</h3><div class="card-grid">';
         data.active.forEach(p => {
             const progress = p.queries_total ? Math.round((p.queries_done / p.queries_total) * 100) : 0;
+            const state = p.job_state || p.status || 'queued';
+            const checkpoint = p.durable_checkpoint || {};
+            const canResume = ['paused', 'pausing'].includes(state);
+            const canPause = ['queued', 'running', 'retrying'].includes(state);
             html += `
                 <div class="card research-card active">
                     <div class="card-header">
-                        <h4>${p.topic}</h4>
-                        <span class="badge badge-primary">Active</span>
+                        <h4>${escapeHtml(p.topic)}</h4>
+                        <span class="badge badge-primary">${escapeHtml(state)}</span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width:${progress}%"></div>
@@ -116,6 +219,10 @@ function renderResearchSection(data) {
                         <span>Queries: ${p.queries_done}/${p.queries_total}</span>
                         <span>Findings: ${p.findings_count}</span>
                     </div>
+                    ${p.current_query ? `<div class="item-desc">Current: ${escapeHtml(p.current_query)}</div>` : ''}
+                    ${checkpoint.node ? `<details style="margin-top:10px" ${canResume ? 'open' : ''}><summary>Checkpoint: ${escapeHtml(checkpoint.node)}</summary><div class="item-desc">${escapeHtml(checkpoint.detail || checkpoint.status || '')}</div><div class="item-desc">${escapeHtml(checkpoint.updated_at || '')}</div></details>` : ''}
+                    ${p.last_error ? `<div class="error">${escapeHtml(p.last_error)}</div>` : ''}
+                    ${(canPause || canResume) ? `<div style="display:flex;gap:8px;margin-top:10px"><button class="btn ${canResume ? 'btn-primary research-resume' : 'research-pause'}" data-id="${escapeHtml(p.project_id)}">${canResume ? 'Resume' : 'Pause safely'}</button></div>` : ''}
                 </div>
             `;
         });
@@ -145,6 +252,26 @@ function renderResearchSection(data) {
     }
 
     return html;
+}
+
+function bindResearchEvents() {
+    document.querySelectorAll('.research-pause, .research-resume').forEach(button => {
+        button.addEventListener('click', async () => {
+            const resume = button.classList.contains('research-resume');
+            button.disabled = true;
+            button.textContent = resume ? 'Resuming…' : 'Pausing…';
+            try {
+                if (resume) await window.apiClient.resumeResearch(button.dataset.id);
+                else await window.apiClient.pauseResearch(button.dataset.id);
+                await loadKnowledge();
+                window.switchKnowledgeTab('research');
+            } catch (error) {
+                button.disabled = false;
+                button.textContent = resume ? 'Resume' : 'Pause safely';
+                alert(error.message);
+            }
+        });
+    });
 }
 
 function renderMetricsSection(data) {

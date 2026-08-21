@@ -7,7 +7,14 @@ def test_shutdown_cleanup_stops_scheduler_before_closing_brain(monkeypatch):
     order = []
 
     class FakeManager:
-        async def close_session(self):
+        async def close_session(
+            self,
+            *,
+            generate_summary=True,
+            preserve_for_resume=False,
+        ):
+            assert generate_summary is False
+            assert preserve_for_resume is True
             order.append("session")
 
     class FakeScheduler:

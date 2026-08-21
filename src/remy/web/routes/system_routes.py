@@ -11,17 +11,24 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from remy.config.settings import set_runtime_setting, settings
-from remy.web.routes._helpers import _get_api, run_in_thread, _TIMEOUT_SLOW
+from remy.web.routes._helpers import _get_api, run_in_thread, _TIMEOUT_FAST, _TIMEOUT_SLOW
 
 logger = logging.getLogger("SystemRoutes")
 
 router = APIRouter()
 _MEMORY_STATUS_TTL_SEC = 60.0  # serve stale cache, refresh in background
 _memory_status_cache: dict = {"ts": 0.0, "data": None, "refreshing": False}
+_SYSTEM_STATUS_TTL_SEC = 15.0
+_system_status_cache: dict = {
+    "ts": 0.0,
+    "data": None,
+    "api_id": None,
+    "refreshing": False,
+}
 _last_reconstruction_verification: dict | None = None
 _last_harness_eval_runs: dict[str, dict] = {}
 _last_startup_recovery_apply: dict = {}
@@ -394,10 +401,24 @@ def _build_memory_status_sync(api) -> dict:
         {},
     )
     verification = _build_verification_memory_summary(api)
+    from remy.core.project_store import (
+        LOCAL_BRAIN_PROVIDER,
+        get_project_store,
+        local_brain_path,
+    )
+
+    active_project = get_project_store().get_active_project()
+    brain_location = (
+        str(local_brain_path(active_project.project_id))
+        if active_project.brain_provider == LOCAL_BRAIN_PROVIDER
+        else active_project.brain_uri
+    )
     return {
         "status": "ok",
         "records": count,
-        "path": str(api.settings.AURA_BRAIN_PATH),
+        "path": brain_location,
+        "provider": active_project.brain_provider,
+        "brain_uri": active_project.brain_uri,
         "salience": {
             "high_count": int(salience_summary.get("high_salience_count", len(high_salience_records)) or 0),
             "avg_salience": salience_summary.get("avg_salience", 0.0),
@@ -478,7 +499,50 @@ async def _get_cached_memory_status(api) -> dict:
     return data
 
 
-@router.get("/system/status")
+def _operator_alerts_payload(limit: int = 8) -> dict:
+    from remy.core.notification_router import get_recent_notifications
+
+    recent_alerts = get_recent_notifications(
+        event_type="operator_alert",
+        limit=max(1, min(int(limit), 50)),
+    )
+    return {
+        "count": len(recent_alerts),
+        "unacknowledged_count": sum(
+            1
+            for item in recent_alerts
+            if not item.get("acknowledged") and not item.get("resolved")
+        ),
+        "items": [
+            {
+                "id": item.get("id", ""),
+                "type": item.get("type", "operator_alert"),
+                "level": item.get("level", "info"),
+                "message": str(item.get("message", ""))[:280],
+                "timestamp": item.get("timestamp"),
+                "acknowledged": bool(item.get("acknowledged")),
+                "resolved": bool(item.get("resolved")),
+                "resolved_at": item.get("resolved_at"),
+                "repeat_count": int(item.get("repeat_count", 1) or 1),
+                "gateway_health": item.get("gateway_health", ""),
+                "health_level": item.get("health_level", ""),
+                "source": item.get("source", ""),
+                "scenario_id": item.get("scenario_id", ""),
+                "action_target": item.get("action_target", ""),
+                "artifact_ids": list(item.get("artifact_ids") or []),
+                "failure_code": item.get("failure_code", ""),
+                "verification_status": item.get("verification_status", ""),
+                "verification_reason": item.get("verification_reason", ""),
+                "eval_status": item.get("eval_status", ""),
+                "requested": item.get("requested"),
+                "applied": item.get("applied"),
+                "skipped": item.get("skipped"),
+            }
+            for item in recent_alerts
+        ],
+    }
+
+
 async def build_system_status_payload(*, include_packs: bool = False):
     """Unified runtime status — all channels, goals, approvals, budget in one call."""
     api = _get_api()
@@ -505,7 +569,11 @@ async def build_system_status_payload(*, include_packs: bool = False):
 
     runtime_snapshot = {}
     try:
-        runtime_snapshot = get_operator_console_snapshot()
+        runtime_snapshot = await run_in_thread(
+            get_operator_console_snapshot,
+            timeout=_TIMEOUT_SLOW,
+            error_msg="Runtime snapshot timed out",
+        )
     except Exception:
         runtime_snapshot = {}
     control_state = runtime_snapshot.get("control", {})
@@ -588,40 +656,12 @@ async def build_system_status_payload(*, include_packs: bool = False):
 
     # --- Recent operator alerts ---
     try:
-        from remy.core.notification_router import get_recent_notifications
-
-        recent_alerts = get_recent_notifications(event_type="operator_alert", limit=8)
-        result["operator_alerts"] = {
-            "count": len(recent_alerts),
-            "unacknowledged_count": sum(1 for item in recent_alerts if not item.get("acknowledged") and not item.get("resolved")),
-            "items": [
-                {
-                    "id": item.get("id", ""),
-                    "type": item.get("type", "operator_alert"),
-                    "level": item.get("level", "info"),
-                    "message": str(item.get("message", ""))[:280],
-                    "timestamp": item.get("timestamp"),
-                    "acknowledged": bool(item.get("acknowledged")),
-                    "resolved": bool(item.get("resolved")),
-                    "resolved_at": item.get("resolved_at"),
-                    "repeat_count": int(item.get("repeat_count", 1) or 1),
-                    "gateway_health": item.get("gateway_health", ""),
-                    "health_level": item.get("health_level", ""),
-                    "source": item.get("source", ""),
-                    "scenario_id": item.get("scenario_id", ""),
-                    "action_target": item.get("action_target", ""),
-                    "artifact_ids": list(item.get("artifact_ids") or []),
-                    "failure_code": item.get("failure_code", ""),
-                    "verification_status": item.get("verification_status", ""),
-                    "verification_reason": item.get("verification_reason", ""),
-                    "eval_status": item.get("eval_status", ""),
-                    "requested": item.get("requested"),
-                    "applied": item.get("applied"),
-                    "skipped": item.get("skipped"),
-                }
-                for item in recent_alerts
-            ],
-        }
+        result["operator_alerts"] = await run_in_thread(
+            _operator_alerts_payload,
+            8,
+            timeout=_TIMEOUT_FAST,
+            error_msg="Operator alerts timed out",
+        )
     except Exception as e:
         result["operator_alerts"] = {"count": 0, "unacknowledged_count": 0, "items": [], "error": str(e)}
 
@@ -664,9 +704,49 @@ async def build_system_status_payload(*, include_packs: bool = False):
     return result
 
 
+async def _refresh_system_status_cache(api) -> None:
+    if _system_status_cache.get("refreshing"):
+        return
+    _system_status_cache["refreshing"] = True
+    try:
+        data = await build_system_status_payload()
+        _system_status_cache.update({
+            "ts": time.time(),
+            "data": data,
+            "api_id": id(api),
+        })
+    except Exception as exc:
+        logger.warning("Background system status refresh failed: %s", exc)
+    finally:
+        _system_status_cache["refreshing"] = False
+
+
 @router.get("/system/status")
-async def get_system_status():
-    return await build_system_status_payload()
+async def get_system_status(include_packs: bool = False):
+    api = _get_api()
+    now = time.time()
+    cached = _system_status_cache.get("data")
+    same_runtime = _system_status_cache.get("api_id") == id(api)
+    if not include_packs and cached is not None and same_runtime:
+        age = now - float(_system_status_cache.get("ts") or 0.0)
+        if age >= _SYSTEM_STATUS_TTL_SEC:
+            asyncio.ensure_future(_refresh_system_status_cache(api))
+        return cached
+
+    data = await build_system_status_payload(include_packs=include_packs)
+    if not include_packs:
+        _system_status_cache.update({
+            "ts": time.time(),
+            "data": data,
+            "api_id": id(api),
+        })
+    return data
+
+
+@router.get("/system/operator-alerts")
+def list_operator_alerts(limit: int = Query(default=8, ge=1, le=50)):
+    """Return the lightweight incident-center payload without full diagnostics."""
+    return {"operator_alerts": _operator_alerts_payload(limit)}
 
 
 @router.post("/system/memory/reconstruct-missing")

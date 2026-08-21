@@ -4,7 +4,48 @@
 
 const messagesEl = document.getElementById("chat-messages");
 
+// ============== USER-ACTIVATED TEAM MODE ==============
+
+const _teamModeSelect = document.getElementById("chat-team-mode");
+const _storedTeamMode = localStorage.getItem("remy.teamMode");
+if (_teamModeSelect && ["off", "adaptive"].includes(_storedTeamMode)) {
+    _teamModeSelect.value = _storedTeamMode;
+}
+_teamModeSelect?.addEventListener("change", () => {
+    // Force is deliberately one-shot and is never persisted across tasks.
+    localStorage.setItem(
+        "remy.teamMode",
+        _teamModeSelect.value === "adaptive" ? "adaptive" : "off",
+    );
+});
+
+function consumeTeamMode() {
+    const mode = ["adaptive", "force"].includes(_teamModeSelect?.value)
+        ? _teamModeSelect.value
+        : "off";
+    if (mode === "force" && _teamModeSelect) {
+        _teamModeSelect.value = "off";
+        localStorage.setItem("remy.teamMode", "off");
+    }
+    return mode;
+}
+
 // ============== MODEL SWITCHER ==============
+
+let _modelSwitcherBound = false;
+let _modelRegistryPromise = null;
+
+function _loadModelRegistry({ refresh = false } = {}) {
+    if (refresh || !_modelRegistryPromise) {
+        _modelRegistryPromise = fetch("/api/models")
+            .then((response) => response.json())
+            .catch((error) => {
+                _modelRegistryPromise = null;
+                throw error;
+            });
+    }
+    return _modelRegistryPromise;
+}
 
 async function initModelSwitcher() {
     const sel = document.getElementById("chat-model-select");
@@ -13,7 +54,7 @@ async function initModelSwitcher() {
     try {
         const [settingsRes, registryRes] = await Promise.all([
             fetch("/api/settings").then(r => r.json()),
-            fetch("/api/model-registry").then(r => r.json()),
+            _loadModelRegistry(),
         ]);
         const current = settingsRes.summary_model || "";
         const models = registryRes.models || [];
@@ -23,7 +64,7 @@ async function initModelSwitcher() {
             const opt = document.createElement("option");
             opt.value = m.name;
             const providerLabel = m.provider === "openrouter" ? "OR" : m.provider.slice(0, 2).toUpperCase();
-            opt.textContent = `${m.name}  [${providerLabel}]`;
+            opt.textContent = `${m.label || m.name}  [${providerLabel}]`;
             if (m.name === current) opt.selected = true;
             sel.appendChild(opt);
         }
@@ -39,17 +80,20 @@ async function initModelSwitcher() {
         sel.innerHTML = `<option value="">—</option>`;
     }
 
-    sel.addEventListener("change", async () => {
-        const val = sel.value;
-        if (!val) return;
-        try {
-            await fetch("/api/settings", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ summary_model: val }),
-            });
-        } catch (_) {}
-    });
+    if (!_modelSwitcherBound) {
+        sel.addEventListener("change", async () => {
+            const val = sel.value;
+            if (!val) return;
+            try {
+                await fetch("/api/settings", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ summary_model: val }),
+                });
+            } catch (_) {}
+        });
+        _modelSwitcherBound = true;
+    }
 }
 
 initModelSwitcher();
@@ -67,13 +111,18 @@ const _compareCancelBtn = document.getElementById("btn-compare-cancel");
 
 async function _initComparePanel() {
     try {
-        const res = await fetch("/api/model-registry");
-        const data = await res.json();
+        const data = await _loadModelRegistry();
         _compareAvailableModels = data.models || [];
     } catch (_) {}
 }
 
 _initComparePanel();
+
+document.addEventListener("models-changed", () => {
+    _modelRegistryPromise = null;
+    initModelSwitcher();
+    _initComparePanel();
+});
 
 _compareBtn?.addEventListener("click", () => {
     if (_compareActive) {
@@ -110,8 +159,13 @@ function _renderComparePanel() {
             _updateCompareSendBtn();
         });
         const providerLabel = m.provider === "openrouter" ? "OR" : m.provider.slice(0, 2).toUpperCase();
-        label.appendChild(cb);
-        label.insertAdjacentHTML("beforeend", ` <span class="compare-model-name">${m.name}</span> <span class="compare-model-provider">[${providerLabel}]</span>`);
+        const modelName = document.createElement("span");
+        modelName.className = "compare-model-name";
+        modelName.textContent = m.label || m.name;
+        const modelProvider = document.createElement("span");
+        modelProvider.className = "compare-model-provider";
+        modelProvider.textContent = `[${providerLabel}]`;
+        label.append(cb, " ", modelName, " ", modelProvider);
         _compareModelList.appendChild(label);
     }
     _updateCompareSendBtn();
@@ -143,6 +197,7 @@ async function _sendCompareMessage(text) {
 
     const buffers = {};
     const panelEls = {};
+    const terminalModels = new Set();
 
     for (const model of models) {
         buffers[model] = "";
@@ -194,16 +249,44 @@ async function _sendCompareMessage(text) {
                 messagesEl.scrollTop = messagesEl.scrollHeight;
             }
         } else if (data.type === "done" && data.model) {
+            terminalModels.add(data.model);
             const tab = tabs.querySelector(`[data-model="${data.model}"]`);
             if (tab) tab.classList.add("compare-tab--done");
         } else if (data.type === "error" && data.model) {
+            terminalModels.add(data.model);
             const panel = panelEls[data.model];
-            if (panel) panel.innerHTML = `<div class="compare-error">Error: ${data.content}</div>`;
+            if (panel) {
+                panel.innerHTML = "";
+                const error = document.createElement("div");
+                error.className = "compare-error";
+                error.textContent = `Error: ${data.content || "Model failed"}`;
+                panel.appendChild(error);
+            }
+        } else if (data.type === "error") {
+            const error = document.createElement("div");
+            error.className = "compare-error";
+            error.textContent = `Compare error: ${data.content || "Unknown error"}`;
+            bubble.appendChild(error);
+        } else if (data.type === "all_done") {
+            ws.close(1000, "Comparison complete");
         }
     };
 
     ws.onerror = () => {
         bubble.insertAdjacentHTML("beforeend", '<div class="compare-error">Connection error</div>');
+    };
+
+    ws.onclose = () => {
+        for (const model of models) {
+            if (terminalModels.has(model)) continue;
+            const panel = panelEls[model];
+            if (!panel) continue;
+            panel.innerHTML = "";
+            const error = document.createElement("div");
+            error.className = "compare-error";
+            error.textContent = "Connection closed before this model returned a response.";
+            panel.appendChild(error);
+        }
     };
 }
 
@@ -211,10 +294,15 @@ const inputEl = document.getElementById("chat-input");
 const sendBtn = document.getElementById("btn-send");
 const voiceBtn = document.getElementById("btn-voice");
 const attachBtn = document.getElementById("btn-attach");
+const codeWorkspaceBtn = document.getElementById("project-context-selector");
 const fileInput = document.getElementById("file-input");
 const filePreview = document.getElementById("file-preview");
 const filePreviewName = document.getElementById("file-preview-name");
 const removeFileBtn = document.getElementById("btn-remove-file");
+const codeWorkspaceBar = document.getElementById("project-context-bar");
+const codeWorkspaceName = document.getElementById("project-context-name");
+const codeWorkspaceMeta = document.getElementById("project-context-meta");
+const closeWorkspaceBtn = document.getElementById("project-context-close");
 const chatInputArea = document.querySelector(".chat-input-area");
 const dropOverlay = document.getElementById("file-drop-overlay");
 const ttsCheckbox = document.getElementById("tts-enabled");
@@ -377,18 +465,266 @@ function formatMarkdown(text) {
 
 // ============== MESSAGES ==============
 
-function addMessage(role, content, extraClass = "") {
-    removeTyping();
+function estimateOutputTokens(text) {
+    const value = String(text || "");
+    if (!value) return 0;
+    const nonAscii = (value.match(/[^\x00-\x7F]/g) || []).length;
+    const ascii = value.length - nonAscii;
+    return Math.max(1, Math.ceil((ascii / 4) + (nonAscii / 2.5)));
+}
+
+async function copyResponseText(button, text) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand("copy");
+            textarea.remove();
+        }
+        const label = button.querySelector("span");
+        if (label) label.textContent = "Copied";
+        button.classList.add("copied");
+        setTimeout(() => {
+            if (label) label.textContent = "Copy";
+            button.classList.remove("copied");
+        }, 1400);
+    } catch (error) {
+        console.warn("Could not copy response", error);
+        const label = button.querySelector("span");
+        if (label) label.textContent = "Copy failed";
+    }
+}
+
+function attachResponseControls(message, usage = null) {
+    if (!message?.classList.contains("assistant")) return;
+    let controls = message.querySelector(":scope > .chat-response-controls");
+    if (!controls) {
+        controls = document.createElement("div");
+        controls.className = "chat-response-controls";
+
+        const copyButton = document.createElement("button");
+        copyButton.type = "button";
+        copyButton.className = "chat-copy-response";
+        copyButton.title = "Copy response as Markdown";
+        copyButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg><span>Copy</span>';
+        copyButton.addEventListener("click", () => copyResponseText(
+            copyButton,
+            message.dataset.rawContent || ""
+        ));
+        controls.appendChild(copyButton);
+
+        const tokenUsage = document.createElement("span");
+        tokenUsage.className = "chat-token-usage";
+        controls.appendChild(tokenUsage);
+        message.appendChild(controls);
+    }
+
+    const tokenEl = controls.querySelector(".chat-token-usage");
+    if (!tokenEl) return;
+    tokenEl.classList.remove("partial", "estimated");
+    const reportedCalls = Number(usage?.reported_calls || 0);
+    const totalCalls = Number(usage?.total_calls || 0);
+    const total = Number(usage?.total_tokens || 0);
+    if (usage?.exact && total > 0) {
+        const input = Number(usage.input_tokens || 0);
+        const output = Number(usage.output_tokens || 0);
+        tokenEl.textContent = `${total.toLocaleString()} tokens · ${input.toLocaleString()} in / ${output.toLocaleString()} out`;
+        tokenEl.title = `Exact usage reported by all ${totalCalls} model call${totalCalls === 1 ? "" : "s"}.`;
+    } else if (reportedCalls > 0 && total > 0) {
+        tokenEl.textContent = `≥ ${total.toLocaleString()} tokens`;
+        tokenEl.classList.add("partial");
+        tokenEl.title = `Provider-reported minimum: ${reportedCalls} of ${totalCalls} model calls returned usage.`;
+    } else {
+        const estimate = estimateOutputTokens(message.dataset.rawContent || "");
+        tokenEl.textContent = `≈ ${estimate.toLocaleString()} output tokens`;
+        tokenEl.classList.add("estimated");
+        tokenEl.title = "Estimated from response text because this provider did not report token usage. Input/context tokens are not included.";
+    }
+}
+
+let _activeConversationId = "";
+const _conversationTranscriptCache = new Map();
+const _conversationTranscriptRequests = new Map();
+const CONVERSATION_INITIAL_LIMIT = 120;
+const CONVERSATION_CACHE_TTL_MS = 15_000;
+const CONVERSATION_CACHE_SIZE = 6;
+
+function addMessage(role, content, extraClass = "", options = {}) {
+    const {
+        target = messagesEl,
+        scroll = true,
+        removeTypingIndicator = true,
+        trackConversationChange = true,
+    } = options;
+    if (removeTypingIndicator) removeTyping();
+    if (trackConversationChange && _activeConversationId) {
+        _conversationTranscriptCache.delete(_activeConversationId);
+    }
     const div = document.createElement("div");
     div.className = `chat-msg ${role} ${extraClass}`.trim();
     if (role === "assistant") {
+        div.dataset.rawContent = content;
         div.innerHTML = formatMarkdown(content);
+        attachResponseControls(div);
     } else {
         div.textContent = content;
     }
-    messagesEl.appendChild(div);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    target.appendChild(div);
+    if (scroll && target === messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    return div;
 }
+
+let _conversationLoadSequence = 0;
+
+function _cacheConversationTranscript(conversationId, payload) {
+    _conversationTranscriptCache.delete(conversationId);
+    _conversationTranscriptCache.set(conversationId, {
+        ...payload,
+        fetchedAt: Date.now(),
+    });
+    while (_conversationTranscriptCache.size > CONVERSATION_CACHE_SIZE) {
+        const oldestId = _conversationTranscriptCache.keys().next().value;
+        _conversationTranscriptCache.delete(oldestId);
+    }
+}
+
+function _renderConversationTranscript(conversation, payload) {
+    const fragment = document.createDocumentFragment();
+    if (payload.has_more) {
+        const loadEarlier = document.createElement("button");
+        loadEarlier.type = "button";
+        loadEarlier.className = "chat-load-earlier";
+        loadEarlier.textContent = "Load earlier messages";
+        loadEarlier.addEventListener("click", () => {
+            const nextLimit = Math.min(
+                Math.max(Number(payload.limit) || CONVERSATION_INITIAL_LIMIT, CONVERSATION_INITIAL_LIMIT) * 2,
+                1999,
+            );
+            loadConversationTranscript(conversation, { force: true, limit: nextLimit });
+        });
+        fragment.appendChild(loadEarlier);
+    }
+    for (const message of payload.messages || []) {
+        if (message.role !== "user" && message.role !== "assistant") continue;
+        addMessage(message.role, message.content || "", "", {
+            target: fragment,
+            scroll: false,
+            removeTypingIndicator: false,
+            trackConversationChange: false,
+        });
+    }
+    removeTyping();
+    messagesEl.replaceChildren(fragment);
+    window.requestAnimationFrame(() => {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+}
+
+function _conversationTranscriptRequest(conversationId, limit) {
+    const requestKey = `${conversationId}:${limit}`;
+    if (!_conversationTranscriptRequests.has(requestKey)) {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 8000);
+        const request = window.apiClient.getConversationMessages(
+            conversationId,
+            limit,
+            { signal: controller.signal },
+        ).finally(() => {
+            window.clearTimeout(timeout);
+            _conversationTranscriptRequests.delete(requestKey);
+        });
+        _conversationTranscriptRequests.set(requestKey, request);
+    }
+    return _conversationTranscriptRequests.get(requestKey);
+}
+
+async function loadConversationTranscript(
+    conversation,
+    { force = false, limit = CONVERSATION_INITIAL_LIMIT, preferCache = false } = {},
+) {
+    if (!conversation?.conversation_id || !window.apiClient) return;
+    const sequence = ++_conversationLoadSequence;
+    const conversationId = conversation.conversation_id;
+    const cached = _conversationTranscriptCache.get(conversationId);
+    const cacheIsFresh = cached
+        && Date.now() - cached.fetchedAt < CONVERSATION_CACHE_TTL_MS
+        && Number(cached.limit || 0) >= limit;
+    if (cached && (preferCache || cacheIsFresh) && !force) {
+        _renderConversationTranscript(conversation, cached);
+        if (cacheIsFresh || preferCache) return;
+    } else if (!cached) {
+        const status = document.createElement("div");
+        status.className = "conversation-load-status";
+        status.textContent = "Loading conversation…";
+        messagesEl.replaceChildren(status);
+    }
+    messagesEl.classList.add("loading-conversation");
+    try {
+        const payload = await _conversationTranscriptRequest(conversationId, limit);
+        if (sequence !== _conversationLoadSequence) return;
+        _cacheConversationTranscript(conversationId, payload);
+        _renderConversationTranscript(conversation, payload);
+    } catch (error) {
+        console.error("Failed to load conversation transcript", error);
+        if (sequence === _conversationLoadSequence) {
+            messagesEl.innerHTML = "";
+            addMessage(
+                "assistant",
+                error?.name === "AbortError"
+                    ? "This chat history took too long to load. Your stored conversation is safe; try opening it again."
+                    : "I could not load this chat history. The stored conversation was not deleted.",
+            );
+        }
+    } finally {
+        if (sequence === _conversationLoadSequence) {
+            messagesEl.classList.remove("loading-conversation");
+        }
+    }
+}
+
+document.addEventListener("conversation-changed", (event) => {
+    const conversation = event.detail?.conversation;
+    if (conversation?.conversation_id) {
+        _activeConversationId = conversation.conversation_id;
+    }
+    if (event.detail?.skipTranscriptReload) return;
+    loadConversationTranscript(conversation, {
+        preferCache: Boolean(event.detail?.preferCachedTranscript),
+    });
+});
+
+document.addEventListener("fork-replay-ready", async (event) => {
+    const fork = event.detail || {};
+    const prompt = String(fork.next_prompt || "");
+    inputEl.value = prompt;
+    inputEl.style.height = "auto";
+    inputEl.style.height = `${Math.min(inputEl.scrollHeight, 180)}px`;
+    inputEl.placeholder = prompt
+        ? "Review the replay prompt, then send when readyвЂ¦"
+        : "Continue from the selected trajectory boundaryвЂ¦";
+
+    const preferredModel = String(fork.preferred_model || "");
+    if (preferredModel) {
+        let select = document.getElementById("chat-model-select");
+        if (!Array.from(select?.options || []).some((option) => option.value === preferredModel)) {
+            await initModelSwitcher();
+            select = document.getElementById("chat-model-select");
+        }
+        if (Array.from(select?.options || []).some((option) => option.value === preferredModel)) {
+            select.value = preferredModel;
+            select.dispatchEvent(new Event("change"));
+        }
+    }
+    inputEl.focus();
+});
 
 function addImagePreview(base64, mimeType) {
     const container = document.createElement("div");
@@ -1071,6 +1407,74 @@ function speakText(text) {
 // ============== FILE HANDLING ==============
 
 let stagedFile = null; // { name, mime_type, base64 }
+let activeCodeWorkspace = null;
+
+function setActiveCodeWorkspace(workspace) {
+    activeCodeWorkspace = workspace || null;
+    if (!activeCodeWorkspace) {
+        localStorage.removeItem("remy-active-code-workspace");
+        codeWorkspaceBar?.classList.remove("active");
+        codeWorkspaceBtn?.setAttribute("title", "Choose a code project");
+        if (codeWorkspaceName) codeWorkspaceName.textContent = "Choose project";
+        if (codeWorkspaceMeta) codeWorkspaceMeta.textContent = "";
+        closeWorkspaceBtn?.classList.add("hidden");
+        if (inputEl) inputEl.placeholder = "Type a message...";
+        return;
+    }
+    localStorage.setItem("remy-active-code-workspace", activeCodeWorkspace.workspace_id);
+    if (codeWorkspaceName) codeWorkspaceName.textContent = activeCodeWorkspace.name || "Code workspace";
+    if (codeWorkspaceMeta) {
+        const rootPath = activeCodeWorkspace.root_path || "";
+        const fileCount = activeCodeWorkspace.code_profile?.file_count;
+        const countLabel = fileCount
+            ? `${fileCount}${activeCodeWorkspace.code_profile?.truncated ? "+" : ""} files`
+            : "read-only";
+        codeWorkspaceMeta.textContent = rootPath ? `${rootPath} · ${countLabel}` : countLabel;
+    }
+    codeWorkspaceBtn?.setAttribute("title", `Current project: ${activeCodeWorkspace.root_path || activeCodeWorkspace.name}. Click to change.`);
+    codeWorkspaceBar?.classList.add("active");
+    closeWorkspaceBtn?.classList.remove("hidden");
+    if (inputEl) inputEl.placeholder = `Ask about ${activeCodeWorkspace.name || "this codebase"}...`;
+}
+
+async function restoreActiveCodeWorkspace() {
+    const savedId = localStorage.getItem("remy-active-code-workspace");
+    if (!savedId) return;
+    try {
+        const response = await fetch("/api/workspaces");
+        if (!response.ok) return;
+        const data = await response.json();
+        const workspace = (data.workspaces || []).find((item) => item.workspace_id === savedId);
+        if (workspace && workspace.source !== "builtin") setActiveCodeWorkspace(workspace);
+        else setActiveCodeWorkspace(null);
+    } catch (_) {
+        // The status will recover on the next page load; chat remains usable.
+    }
+}
+
+codeWorkspaceBtn?.addEventListener("click", async () => {
+    codeWorkspaceBtn.disabled = true;
+    codeWorkspaceBtn.classList.add("workspace-picking");
+    try {
+        const response = await fetch("/api/workspaces/select-folder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ read: true, write: false, execute: false }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Could not open the folder picker.");
+        if (data.cancelled) return;
+        setActiveCodeWorkspace(data.workspace);
+    } catch (error) {
+        addErrorMessage(error.message || "Could not connect the code folder.");
+    } finally {
+        codeWorkspaceBtn.disabled = false;
+        codeWorkspaceBtn.classList.remove("workspace-picking");
+    }
+});
+
+closeWorkspaceBtn?.addEventListener("click", () => setActiveCodeWorkspace(null));
+restoreActiveCodeWorkspace();
 
 attachBtn.addEventListener("click", () => fileInput.click());
 
@@ -1281,24 +1685,41 @@ function sendMessage() {
     const contextReducerApply = !contextReducerCompare && Boolean(contextReducerApplyCheckbox?.checked);
     // When A/B testing, price the run against the model selected in the lab.
     const labModel = contextReducerCompare ? getSelectedLabModel() : "";
+    const teamMode = (contextReducerCompare || contextReducerApply) ? "off" : consumeTeamMode();
 
     if (limitedMode) {
-        messageQueue.push({ type: "message", text, displayText: text, contextReducerCompare, contextReducerApply });
+        messageQueue.push({
+            type: "message", text, displayText: text, contextReducerCompare, contextReducerApply,
+            workspaceId: activeCodeWorkspace?.workspace_id,
+            teamMode,
+        });
         addQueuedMessage(text);
         inputEl.value = "";
         inputEl.style.height = "auto";
         if (messageQueue.length === 1) {
             showTyping();
             emitBrainBurst();
-            window.apiClient.sendMessage(text, { contextReducerCompare, contextReducerApply, model: labModel });
+            window.apiClient.sendMessage(text, {
+                contextReducerCompare, contextReducerApply, model: labModel,
+                workspaceId: activeCodeWorkspace?.workspace_id,
+                teamMode,
+            });
         }
         return;
     }
 
     addMessage("user", text);
     emitBrainBurst();
-    lastUserMessage = { type: "message", text, contextReducerCompare, contextReducerApply };
-    window.apiClient.sendMessage(text, { contextReducerCompare, contextReducerApply, model: labModel });
+    lastUserMessage = {
+        type: "message", text, contextReducerCompare, contextReducerApply,
+        workspaceId: activeCodeWorkspace?.workspace_id,
+        teamMode,
+    };
+    window.apiClient.sendMessage(text, {
+        contextReducerCompare, contextReducerApply, model: labModel,
+        workspaceId: activeCodeWorkspace?.workspace_id,
+        teamMode,
+    });
     inputEl.value = "";
     inputEl.style.height = "auto";
 }
@@ -1317,7 +1738,7 @@ inputEl.addEventListener("keydown", (e) => {
 // Auto-resize textarea
 inputEl.addEventListener("input", () => {
     inputEl.style.height = "auto";
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px";
 });
 
 // ============== PIPELINE LAUNCHER IN CHAT ==============
@@ -1333,6 +1754,11 @@ inputEl.addEventListener("input", () => {
     let _menuOpen   = false;
     let _active     = null;   // { id, name } of selected pipeline, or null
     let _runAbort   = null;
+    let _conversationId = "";
+
+    document.addEventListener("conversation-changed", (event) => {
+        _conversationId = String(event.detail?.conversation?.conversation_id || "");
+    });
 
     // ── helpers ────────────────────────────────────────────────────────────────
     function _setActive(pipeline) {
@@ -1448,14 +1874,24 @@ inputEl.addEventListener("input", () => {
 
         _runAbort = new AbortController();
         let lastOutput = "";
+        let trajectoryConversationId = _conversationId;
+        let trajectoryEventId = "";
 
         try {
             const resp = await fetch("/api/pipelines/run", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ pipeline_id: pipelineId, input_text: inputText }),
+                body: JSON.stringify({
+                    pipeline_id: pipelineId,
+                    input_text: inputText,
+                    conversation_id: _conversationId,
+                }),
                 signal: _runAbort.signal,
             });
+            if (!resp.ok) {
+                const failure = await resp.json().catch(() => ({}));
+                throw new Error(failure.detail || `Pipeline request failed (${resp.status})`);
+            }
 
             const reader  = resp.body.getReader();
             const decoder = new TextDecoder();
@@ -1471,6 +1907,10 @@ inputEl.addEventListener("input", () => {
                     if (!line.startsWith("data:")) continue;
                     try {
                         const evt = JSON.parse(line.slice(5).trim());
+                        if (evt.type === "run_started") {
+                            trajectoryConversationId = evt.conversation_id || trajectoryConversationId;
+                            trajectoryEventId = evt.trajectory_event_id || trajectoryEventId;
+                        }
                         if (evt.type === "step_start") {
                             const d = document.createElement("div");
                             d.className = "cpm-step"; d.id = `cpmi-${evt.index}`;
@@ -1489,6 +1929,13 @@ inputEl.addEventListener("input", () => {
                             if (d) d.className = "cpm-step error";
                         }
                         if (evt.type === "done") lastOutput = evt.output || "";
+                        if (evt.type === "trajectory_link") {
+                            trajectoryConversationId = evt.conversation_id || trajectoryConversationId;
+                            trajectoryEventId = evt.event_id || evt.run_event_id || trajectoryEventId;
+                        }
+                        if (evt.type === "error") {
+                            lastOutput = `[Pipeline error: ${evt.error || "Unknown error"}]`;
+                        }
                     } catch (_) {}
                 }
             }
@@ -1502,7 +1949,24 @@ inputEl.addEventListener("input", () => {
         if (lastOutput) {
             // Re-use addMessage formatting — remove temp bubble, add proper one
             runBubble.remove();
-            addMessage("assistant", lastOutput);
+            const resultBubble = addMessage("assistant", lastOutput, "pipeline-result");
+            if (trajectoryConversationId && trajectoryEventId) {
+                const controls = resultBubble.querySelector(".chat-response-controls") || resultBubble;
+                const trajectoryLink = document.createElement("button");
+                trajectoryLink.type = "button";
+                trajectoryLink.className = "pipeline-trajectory-link";
+                trajectoryLink.textContent = "Trajectory ↗";
+                trajectoryLink.title = "Inspect this pipeline run in Trajectory";
+                trajectoryLink.addEventListener("click", () => {
+                    document.dispatchEvent(new CustomEvent("trajectory-open-alert", {
+                        detail: {
+                            conversationId: trajectoryConversationId,
+                            eventId: trajectoryEventId,
+                        },
+                    }));
+                });
+                controls.appendChild(trajectoryLink);
+            }
         } else {
             runBubble.remove();
         }
@@ -1571,9 +2035,11 @@ const TOOL_LABELS = {
     browse_page:         "Browsing page",
     browser_act:         "Interacting with page",
     browser_close:       "Closing browser",
-    fs_read:             "Reading file",
+    list_local_workspaces:"Checking code workspaces",
+    list_directory:      "Mapping codebase",
+    fs_read:             "Reading code",
     fs_write:            "Writing file",
-    fs_search:           "Searching filesystem",
+    fs_search:           "Searching code",
     shell_exec:          "Running command",
     delegate_task:       "Delegating to worker",
     enable_tools:        "Enabling tools",
@@ -1629,6 +2095,18 @@ let currentAssistantMsg = null;
 let currentToolIndicator = null;
 let streamBuffer = "";
 let lastUserMessage = null;
+let currentAssistantProvisional = false;
+let providerStatusEl = null;
+let providerStatusStartedAt = null;
+let providerStatusTimer = null;
+let currentRun = null;
+let trajectoryTokenNotified = false;
+
+function notifyTrajectoryChange(phase) {
+    document.dispatchEvent(new CustomEvent("trajectory-refresh", {
+        detail: { phase: phase || "update" },
+    }));
+}
 
 // Progress tracking state
 let toolStepCount = 0;
@@ -1662,7 +2140,8 @@ function enterLimitedMode(errorClass) {
     }));
     inputEl.placeholder = "LLM unavailable \u2014 messages will be queued...";
     inputEl.classList.add("llm-unavailable");
-    sendBtn.textContent = "Queue";
+    sendBtn.title = "Queue message";
+    sendBtn.setAttribute("aria-label", "Queue message");
     sendBtn.classList.add("btn-queue");
 }
 
@@ -1672,9 +2151,10 @@ function exitLimitedMode() {
     consecutiveLlmErrors = 0;
     lastErrorClass = null;
     document.dispatchEvent(new CustomEvent("llm-status-change", { detail: { available: true } }));
-    inputEl.placeholder = "Type a message...";
+    inputEl.placeholder = "Describe what you want Remy to do…";
     inputEl.classList.remove("llm-unavailable");
-    sendBtn.textContent = "Send";
+    sendBtn.title = "Send message";
+    sendBtn.setAttribute("aria-label", "Send message");
     sendBtn.classList.remove("btn-queue");
     drainQueue();
 }
@@ -1691,6 +2171,8 @@ function drainQueue() {
             window.apiClient.sendMessage(msg.text, {
                 contextReducerCompare: Boolean(msg.contextReducerCompare),
                 contextReducerApply: Boolean(msg.contextReducerApply),
+                workspaceId: msg.workspaceId || activeCodeWorkspace?.workspace_id,
+                teamMode: msg.teamMode || "off",
             });
         } else if (msg.type === "voice") {
             window.apiClient.sendVoice(msg.audio, msg.mime_type);
@@ -1722,8 +2204,108 @@ function appendToAssistantMessage(text) {
         streamBuffer = "";
     }
     streamBuffer += text;
+    currentAssistantMsg.dataset.rawContent = streamBuffer;
     currentAssistantMsg.innerHTML = formatMarkdown(streamBuffer);
     messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function appendProvisionalToken(text) {
+    appendToAssistantMessage(text);
+    currentAssistantProvisional = true;
+    if (currentAssistantMsg) currentAssistantMsg.classList.add("provisional-stream");
+}
+
+function resetProvisionalMessage() {
+    if (currentAssistantProvisional && currentAssistantMsg) {
+        currentAssistantMsg.remove();
+        currentAssistantMsg = null;
+        streamBuffer = "";
+    }
+    currentAssistantProvisional = false;
+}
+
+function commitProvisionalMessage() {
+    if (currentAssistantMsg) currentAssistantMsg.classList.remove("provisional-stream");
+    currentAssistantProvisional = false;
+}
+
+const PROVIDER_PHASE_LABELS = {
+    preparing: "Preparing request",
+    waiting_first_token: "Waiting for first token",
+    generating: "Generating response",
+    working: "Model is working",
+};
+
+function showProviderStatus(data = {}) {
+    removeTyping();
+    if (!providerStatusEl) {
+        providerStatusEl = document.createElement("div");
+        providerStatusEl.className = "chat-msg provider-status";
+        providerStatusEl.innerHTML = `<span class="provider-status-pulse"></span>`
+            + `<span class="provider-status-text"></span>`
+            + `<span class="provider-status-elapsed"></span>`
+            + `<button type="button" class="provider-status-stop">Stop</button>`;
+        providerStatusEl.querySelector(".provider-status-stop")?.addEventListener("click", () => {
+            window.apiClient.cancelGeneration();
+            const button = providerStatusEl?.querySelector(".provider-status-stop");
+            if (button) {
+                button.disabled = true;
+                button.textContent = "Stopping…";
+            }
+        });
+        messagesEl.appendChild(providerStatusEl);
+        providerStatusStartedAt = Date.now();
+        providerStatusTimer = setInterval(() => {
+            if (!providerStatusEl || !providerStatusStartedAt) return;
+            const elapsed = Math.floor((Date.now() - providerStatusStartedAt) / 1000);
+            const elapsedEl = providerStatusEl.querySelector(".provider-status-elapsed");
+            if (elapsedEl) elapsedEl.textContent = _formatElapsed(elapsed);
+        }, 1000);
+    }
+    providerStatusEl.dataset.phase = data.phase || "working";
+    const label = PROVIDER_PHASE_LABELS[data.phase] || data.message || "Model is working";
+    const identity = [data.provider, data.model].filter(Boolean).join(" · ");
+    const textEl = providerStatusEl.querySelector(".provider-status-text");
+    if (textEl) textEl.textContent = identity ? `${label} — ${identity}` : label;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+const TERMINAL_RUN_STATES = new Set([
+    "completed", "completed_with_limits", "failed", "cancelled", "interrupted", "blocked",
+]);
+
+function showRunState(run = {}) {
+    if (!run?.run_id) return;
+    currentRun = run;
+    if (!TERMINAL_RUN_STATES.has(run.status)) {
+        const usage = run.usage || {};
+        const limits = run.limits || {};
+        const step = run.current_step || run.phase || "Working";
+        const progress = `${usage.turns || 0}/${limits.max_turns || "∞"} steps`;
+        showProviderStatus({
+            phase: run.phase || "working",
+            message: `${step} · ${progress}`,
+        });
+        return;
+    }
+    removeProviderStatus();
+    const target = currentAssistantMsg || getLastAssistantMessage();
+    if (!target || target.querySelector(`[data-run-summary="${run.run_id}"]`)) return;
+    const usage = run.usage || {};
+    const summary = document.createElement("div");
+    summary.className = `run-envelope-summary run-envelope-${run.status}`;
+    summary.dataset.runSummary = run.run_id;
+    const reason = run.stop_reason ? ` · ${run.stop_reason.replaceAll("_", " ")}` : "";
+    summary.textContent = `${run.status.replaceAll("_", " ")} · ${usage.turns || 0} steps · ${usage.total_tokens || 0} tokens${reason}`;
+    target.appendChild(summary);
+}
+
+function removeProviderStatus() {
+    if (providerStatusTimer) clearInterval(providerStatusTimer);
+    providerStatusTimer = null;
+    providerStatusStartedAt = null;
+    if (providerStatusEl) providerStatusEl.remove();
+    providerStatusEl = null;
 }
 
 function addToolIndicator(toolName, argsText) {
@@ -1813,6 +2395,29 @@ function addThinkingStep() {
     currentToolIndicator.appendChild(step);
 
     _startElapsedTimer();
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addTeamStatusStep(data) {
+    if (!currentToolIndicator) {
+        const div = document.createElement("div");
+        div.className = "chat-msg tool-indicator tool-activity-log";
+        messagesEl.appendChild(div);
+        currentToolIndicator = div;
+    }
+    _finishActiveStep();
+    const step = document.createElement("div");
+    const active = data.phase === "planning";
+    step.className = `tool-step-row ${active ? "tool-step-active" : "tool-step-done"}`;
+    const members = Array.isArray(data.members) ? data.members : [];
+    const detail = members.length
+        ? ` · ${members.map((item) => item.role).join(", ")}`
+        : "";
+    step.innerHTML = active
+        ? `<span class="tool-spinner"></span><span class="tool-step-label"></span>`
+        : `<span class="tool-check">✓</span><span class="tool-step-label"></span>`;
+    step.querySelector(".tool-step-label").textContent = `${data.message || "Agent team"}${detail}`;
+    currentToolIndicator.appendChild(step);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -1920,6 +2525,8 @@ function resendLastMessage() {
         window.apiClient.sendMessage(lastUserMessage.text, {
             contextReducerCompare: Boolean(lastUserMessage.contextReducerCompare),
             contextReducerApply: Boolean(lastUserMessage.contextReducerApply),
+            workspaceId: lastUserMessage.workspaceId || activeCodeWorkspace?.workspace_id,
+            teamMode: lastUserMessage.teamMode || "off",
         });
     } else if (lastUserMessage.type === "voice") {
         window.apiClient.sendVoice(lastUserMessage.audio, lastUserMessage.mime_type);
@@ -1942,6 +2549,8 @@ document.addEventListener("llm-probe-request", () => {
             window.apiClient.sendMessage(msg.text, {
                 contextReducerCompare: Boolean(msg.contextReducerCompare),
                 contextReducerApply: Boolean(msg.contextReducerApply),
+                workspaceId: msg.workspaceId || activeCodeWorkspace?.workspace_id,
+                teamMode: msg.teamMode || "off",
             });
         } else if (msg.type === "voice") {
             window.apiClient.sendVoice(msg.audio, msg.mime_type);
@@ -1951,7 +2560,7 @@ document.addEventListener("llm-probe-request", () => {
     } else {
         // No queued messages — send a lightweight probe
         showTyping();
-        window.apiClient.sendMessage("ping");
+        window.apiClient.sendMessage("ping", { workspaceId: activeCodeWorkspace?.workspace_id });
     }
 });
 
@@ -1961,19 +2570,60 @@ window.apiClient.onMessage((data) => {
             showTyping();
             break;
         case "token":
+            removeProviderStatus();
             removeToolIndicator();
             consecutiveLlmErrors = 0;
             if (limitedMode) exitLimitedMode();
             appendToAssistantMessage(data.content);
+            if (!trajectoryTokenNotified) {
+                trajectoryTokenNotified = true;
+                notifyTrajectoryChange("first-output");
+            }
+            break;
+        case "provisional_token":
+            consecutiveLlmErrors = 0;
+            if (limitedMode) exitLimitedMode();
+            appendProvisionalToken(data.content || "");
+            if (!trajectoryTokenNotified) {
+                trajectoryTokenNotified = true;
+                notifyTrajectoryChange("first-output");
+            }
+            break;
+        case "provisional_reset":
+            resetProvisionalMessage();
+            break;
+        case "provisional_commit":
+            commitProvisionalMessage();
+            removeProviderStatus();
+            break;
+        case "provider_status":
+            showProviderStatus(data);
+            notifyTrajectoryChange("request");
+            break;
+        case "run_state":
+            showRunState(data.run || {});
+            notifyTrajectoryChange("run-state");
+            break;
+        case "stopped":
+            removeProviderStatus();
+            if (data.content && !streamBuffer) appendToAssistantMessage(data.content);
+            notifyTrajectoryChange("stopped");
             break;
         case "tool_start":
+            removeProviderStatus();
             addToolIndicator(data.content, data.args || "");
+            notifyTrajectoryChange("tool-start");
             break;
         case "tool_end":
             markToolEnd(data.content, data.result || "");
+            notifyTrajectoryChange("tool-end");
             break;
         case "thinking":
             addThinkingStep();
+            break;
+        case "team_status":
+            addTeamStatusStep(data);
+            notifyTrajectoryChange("agent-team");
             break;
         case "text":
             // Fallback for non-streaming or final blocks
@@ -1995,6 +2645,13 @@ window.apiClient.onMessage((data) => {
         case "factuality":
             attachFactualitySummary(data.factuality);
             break;
+        case "pipeline_candidate":
+            currentAssistantMsg = null;
+            addMessage(
+                "assistant",
+                `I noticed this task may be repeatable and created a safe pipeline draft: ${data.candidate?.title || "Untitled"}. Open Knowledge → Runtime to dry-run and approve it.`
+            );
+            break;
         case "context_reducer_compare":
             addContextReducerCompare(data.report);
             break;
@@ -2002,6 +2659,8 @@ window.apiClient.onMessage((data) => {
             addLlmOptimizationApply(data.report);
             break;
         case "error":
+            removeProviderStatus();
+            resetProvisionalMessage();
             if (data.retryable) {
                 consecutiveLlmErrors++;
                 if (consecutiveLlmErrors >= LLM_ERROR_THRESHOLD && !limitedMode) {
@@ -2016,15 +2675,24 @@ window.apiClient.onMessage((data) => {
                 addErrorMessage(data.content, data.retryable);
             }
             _resetToolProgress();
+            notifyTrajectoryChange("error");
             break;
         case "done":
+            if (data.run?.run_id) showRunState(data.run);
+            commitProvisionalMessage();
+            removeProviderStatus();
             removeTyping();
             removeToolIndicator();
             _resetToolProgress();
+            attachResponseControls(currentAssistantMsg || getLastAssistantMessage(), data.token_usage);
             streamBuffer = "";
             currentAssistantMsg = null;
+            currentRun = null;
+            trajectoryTokenNotified = false;
             // Best-effort brain-state plate under the reply. Fire-and-forget.
             attachBrainMetaPlate();
+            document.dispatchEvent(new CustomEvent("conversation-list-refresh"));
+            notifyTrajectoryChange("done");
             break;
         case "session_reset":
             messagesEl.innerHTML = "";
@@ -2037,6 +2705,36 @@ window.apiClient.onMessage((data) => {
             break;
     }
 });
+
+// Research results arrive independently of the chat turn. Persist seen IDs so
+// reconnecting clients receive missed results exactly once.
+const _seenResearchNotifications = new Set(
+    JSON.parse(localStorage.getItem("remy-seen-research-notifications") || "[]")
+);
+
+function _showResearchNotification(event) {
+    const id = event.id || `${event.type}:${event.project_id || event.topic || event.timestamp}`;
+    if (_seenResearchNotifications.has(id)) return;
+    _seenResearchNotifications.add(id);
+    localStorage.setItem(
+        "remy-seen-research-notifications",
+        JSON.stringify(Array.from(_seenResearchNotifications).slice(-100))
+    );
+    const fallback = event.type === "research.failed"
+        ? `Research “${event.topic || event.project_id}” needs attention: ${event.error || "no grounded result"}`
+        : `Research “${event.topic || event.project_id}” is complete.`;
+    addMessage("assistant", event.message || event.markdown || fallback, "research-notification");
+}
+
+window.apiClient.onRuntimeEvent((event) => {
+    if (event.type === "research.complete" || event.type === "research.failed") {
+        _showResearchNotification(event);
+    }
+});
+window.apiClient.connectRuntimeStream();
+window.apiClient.getResearchNotifications(20)
+    .then(data => (data.items || []).slice().reverse().forEach(_showResearchNotification))
+    .catch(() => {});
 
 messagesEl?.addEventListener("click", (event) => {
     const btn = event.target.closest(".factuality-feedback-btn");

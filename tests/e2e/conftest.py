@@ -7,6 +7,7 @@ import time
 import pytest
 import uvicorn
 from aura import Aura as CognitiveMemory
+from playwright.sync_api import sync_playwright
 
 from remy.web.session import WebSessionManager
 
@@ -29,7 +30,7 @@ class MockWebSessionManager(WebSessionManager):
     async def gemini_respond_multimodal(self, text=None, attachments=None, is_voice=False):
         return {"response": "Mock multimodal response", "input_transcript": None}
 
-    async def close_session(self):
+    async def close_session(self, *, generate_summary=True):
         self.session = None
 
 
@@ -147,8 +148,22 @@ def brain(_brain):
 
 
 @pytest.fixture
+def page():
+    """Local Playwright page without requiring the pytest-playwright plugin."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        browser_page = browser.new_page(viewport={"width": 1440, "height": 900})
+        yield browser_page
+        browser.close()
+
+
+@pytest.fixture
 def authenticated_page(page, server_url):
     """Open the local desktop app directly."""
+    page.add_init_script(
+        "localStorage.setItem('remy_first_run_done_v1', '1');"
+    )
     page.goto(server_url, wait_until="domcontentloaded")
     page.wait_for_selector(".sidebar", timeout=10000)
+    page.wait_for_selector("#startup-splash.is-hidden", timeout=10000)
     yield page

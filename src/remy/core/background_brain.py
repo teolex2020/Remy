@@ -275,7 +275,9 @@ def _run_background_inner(brain) -> dict:
                 compute_thermal_map, format_thermal_report_json, append_thermal_observation,
                 classify_cycle, _cycle_count,
             )
-            _thermal_report = compute_thermal_map(str(settings.AURA_BRAIN_PATH))
+            from remy.core.project_store import local_brain_path
+
+            _thermal_report = compute_thermal_map(str(local_brain_path()))
             if _thermal_report:
                 report["thermal"] = format_thermal_report_json(_thermal_report)
                 report["_thermal_report_obj"] = _thermal_report
@@ -306,7 +308,9 @@ def _run_background_inner(brain) -> dict:
         # Plasticity summary (plasticity runs inside compute_thermal_map)
         try:
             from remy.core.synaptic_plasticity import get_plasticity_summary
-            plast = get_plasticity_summary(str(settings.AURA_BRAIN_PATH))
+            from remy.core.project_store import local_brain_path
+
+            plast = get_plasticity_summary(str(local_brain_path()))
             if plast.get("total_tracked", 0) > 0:
                 report["plasticity"] = plast
                 if plast.get("pruned", 0) > 0:
@@ -478,8 +482,10 @@ def _run_background_inner(brain) -> dict:
         # ── TCS Step 7: Observation log — after all decisions ──
         try:
             if _thermal_report is not None:
+                from remy.core.project_store import local_brain_path
+
                 append_thermal_observation(
-                    str(settings.AURA_BRAIN_PATH),
+                    str(local_brain_path()),
                     _thermal_report,
                     routing=report.get("consolidation", {}).get("thermal_routing"),
                     llm_gating=report.get("llm_gating"),
@@ -540,7 +546,9 @@ def _archive_old_records(brain) -> int:
     cold_tags = set()
     try:
         from remy.core.thermal_advisor import get_maintenance_routing
-        routing = get_maintenance_routing(str(settings.AURA_BRAIN_PATH))
+        from remy.core.project_store import local_brain_path
+
+        routing = get_maintenance_routing(str(local_brain_path()))
         cold_tags = set(routing.cold_skip_tags)
     except Exception:
         pass
@@ -836,7 +844,9 @@ def _consolidate_records(brain) -> dict:
         # Thermal routing: hot-first ordering is the default maintenance path.
         # Falls back to original order only if thermal_advisor is unavailable.
         from remy.core.thermal_advisor import get_maintenance_routing, sort_clusters_by_thermal_priority
-        routing = get_maintenance_routing(str(settings.AURA_BRAIN_PATH))
+        from remy.core.project_store import local_brain_path
+
+        routing = get_maintenance_routing(str(local_brain_path()))
         clusters, deferred, routing_stats = sort_clusters_by_thermal_priority(clusters, routing)
         result["thermal_routing"] = routing_stats
         if deferred:
@@ -1491,6 +1501,7 @@ def _cleanup_files() -> dict:
     """
     import shutil
     import time
+    from remy.core.project_store import get_project_store, project_artifact_dir
 
     stats = {"deleted_count": 0, "freed_bytes": 0, "errors": 0}
     now = time.time()
@@ -1499,9 +1510,17 @@ def _cleanup_files() -> dict:
     ONE_HOUR = 3600
     THIRTY_DAYS = 30 * 24 * 3600
 
-    # 1. Browser Screenshots (data/browser_screenshots)
-    ss_dir = settings.DATA_DIR / "browser_screenshots"
-    if ss_dir.exists():
+    projects = get_project_store().list_projects()
+
+    # 1. Browser Screenshots in every project boundary.
+    for project in projects:
+        ss_dir = project_artifact_dir(
+            "browser_screenshots",
+            project.project_id,
+            legacy_data_dir=settings.DATA_DIR,
+        )
+        if not ss_dir.exists():
+            continue
         for f in ss_dir.iterdir():
             if f.is_file() and (now - f.stat().st_mtime) > ONE_HOUR:
                 try:
@@ -1512,9 +1531,15 @@ def _cleanup_files() -> dict:
                 except Exception:
                     stats["errors"] += 1
 
-    # 2. Generated Images (data/generated_images)
-    img_dir = settings.DATA_DIR / "generated_images"
-    if img_dir.exists():
+    # 2. Generated Images in every project boundary.
+    for project in projects:
+        img_dir = project_artifact_dir(
+            "generated_images",
+            project.project_id,
+            legacy_data_dir=settings.DATA_DIR,
+        )
+        if not img_dir.exists():
+            continue
         for f in img_dir.iterdir():
             if f.is_file() and (now - f.stat().st_mtime) > THIRTY_DAYS:
                 try:

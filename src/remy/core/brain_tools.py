@@ -22,6 +22,7 @@ from google.genai import types
 from remy.config.settings import settings
 from remy.core.agent_tools import brain, brain_lock
 from remy.core.hybrid_search import hybrid_search_structured, search_exact_structured
+from remy.core.project_store import project_artifact_dir
 from remy.core.scheduling import normalize_schedule_args
 from remy.core.source_credibility import credibility_scorer
 from remy.core.time_render import format_age
@@ -1036,6 +1037,8 @@ BRAIN_TOOLS = [
                 "content": types.Schema(type="STRING", description="The information to store"),
                 "tags": types.Schema(type="STRING", description="Comma-separated tags (e.g. 'person,grandfather')"),
                 "level": types.Schema(type="STRING", description="Memory level: L1_WORKING, L2_DECISIONS, L3_DOMAIN, L4_IDENTITY (default L3_DOMAIN)"),
+                "valid_from": types.Schema(type="STRING", description="Optional business-time start as ISO-8601 or Unix timestamp."),
+                "valid_until": types.Schema(type="STRING", description="Optional exclusive business-time end as ISO-8601 or Unix timestamp."),
             },
             required=["content"],
         ),
@@ -1109,6 +1112,21 @@ BRAIN_TOOLS = [
                     description="Maximum number of missing/review candidates to return per section.",
                 ),
             },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="search_transcript_history",
+        description=(
+            "Search the exact local conversation transcript when semantic memory is insufficient."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(type="STRING", description="Words or phrase to find"),
+                "session_id": types.Schema(type="STRING", description="Optional session filter"),
+                "limit": types.Schema(type="INTEGER", description="Maximum matches, default 10"),
+            },
+            required=["query"],
         ),
     ),
     types.FunctionDeclaration(
@@ -1272,6 +1290,48 @@ BRAIN_TOOLS = [
         ),
     ),
     types.FunctionDeclaration(
+        name="recall_memory_as_of",
+        description="Recall the memory versions that were valid at a historical date/time without activating old records.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "query": types.Schema(type="STRING", description="Topic to recall"),
+            "timestamp": types.Schema(type="STRING", description="Historical ISO-8601 datetime or Unix timestamp"),
+            "top_k": types.Schema(type="INTEGER", description="Maximum records, default 10, maximum 20"),
+            "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+        }, required=["query", "timestamp"]),
+    ),
+    types.FunctionDeclaration(
+        name="supersede_memory",
+        description="Replace an outdated memory while preserving its temporal audit chain. Prefer this over update_record when a fact changes over time.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "record_id": types.Schema(type="STRING", description="Existing record ID"),
+            "new_content": types.Schema(type="STRING", description="Replacement fact or memory"),
+            "effective_at": types.Schema(type="STRING", description="Optional effective ISO-8601 datetime or Unix timestamp; defaults to now"),
+            "tags": types.Schema(type="STRING", description="Optional comma-separated replacement tags"),
+            "level": types.Schema(type="STRING", description="Optional replacement memory level"),
+            "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+        }, required=["record_id", "new_content"]),
+    ),
+    types.FunctionDeclaration(
+        name="explain_memory_recall",
+        description="Audit why memories were selected or rejected, including trace_id and temporal/conflict gate reasons.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "query": types.Schema(type="STRING", description="Recall query to audit"),
+            "top_k": types.Schema(type="INTEGER", description="Maximum selected records, default 10, maximum 20"),
+            "min_strength": types.Schema(type="NUMBER", description="Optional minimum strength"),
+            "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+        }, required=["query"]),
+    ),
+    types.FunctionDeclaration(
+        name="build_memory_context",
+        description="Build a deterministic token-bounded context capsule, optionally at a historical business time.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "purpose": types.Schema(type="STRING", description="What the context will be used for"),
+            "token_budget": types.Schema(type="INTEGER", description="Token budget, default 2000, maximum 8000"),
+            "valid_at": types.Schema(type="STRING", description="Optional historical ISO-8601 datetime or Unix timestamp"),
+            "namespace": types.Schema(type="STRING", description="Optional Aura namespace"),
+        }, required=["purpose"]),
+    ),
+    types.FunctionDeclaration(
         name="delete_record",
         description="Permanently delete a memory record by ID. Use when information is wrong or no longer needed.",
         parameters=types.Schema(
@@ -1402,8 +1462,17 @@ BRAIN_TOOLS = [
     ),
     # ---- External tools ----
     types.FunctionDeclaration(
+        name="list_local_workspaces",
+        description="List user-connected folders and their Read, Write, Execute capabilities. Cannot grant access.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
         name="read_file",
-        description="Read the contents of a file. Restricted to data directory and allowed paths.",
+        description=(
+            "Read a file inside a user-approved Local Workspace with Read permission. "
+            "The built-in project workspace exposes only explicitly shared Documents "
+            "and Sandbox working files, never Remy's internal state."
+        ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -1414,7 +1483,10 @@ BRAIN_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="write_file",
-        description="Write content to a file. Only allowed in the data directory.",
+        description=(
+            "Write content inside a user-approved Local Workspace with Write permission. "
+            "In the built-in project workspace, write under Documents or Sandbox."
+        ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -1426,7 +1498,7 @@ BRAIN_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="list_directory",
-        description="List contents of a directory. Restricted to data directory and allowed paths.",
+        description="List a directory inside a user-approved Local Workspace with Read permission.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
@@ -1758,8 +1830,86 @@ BRAIN_TOOLS = [
                     ),
                     description="List of tasks to delegate (max 3)",
                 ),
+                "background": types.Schema(
+                    type="BOOLEAN",
+                    description=(
+                        "Optional. Run workers asynchronously and return a durable task ID immediately. "
+                        "The result is delivered to the originating conversation."
+                    ),
+                ),
             },
             required=["tasks"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_child_sessions",
+        description="List durable delegated child sessions and their current lifecycle state.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "parent_session_id": types.Schema(
+                    type="STRING",
+                    description="Optional parent conversation filter.",
+                ),
+                "limit": types.Schema(type="INTEGER", description="Maximum results, up to 100."),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_child_report",
+        description="Inspect a child session's attempt history, inbox, report, and settlements.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+            },
+            required=["child_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="follow_up_child_session",
+        description=(
+            "Send durable follow-up instructions to a delegated child. If it is running, "
+            "the follow-up starts at the next safe attempt boundary."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "message": types.Schema(type="STRING", description="Follow-up instruction."),
+                "confirm_side_effects": types.Schema(
+                    type="BOOLEAN",
+                    description="Required when continuing an executor child.",
+                ),
+            },
+            required=["child_id", "message"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="interrupt_child_session",
+        description="Cooperatively interrupt an active delegated child without deleting its state.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "reason": types.Schema(type="STRING", description="Operator-visible reason."),
+            },
+            required=["child_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="resume_child_session",
+        description="Cold-resume a continuable child under the same stable child ID.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "child_id": types.Schema(type="STRING", description="Stable child session ID."),
+                "confirm_side_effects": types.Schema(
+                    type="BOOLEAN",
+                    description="Required when resuming an executor child.",
+                ),
+            },
+            required=["child_id"],
         ),
     ),
     # Browser automation (Playwright)
@@ -1768,7 +1918,8 @@ BRAIN_TOOLS = [
         description=(
             "Open a web page in a real browser (Playwright) and analyze it visually. "
             "Use when you need JS-rendered content, forms, or sites http_get can't handle. "
-            "Returns page description, interactive elements with CSS selectors, forms. ~500 tokens."
+            "Returns verified status plus extracted page_text, page description, interactive elements, and forms. "
+            "Only page_text is factual grounding for summaries; never infer site content from the URL or screenshot description alone."
         ),
         parameters=types.Schema(
             type="OBJECT",
@@ -1843,6 +1994,93 @@ BRAIN_TOOLS = [
                 ),
             },
             required=["tool_names"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_available_skills",
+        description="List progressive capability bundles that can be activated for the current task.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="list_pipeline_candidates",
+        description="List workflow drafts inferred from repeated successful tasks, including dry-run and approval state.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "status": types.Schema(type="STRING", description="draft, dry_run_passed, activated, rejected, or all"),
+        }),
+    ),
+    types.FunctionDeclaration(
+        name="propose_pipeline_candidate",
+        description="Create an approval-gated pipeline draft for an explicitly requested repeatable task. This never activates it.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"task": types.Schema(type="STRING", description="Repeatable task to compile into a draft")},
+            required=["task"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_ptc_tools",
+        description="List the strict read-only tool allowlist for the bounded PTC pilot.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="validate_ptc_program",
+        description=(
+            "Statically validate a bounded JSON PTC program without running it. "
+            "Only prior-step $ref values and the read-only allowlist are accepted."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "program": types.Schema(type="OBJECT", description="PTC JSON program with version and steps"),
+                "limits": types.Schema(type="OBJECT", description="Optional max_calls, time_budget_ms, output_chars"),
+            },
+            required=["program"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="run_ptc_program",
+        description=(
+            "Run a statically validated, sequential, read-only PTC program with hard call, "
+            "time, and output budgets. Every step still passes through ToolPipeline."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "program": types.Schema(type="OBJECT", description="Validated PTC JSON program"),
+                "limits": types.Schema(type="OBJECT", description="Optional bounded execution limits"),
+            },
+            required=["program"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="enable_skill",
+        description="Enable one capability bundle and its relevant tools for this conversation.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"skill_name": types.Schema(type="STRING", description="Skill bundle name")},
+            required=["skill_name"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="list_capability_profiles",
+        description="List validated runtime profiles and their capability bundle overlays.",
+        parameters=types.Schema(type="OBJECT", properties={}),
+    ),
+    types.FunctionDeclaration(
+        name="activate_capability_profile",
+        description=(
+            "Activate a validated capability profile for this turn. Profiles change tool visibility "
+            "but never bypass approvals, provenance, permissions, or policy guards."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "profile_id": types.Schema(
+                    type="STRING",
+                    description="Profile ID such as standard, research, read_only, or operator",
+                ),
+            },
+            required=["profile_id"],
         ),
     ),
     types.FunctionDeclaration(
@@ -2016,7 +2254,7 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="aura_cognitive_ops",
         description=(
-            "Universal gateway to explore and test any of 187 AuraSDK v2.1.0 cognitive methods directly. "
+            "Universal gateway to explore and test AuraSDK cognitive methods directly. "
             "Use this to investigate memory state, test AuraSDK capabilities, and gather insights "
             "that are not exposed through other tools. "
             "List-shaped results are returned in BRIEF MODE by default: top 10 items by activation_count "
@@ -2351,8 +2589,10 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="fs_read",
         description=(
-            "Read any file on the server. No path restrictions - you can read configs, logs, "
-            "source code, data files, etc. Binary files return base64-encoded content. "
+            "Read a file only inside a user-approved Local Workspace with Read permission. "
+            "The built-in project workspace exposes only Documents explicitly shared with the agent "
+            "and Sandbox working files; Remy's internal state is never exposed. "
+            "Use workspace://<id>/path when possible. Binary files return base64-encoded content. "
             "Large files are truncated; use offset/limit for paging."
         ),
         parameters=types.Schema(
@@ -2369,8 +2609,9 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="fs_write",
         description=(
-            "Write or append content to a file. RESTRICTED to safe directories: data/, tmp/, output/. "
-            "Creates parent directories automatically. Cannot overwrite source code or system files."
+            "Write or append content only inside a Local Workspace with Write permission. "
+            "In the built-in project workspace, write only under Documents or Sandbox. "
+            "Creates parent directories automatically and audits the access."
         ),
         parameters=types.Schema(
             type="OBJECT",
@@ -2385,7 +2626,7 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="fs_search",
         description=(
-            "Search the filesystem. Two modes: 'glob' finds files by name pattern (e.g. '**/*.py'), "
+            "Search only inside a Read-approved Local Workspace. Two modes: 'glob' finds files by name pattern (e.g. '**/*.py'), "
             "'grep' searches file contents by regex. Returns matching paths and optional content snippets."
         ),
         parameters=types.Schema(
@@ -2393,7 +2634,7 @@ BRAIN_TOOLS = [
             properties={
                 "mode": types.Schema(type="STRING", description="'glob' (find files by name) or 'grep' (search content by regex)"),
                 "pattern": types.Schema(type="STRING", description="Glob pattern (e.g. '**/*.log') or regex pattern for grep"),
-                "path": types.Schema(type="STRING", description="Directory to search in. Default: project root (BASE_DIR)"),
+                "path": types.Schema(type="STRING", description="Approved workspace directory. Default: workspace://data/"),
                 "max_results": types.Schema(type="INTEGER", description="Max results to return. Default: 50"),
                 "include_content": types.Schema(type="BOOLEAN", description="For grep: include matching lines. Default: true"),
             },
@@ -2403,19 +2644,17 @@ BRAIN_TOOLS = [
     types.FunctionDeclaration(
         name="shell_exec",
         description=(
-            "Execute a shell command on the server. Returns stdout, stderr, and exit code. "
-            "Use for: checking system state, running scripts, git operations, package management, etc. "
-            "Dangerous commands (rm -rf /, format, shutdown, etc.) are blocked. "
-            "Commands run with a timeout (default 30s, max 120s). Working directory is project root."
+            "Execute only in a Local Workspace with Execute permission and human approval. "
+            "Execute is not an OS sandbox; the process has the current user's privileges. Every run is audited."
         ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "command": types.Schema(type="STRING", description="Shell command to execute"),
                 "timeout": types.Schema(type="INTEGER", description="Timeout in seconds (default: 30, max: 120)"),
-                "working_dir": types.Schema(type="STRING", description="Working directory. Default: project root"),
+                "working_dir": types.Schema(type="STRING", description="Required Execute-approved workspace directory"),
             },
-            required=["command"],
+            required=["command", "working_dir"],
         ),
     ),
 ]
@@ -2426,6 +2665,8 @@ BRAIN_TOOLS = [
 CORE_TOOL_NAMES = frozenset({
     # Memory (always needed)
     "recall", "store", "search", "store_knowledge",
+    "recall_memory_as_of", "supersede_memory",
+    "explain_memory_recall", "build_memory_context",
     # Utility
     "web_search", "extract_content", "get_current_datetime",
     # Browser
@@ -2435,7 +2676,12 @@ CORE_TOOL_NAMES = frozenset({
     # Persona
     "read_persona", "update_persona",
     # Meta
-    "list_available_tools", "enable_tools",
+    "list_available_tools", "enable_tools", "list_available_skills", "enable_skill",
+    "list_capability_profiles", "activate_capability_profile",
+    "search_transcript_history", "list_local_workspaces",
+    # Active code workspace inspection (read-only by default)
+    "fs_read", "fs_search", "list_directory",
+    "list_pipeline_candidates", "propose_pipeline_candidate",
     # Working memory
     "scratchpad",
 })
@@ -2817,6 +3063,13 @@ def get_active_research_projects() -> list[dict]:
             "queries_total": len(meta.get("query_plan", [])),
             "queries_done": meta.get("queries_done", 0),
             "findings_count": meta.get("findings_count", 0),
+            "job_state": meta.get("job_state", "queued"),
+            "current_query": meta.get("current_query", ""),
+            "last_error": meta.get("last_error", ""),
+            "worker_heartbeat": meta.get("worker_heartbeat", ""),
+            "pause_requested": bool(meta.get("pause_requested")),
+            "durable_checkpoint": meta.get("durable_checkpoint", {}),
+            "checkpoint_history": meta.get("checkpoint_history", []),
         })
     return projects
 
@@ -2825,6 +3078,10 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
     """Create a research project with an LLM-generated query plan."""
     import re
     from remy.core.agent_tools import Level
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
+
+    owner = get_project_store().require_project(current_project_id())
 
     topic = str(
         args.get("topic")
@@ -2880,7 +3137,10 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
         result = call_llm(plan_prompt, purpose="research_plan")
         raw = result.content
         if isinstance(raw, list):
-            raw = " ".join(str(c) for c in raw)
+            raw = " ".join(
+                str(c.get("text") or "") if isinstance(c, dict) else str(getattr(c, "text", c))
+                for c in raw
+            )
         raw = str(raw).strip()
 
         if raw.startswith("```"):
@@ -2936,25 +3196,61 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
             metadata=_stamp_provenance({
                 "type": "research_project",
                 "project_id": project_id,
+                "owner_project_id": owner.project_id,
+                "brain_id": owner.brain_id,
                 "topic": topic,
                 "depth": depth,
                 "status": "researching",
+                "job_version": 1,
+                "job_state": "queued",
+                "pause_requested": False,
+                "durable_checkpoint": {
+                    "node": "query_queue",
+                    "status": "queued",
+                    "detail": "Research plan committed and waiting for the worker.",
+                    "query_index": 0,
+                    "queries_done": 0,
+                    "findings_count": 0,
+                    "updated_at": datetime.now().isoformat(),
+                },
+                "checkpoint_history": [],
+                "session_id": session_id or f"research:{project_id}",
+                "channel": channel or "desktop",
+                "delivery_target": channel or "web",
+                "context": context,
                 "query_plan": query_plan,
                 "queries_done": 0,
+                "next_query_index": 0,
+                "queries_succeeded": 0,
+                "queries_failed": 0,
+                "query_attempts": {},
+                "receipts": [{"at": datetime.now().isoformat(), "event": "queued"}],
                 "findings_count": 0,
                 "finding_ids": [],
                 "started_at": datetime.now().isoformat(),
             }, channel),
         )
 
+    try:
+        from remy.core.research_supervisor import wake_research_supervisor
+
+        worker_registered = wake_research_supervisor()
+    except Exception:
+        worker_registered = False
+
     return json.dumps({
         "created": True,
         "project_id": project_id,
+        "owner_project_id": owner.project_id,
+        "brain_id": owner.brain_id,
         "record_id": rec.id,
         "topic": topic,
         "depth": depth,
         "query_plan": query_plan,
         "queries_total": len(query_plan),
+        "job_state": "queued",
+        "worker_registered": worker_registered,
+        "delivery_target": channel or "web",
     }, ensure_ascii=False)
 
 
@@ -3137,7 +3433,10 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
         result = call_llm(synth_prompt, purpose="research_synthesis")
         raw = result.content
         if isinstance(raw, list):
-            raw = " ".join(str(c) for c in raw)
+            raw = " ".join(
+                str(c.get("text") or "") if isinstance(c, dict) else str(getattr(c, "text", c))
+                for c in raw
+            )
         report = str(raw).strip()
     except Exception as e:
         logger.warning("Research synthesis failed: %s", e)
@@ -4340,6 +4639,13 @@ def _finalize_tool_result(
 
 
 def execute_tool(name: str, args: dict, session_id: str | None = None, channel: str | None = None) -> str:
+    """Compatibility entrypoint backed by the canonical ToolPipeline."""
+    from remy.core.tool_dispatch import execute_tool as _execute_via_pipeline
+
+    return _execute_via_pipeline(name, args, session_id=session_id, channel=channel)
+
+
+def _execute_tool_legacy(name: str, args: dict, session_id: str | None = None, channel: str | None = None) -> str:
     """Execute a brain tool, sandbox meta-tool, or sandbox tool.
 
     Includes per-tool circuit breaker and retry with backoff for transient failures.
@@ -4465,17 +4771,7 @@ def _execute_unlocked_working_memory_tool(
 
 
 def _execute_tool_locked(name: str, args: dict, session_id: str | None = None, channel: str | None = None) -> str:
-    """Inner execute_tool, called under brain_lock."""
-    # Circuit breaker check
-    if not tool_health.is_available(name):
-        report = tool_health.get_health_report()
-        status = report.get(name, "unavailable")
-        return json.dumps({"error": f"Tool '{name}' temporarily unavailable: {status}"})
-
-    # Trust enforcement - block actions with unverified sensitive data
-    block_msg = _validate_action_data(name, args)
-    if block_msg:
-        return json.dumps({"error": block_msg})
+    """Run a locked handler after canonical ToolPipeline guards pass."""
 
     _start_ts = time.time()
     result = _execute_tool_inner(name, args, session_id, channel)
@@ -4496,11 +4792,14 @@ def _execute_tool_locked(name: str, args: dict, session_id: str | None = None, c
                 _audit_status = "error"
                 _audit_error = result
         from remy.core.audit_trail import get_audit_logger
+        from remy.core.microbrain import current_project_id
         get_audit_logger().log_action(
             tool_name=name, tool_input=args,
             raw_output=result, status=_audit_status,
             execution_time_ms=_elapsed, channel=channel,
             error_message=_audit_error,
+            project_id=current_project_id(),
+            session_id=str(session_id or f"audit:{channel or 'runtime'}"),
         )
 
     # Track health only for network/infra-dependent tools
@@ -4536,8 +4835,11 @@ def _generate_image(args: dict, session_id: str | None, channel: str | None) -> 
     prompt = args["prompt"]
     client = google_genai.Client(api_key=settings.GEMINI_API_KEY)
 
-    image_dir = Path(settings.DATA_DIR) / "generated_images"
-    image_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = project_artifact_dir(
+        "generated_images",
+        legacy_data_dir=settings.DATA_DIR,
+        create=True,
+    )
 
     contents = [
         genai_types.Content(
@@ -4693,7 +4995,13 @@ def _generate_report(args: dict, session_id: str | None, channel: str | None) ->
         title, sections = _parse_markdown_to_sections(args["content"])
     sections = _normalize_report_sections(sections)
 
-    report_dir = str(Path(settings.DATA_DIR) / "reports")
+    report_dir = str(
+        project_artifact_dir(
+            "reports",
+            legacy_data_dir=settings.DATA_DIR,
+            create=True,
+        )
+    )
     report = ReportBuilder(
         title=title,
         subtitle=subtitle,
@@ -4877,7 +5185,13 @@ def _generate_presentation(args: dict, session_id: str | None, channel: str | No
     if not slides and "content" in args:
         title, slides = _parse_markdown_to_slides(args["content"])
 
-    pres_dir = str(Path(settings.DATA_DIR) / "presentations")
+    pres_dir = str(
+        project_artifact_dir(
+            "presentations",
+            legacy_data_dir=settings.DATA_DIR,
+            create=True,
+        )
+    )
     pres = PresentationBuilder(
         title=title,
         subtitle=subtitle,
@@ -4977,6 +5291,88 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
             if invalid:
                 result["unknown"] = invalid
             return json.dumps(result)
+
+        elif name == "list_available_skills":
+            from remy.core.skill_catalog import list_skills
+
+            return json.dumps({"available_skills": list_skills()})
+
+        elif name == "enable_skill":
+            from remy.core.skill_catalog import SKILL_CATALOG, tools_for_skill
+
+            skill_name = str(args.get("skill_name") or "").strip()
+            if skill_name not in SKILL_CATALOG:
+                return json.dumps({"error": "Unknown skill", "skill_name": skill_name})
+            enabled = tools_for_skill(skill_name, set(EXTENDED_TOOL_NAMES) | set(CORE_TOOL_NAMES))
+            return json.dumps(
+                {
+                    "skill": skill_name,
+                    "bundle": f"skill:{skill_name}",
+                    "enabled_bundles": [f"skill:{skill_name}"],
+                    "enabled": enabled,
+                }
+            )
+
+        elif name == "list_capability_profiles":
+            from remy.core.capability_overlays import list_capability_profiles
+
+            return json.dumps({"profiles": list_capability_profiles()}, ensure_ascii=False)
+
+        elif name == "activate_capability_profile":
+            from remy.core.capability_overlays import get_overlay_registry
+
+            profile_id = str(args.get("profile_id") or "").strip().lower()
+            registry_overlay = get_overlay_registry()
+            profile = registry_overlay.get_profile(profile_id)
+            if profile is None:
+                return json.dumps(
+                    {
+                        "error": "Unknown capability profile",
+                        "profile_id": profile_id,
+                        "available_profiles": [
+                            item.id for item in registry_overlay.list_profiles()
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            overlay = registry_overlay.resolve(
+                profile_id=profile.id,
+                channel=channel or "desktop",
+                available_tools={tool.name for tool in BRAIN_TOOLS},
+                core_tools=CORE_TOOL_NAMES,
+            )
+            return json.dumps(
+                {
+                    "activated_profile": profile.id,
+                    "profile": profile.id,
+                    "enabled_bundles": list(overlay.bundle_ids),
+                    "enabled": sorted(overlay.tool_names - CORE_TOOL_NAMES),
+                    "overlay": overlay.to_summary(),
+                },
+                ensure_ascii=False,
+            )
+
+        elif name == "list_pipeline_candidates":
+            from remy.core.pipeline_evolution import list_candidates
+
+            return json.dumps(
+                {"items": list_candidates(status=str(args.get("status") or "draft"), limit=50)},
+                ensure_ascii=False,
+            )
+
+        elif name == "propose_pipeline_candidate":
+            from remy.core.pipeline_evolution import observe_successful_turn
+
+            task = str(args.get("task") or "").strip()
+            if not task:
+                return json.dumps({"error": "task is required"})
+            item = observe_successful_turn(
+                session_id=session_id or "agent-proposal",
+                user_text=task,
+                session_log=[],
+                force_draft=True,
+            )
+            return json.dumps({"candidate": item}, ensure_ascii=False)
 
         # ---- Sandbox meta-tools ----
         elif name == "sandbox_create_tool":
@@ -5151,6 +5547,8 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
 
         elif name == "store":
             tags = [_clean_tag(t) for t in args.get("tags", "").split(",") if t.strip()]
+            from remy.core.temporal_memory import temporal_store_kwargs
+            temporal_kwargs = temporal_store_kwargs(args)
             level_map = {
                 "L1_WORKING": Level.WORKING,
                 "L2_DECISIONS": Level.DECISIONS,
@@ -5224,11 +5622,17 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
                                 if _t not in tags:
                                     tags.append(_t)
                         _rec = brain.store(content=args["content"], level=level, tags=tags,
-                                           metadata=_meta, semantic_type=semantic_type)
+                                           metadata=_meta, semantic_type=semantic_type,
+                                           **temporal_kwargs)
                     _sync_needed, _sync_pin = _should_sync(level)
-                    if _sync_needed and not (set(tags) & _NO_MIRROR_TAGS):
+                    # The legacy semantic KB has no business-time validity model;
+                    # mirroring temporal facts there could re-surface expired versions.
+                    if _sync_needed and not temporal_kwargs and not (set(tags) & _NO_MIRROR_TAGS):
                         _sync_to_knowledge(args["content"], pin=_sync_pin)
                     _result: dict = {"stored": True, "id": _rec.id}
+                    if temporal_kwargs:
+                        _result["valid_from"] = temporal_kwargs.get("valid_from")
+                        _result["valid_until"] = temporal_kwargs.get("valid_until")
                     if _existing:
                         _result["similar_existing"] = _existing
                         _result["note"] = "Similar memory already exists. Stored anyway (may auto-merge)."
@@ -5264,13 +5668,22 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
                         if _t not in tags:
                             tags.append(_t)
                 rec = brain.store(content=args["content"], level=level, tags=tags,
-                                  metadata=store_meta, semantic_type=semantic_type)
+                                  metadata=store_meta, semantic_type=semantic_type,
+                                  **temporal_kwargs)
             # Mirror to knowledge (fire-and-forget) - never mirror quarantined claims.
             sync_needed, sync_pin = _should_sync(level)
-            if sync_needed and not claim_quarantine and not (set(tags) & _NO_MIRROR_TAGS):
+            if (
+                sync_needed
+                and not temporal_kwargs
+                and not claim_quarantine
+                and not (set(tags) & _NO_MIRROR_TAGS)
+            ):
                 _sync_to_knowledge(args["content"], pin=sync_pin)
 
             result = {"stored": True, "id": rec.id}
+            if temporal_kwargs:
+                result["valid_from"] = temporal_kwargs.get("valid_from")
+                result["valid_until"] = temporal_kwargs.get("valid_until")
             if claim_quarantine:
                 result["quarantined"] = True
                 result["claim_class"] = store_meta.get("claim_class", "citation_claim")
@@ -5931,15 +6344,41 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
 
         elif name == "review_history_memory_gaps":
             from remy.core.history_replay import analyze_history_memory_gaps
+            from remy.core.microbrain import current_project_id
+            from remy.core.project_store import LEGACY_PROJECT_ID, project_data_root
 
             sample_limit = int(args.get("sample_limit", 12) or 12)
             sample_limit = max(1, min(sample_limit, 50))
+            project_id = current_project_id()
+            history_root = (
+                settings.DATA_DIR
+                if project_id == LEGACY_PROJECT_ID
+                else project_data_root(project_id)
+            )
             report = analyze_history_memory_gaps(
                 lambda **search_kwargs: brain.search(**search_kwargs),
-                history_dir=settings.DATA_DIR / "history",
+                history_dir=history_root / "history",
                 sample_limit=sample_limit,
             )
             return json.dumps(report, ensure_ascii=False)
+
+        elif name == "search_transcript_history":
+            from remy.core.microbrain import current_project_id
+            from remy.core.project_store import LEGACY_PROJECT_ID
+            from remy.core.transcript_store import get_transcript_store
+
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return json.dumps({"error": "query is required"}, ensure_ascii=False)
+            project_id = current_project_id()
+            items = get_transcript_store().search(
+                query,
+                session_id=str(args.get("session_id") or "").strip(),
+                owner_project_id=project_id,
+                include_legacy_unscoped=project_id == LEGACY_PROJECT_ID,
+                limit=int(args.get("limit", 10) or 10),
+            )
+            return json.dumps({"items": items}, ensure_ascii=False)
 
         elif name == "schedule_task":
             description = str(args.get("description") or args.get("task") or args.get("title") or "").strip()
@@ -6313,13 +6752,13 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
                     from ddgs import DDGS
 
                     # v9 multi-backend metasearch - skips yandex (429s from UA
-                    # IPs) and bing (disabled=True in v9). startpage added as
-                    # privacy-friendly Google proxy. Longer timeout since the
-                    # default 5s lets a single slow backend sink the whole call.
+                    # IPs), bing (disabled), and startpage (removed from ddgs).
+                    # Longer timeout since the default 5s lets a single slow
+                    # backend sink the whole call.
                     raw = DDGS(timeout=15).text(
                         query,
                         max_results=10,
-                        backend="duckduckgo,brave,google,mojeek,startpage,yahoo",
+                        backend="duckduckgo,brave,google,mojeek,yahoo",
                     )
                     grounding_chunks = [
                         {
@@ -6480,106 +6919,21 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
                 "notes": notes,
             })
 
+        elif name == "list_local_workspaces":
+            from remy.core.workspace_permissions import get_workspace_manager
+            return json.dumps({"workspaces": get_workspace_manager().list_grants()}, ensure_ascii=False)
+
         elif name == "read_file":
-            from pathlib import Path
-
-            raw_path = args["path"]
-            data_dir = Path(settings.DATA_DIR).resolve()
-            allowed_paths = [Path(p).resolve() for p in getattr(settings, 'AUTONOMY_ALLOWED_READ_PATHS', [])]
-
-            # Resolve path
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Security: must be inside data_dir or an allowed path
-            allowed = any(target.is_relative_to(ap) for ap in [data_dir] + allowed_paths)
-            if not allowed:
-                return json.dumps({"error": f"Access denied: {raw_path} is outside allowed paths"})
-
-            if not target.exists():
-                return json.dumps({"error": f"File not found: {raw_path}"})
-            if not target.is_file():
-                return json.dumps({"error": f"Not a file: {raw_path}"})
-
-            try:
-                content = target.read_text(encoding="utf-8", errors="replace")[:10000]
-                return json.dumps({
-                    "path": str(target),
-                    "size": target.stat().st_size,
-                    "content": content,
-                })
-            except Exception as e:
-                return json.dumps({"error": f"Read error: {e}"})
+            from remy.core.workspace_permissions import workspace_read
+            return workspace_read(args, tool="read_file")
 
         elif name == "write_file":
-            from pathlib import Path
-
-            raw_path = args["path"]
-            content = args["content"]
-            data_dir = Path(settings.DATA_DIR).resolve()
-
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Auto-redirect bare .md filenames (no directory) to data/documents/
-            # so agent-created docs appear in the Documents UI automatically.
-            if target.suffix == ".md" and target.parent == data_dir:
-                target = (data_dir / "documents" / target.name).resolve()
-
-            # Security: must be inside data_dir only
-            if not target.is_relative_to(data_dir):
-                return json.dumps({"error": f"Write denied: {raw_path} is outside data directory"})
-
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-                return json.dumps({
-                    "written": True,
-                    "path": str(target),
-                    "size": len(content),
-                })
-            except Exception as e:
-                return json.dumps({"error": f"Write error: {e}"})
+            from remy.core.workspace_permissions import workspace_write
+            return workspace_write(args, tool="write_file")
 
         elif name == "list_directory":
-            from pathlib import Path
-
-            raw_path = args.get("path", ".")
-            data_dir = Path(settings.DATA_DIR).resolve()
-            allowed_paths = [Path(p).resolve() for p in getattr(settings, 'AUTONOMY_ALLOWED_READ_PATHS', [])]
-
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Security check
-            allowed = any(target.is_relative_to(ap) for ap in [data_dir] + allowed_paths)
-            if not allowed:
-                return json.dumps({"error": f"Access denied: {raw_path} is outside allowed paths"})
-
-            if not target.exists() or not target.is_dir():
-                return json.dumps({"error": f"Directory not found: {raw_path}"})
-
-            try:
-                entries = []
-                for entry in sorted(target.iterdir()):
-                    entries.append({
-                        "name": entry.name,
-                        "type": "dir" if entry.is_dir() else "file",
-                        "size": entry.stat().st_size if entry.is_file() else None,
-                    })
-                return json.dumps({
-                    "path": str(target),
-                    "entries": entries[:50],  # Cap at 50
-                    "total": len(entries),
-                })
-            except Exception as e:
-                return json.dumps({"error": f"List error: {e}"})
+            from remy.core.workspace_permissions import workspace_list
+            return workspace_list(args, tool="list_directory")
 
         elif name == "start_research":
             return _start_research(args, session_id, channel)
@@ -7439,7 +7793,10 @@ def _is_path_writable(target: Path) -> tuple[bool, str]:
 
 
 def _handle_fs_read(args: dict) -> str:
-    """Read any file on the server. No path restrictions for reading."""
+    """Compatibility alias for capability-scoped workspace reads."""
+    from remy.core.workspace_permissions import workspace_read
+    return workspace_read(args, tool="fs_read")
+
     raw_path = str(args.get("path") or "").strip()
     if not raw_path:
         return json.dumps({"error": "path is required"})
@@ -7498,7 +7855,10 @@ def _handle_fs_read(args: dict) -> str:
 
 
 def _handle_fs_write(args: dict) -> str:
-    """Write to file in allowed directories only."""
+    """Compatibility alias for capability-scoped workspace writes."""
+    from remy.core.workspace_permissions import workspace_write
+    return workspace_write(args, tool="fs_write")
+
     raw_path = str(args.get("path") or "").strip()
     content = str(args.get("content") or "")
     mode = str(args.get("mode") or "write").strip().lower()
@@ -7537,7 +7897,10 @@ def _handle_fs_write(args: dict) -> str:
 
 
 def _handle_fs_search(args: dict) -> str:
-    """Search filesystem by glob pattern or grep content."""
+    """Compatibility alias for capability-scoped workspace search."""
+    from remy.core.workspace_permissions import workspace_search
+    return workspace_search(args, tool="fs_search")
+
     import glob as _glob
 
     mode = str(args.get("mode") or "glob").strip().lower()
@@ -7647,7 +8010,10 @@ def _handle_fs_search(args: dict) -> str:
 
 
 def _handle_shell_exec(args: dict) -> str:
-    """Execute a shell command with safety checks."""
+    """Compatibility alias for approved execution in an Execute workspace."""
+    from remy.core.workspace_permissions import workspace_shell
+    return workspace_shell(args, tool="shell_exec")
+
     import subprocess
 
     command = str(args.get("command") or "").strip()
@@ -7876,7 +8242,8 @@ def _build_system_instruction_locked(channel: str = "voice") -> str:
         "- **Research Mode**: When the user asks for deep investigation "
         "(e.g. '???????', 'research', '??????? ????????', '?????? ??????????', 'investigate', 'deep dive'), "
         "use the **Research Orchestrator** tools:\n"
-        "  1. **start_research**: Creates a project with an auto-generated search plan. Choose depth: 'quick' (2 queries), 'standard' (4), 'deep' (7).\n"
+        "  1. **start_research**: Creates and queues a durable background project. Choose depth: 'quick' (2 queries), 'standard' (4), 'deep' (7).\n"
+        "     Claim that work started or will notify later ONLY if the returned worker_registered=true and job_state is queued/running. Otherwise say only that the plan was saved.\n"
         "  2. **web_search -> extract_content/http_get -> add_research_finding**: Execute each query, fetch the chosen source, then record findings with source URL and confidence.\n"
         "  3. **complete_research**: Synthesize all findings into a final report (LLM-generated).\n"
         "  For quick questions, use web_search for candidate discovery, fetch a source with extract_content/http_get, then use store_research.\n"
@@ -7930,6 +8297,21 @@ def _build_system_instruction_locked(channel: str = "voice") -> str:
         "confirm in 1-2 sentences. Do NOT write essays about why data was lost, do NOT "
         "suggest 5 follow-up actions, do NOT apologize excessively. Just save and confirm. "
         "Example: 'Got it, saved: Maksym Example, 01.01.1990, brother. Thanks for the correction.'\n"
+        "- **No Empty Promises Rule** (CRITICAL): NEVER say you will do something 'now' or "
+        "'in a moment' and then end your turn without doing it. You cannot work in the "
+        "background between turns — the moment you stop writing, your turn is OVER and "
+        "nothing else runs. So:\n"
+        "  - If you CAN do it now (search, save, calculate, call a tool): actually call the "
+        "tool THIS turn, then report the real result. Do not write 'wait a few seconds while "
+        "I search' — just search and answer.\n"
+        "  - If it is a RECURRING or scheduled job (e.g. 'monitor X every day', 'check Y each "
+        "morning'): you cannot loop by yourself. Create an Automation/scheduled task for it "
+        "(or tell the user to set one up in the Automations tab) and say plainly that it will "
+        "run on schedule and report there. Do NOT pretend you will keep watching.\n"
+        "  - Banned phrases unless you are calling a tool in the SAME turn: 'wait a moment', "
+        "'give me a few seconds', 'I'll get back to you', 'let me search and report', "
+        "'зачекай', 'зараз зроблю і повернусь'. Either do it now or schedule it — never promise "
+        "future work you cannot perform.\n"
     )
 
     # Channel-specific response style

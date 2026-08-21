@@ -35,6 +35,7 @@ from remy.core.brain_tools import (
     get_registry,
 )
 from remy.core.agent import invoke_agent
+from remy.core.project_store import project_artifact_dir
 
 logger = logging.getLogger("TelegramBot")
 
@@ -706,7 +707,10 @@ class TelegramBot:
         image_match = re.search(r'/api/generated_images/([\w.]+)', response_text)
         if image_match:
             filename = image_match.group(1)
-            image_path = Path(settings.DATA_DIR) / "generated_images" / filename
+            image_path = project_artifact_dir(
+                "generated_images",
+                legacy_data_dir=settings.DATA_DIR,
+            ) / filename
             if image_path.exists():
                 # Strip the image URL from text for cleaner caption
                 caption = re.sub(r'!\[[^\]]*\]\(/api/generated_images/[\w.]+\)', '', response_text).strip()
@@ -725,7 +729,10 @@ class TelegramBot:
         screenshot_match = re.search(r'/api/browser_screenshots/([\w.]+\.png)', response_text)
         if screenshot_match:
             filename = screenshot_match.group(1)
-            ss_path = Path(settings.DATA_DIR) / "browser_screenshots" / filename
+            ss_path = project_artifact_dir(
+                "browser_screenshots",
+                legacy_data_dir=settings.DATA_DIR,
+            ) / filename
             if ss_path.exists():
                 caption = re.sub(r'!\[[^\]]*\]\(/api/browser_screenshots/[\w.]+\.png\)', '', response_text).strip()
                 try:
@@ -743,7 +750,10 @@ class TelegramBot:
         if report_match:
             from urllib.parse import unquote
             filename = unquote(report_match.group(1))
-            report_path = Path(settings.DATA_DIR) / "reports" / filename
+            report_path = project_artifact_dir(
+                "reports",
+                legacy_data_dir=settings.DATA_DIR,
+            ) / filename
             if report_path.exists():
                 caption = re.sub(r'\[[^\]]*\]\(/api/reports/[^\)]+\.pdf\)', '', response_text).strip()
                 try:
@@ -763,7 +773,10 @@ class TelegramBot:
         if pptx_match:
             from urllib.parse import unquote
             filename = unquote(pptx_match.group(1))
-            pptx_path = Path(settings.DATA_DIR) / "presentations" / filename
+            pptx_path = project_artifact_dir(
+                "presentations",
+                legacy_data_dir=settings.DATA_DIR,
+            ) / filename
             if pptx_path.exists():
                 caption = re.sub(r'\[[^\]]*\]\(/api/presentations/[^\)]+\.pptx\)', '', response_text).strip()
                 try:
@@ -886,6 +899,8 @@ class TelegramBot:
         app.post_init = self.configure_app
 
         from remy.core.agent_tools import brain_lock
+        from remy.core.project_store import brain_display_location
+
         with brain_lock:
             brain_count = brain.count()
         registry = get_registry()
@@ -894,7 +909,7 @@ class TelegramBot:
         print("=" * 50)
         print("REMY — TELEGRAM BOT")
         print(f"Model: {settings.SUMMARY_MODEL}")
-        print(f"Brain: {settings.AURA_BRAIN_PATH} ({brain_count} records)")
+        print(f"Brain: {brain_display_location()} ({brain_count} records)")
         print(f"Tools: {tool_count}")
         print(f"Session timeout: {SESSION_TIMEOUT_SEC}s")
         print("Bot is running. Press Ctrl+C to stop.")

@@ -8,21 +8,39 @@ Two memory systems:
 
 import atexit
 import inspect
+import json
 import logging
 import os
-import sys
-import threading
-import json
 import shutil
 import subprocess
+import sys
+import threading
 import time
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
+from typing import Callable
+
 from aura import Aura
+from aura import (
+    AgentPersona,
+    ArchivalRule,
+    MaintenanceConfig,
+    PersonaTraits,
+    TagTaxonomy,
+    TrustConfig,
+)
 from aura import Level as _AuraLevel
-from aura import AgentPersona, PersonaTraits, TagTaxonomy, TrustConfig, ArchivalRule, MaintenanceConfig
+
 from remy.config.settings import settings
 from remy.core.history_replay import replay_history
+from remy.core.microbrain import MicroBrainRegistry, current_project_id
+from remy.core.project_store import (
+    LEGACY_PROJECT_ID,
+    LOCAL_BRAIN_PROVIDER,
+    SERVER_BRAIN_PROVIDER,
+    ProjectRecord,
+    get_project_store,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +59,8 @@ _brain_quarantine_path = ""
 _brain_backup_path = ""
 _brain_recovery_stats: dict = {}
 _brain_startup_artifact_id = ""
+_microbrain_registry: MicroBrainRegistry | None = None
+_legacy_recovery_checked = False
 
 
 _STRING_METADATA_KEYS = frozenset({
@@ -64,6 +84,12 @@ class _CompatRecord:
         self.activation_count = getattr(rec, "activation_count", 0)
         self.connections = dict(getattr(rec, "connections", {}) or {})
         self.importance = getattr(rec, "importance", None)
+        self.created_at = getattr(rec, "created_at", None)
+        self.valid_from = getattr(rec, "valid_from", None)
+        self.valid_until = getattr(rec, "valid_until", None)
+        self.superseded_at = getattr(rec, "superseded_at", None)
+        self.namespace = getattr(rec, "namespace", None)
+        self.source_type = getattr(rec, "source_type", None)
         self.metadata = metadata
         self._record = rec
 
@@ -87,7 +113,11 @@ class _CompatRecord:
         return key == "metadata" or hasattr(self, key)
 
     def keys(self):
-        return ("id", "content", "tags", "level", "strength", "activation_count", "connections", "importance", "metadata")
+        return (
+            "id", "content", "tags", "level", "strength", "activation_count",
+            "connections", "importance", "created_at", "valid_from", "valid_until",
+            "superseded_at", "namespace", "source_type", "metadata",
+        )
 
     def items(self):
         return [(key, self.get(key)) for key in self.keys()]
@@ -166,7 +196,7 @@ def tier_of(level) -> str:
     return "core"
 
 
-def _apply_factual_recall_filter(items):
+def _apply_factual_recall_filter(items, *, allow_conversation_memory: bool = False):
     """Phase 3 Step 2: apply promotion/conflict/supersession gate to recall output.
 
     Delegates to hybrid_search._is_factual_forbidden so tag/admission-class/
@@ -175,6 +205,10 @@ def _apply_factual_recall_filter(items):
 
     Step 4: each blocked record emits a structured promotion_audit event so
     we can see *why* something didn't reach the LLM, not just that it didn't.
+
+    ``allow_conversation_memory``: pass True on the general conversation-recall
+    surface so session summaries / scratchpad (what we discussed) stay
+    retrievable; keep False on factual/citation/verify paths.
     """
     try:
         from remy.core.hybrid_search import _is_factual_forbidden
@@ -185,7 +219,7 @@ def _apply_factual_recall_filter(items):
     kept = []
     blocked = []
     for item in items:
-        if _is_factual_forbidden(item):
+        if _is_factual_forbidden(item, allow_conversation_memory=allow_conversation_memory):
             blocked.append(item)
         else:
             kept.append(item)
@@ -357,6 +391,7 @@ class _AuraCompat:
         self._has_recall_full = hasattr(self._aura, "recall_full")
         self._has_promotion_candidates = hasattr(self._aura, "promotion_candidates")
         self._has_tier_stats = hasattr(self._aura, "tier_stats")
+        self._has_temporal_memory = hasattr(self._aura, "recall_as_of")
 
     def __getattr__(self, name):
         # Proxy all unknown attributes to the underlying Aura instance
@@ -490,6 +525,12 @@ class _AuraCompat:
             store_kwargs["channel"] = kwargs["channel"]
         if kwargs.get("auto_promote") is not None and self._has_auto_promote:
             store_kwargs["auto_promote"] = kwargs["auto_promote"]
+        if kwargs.get("namespace") is not None:
+            store_kwargs["namespace"] = kwargs["namespace"]
+        if kwargs.get("valid_from") is not None:
+            store_kwargs["valid_from"] = float(kwargs["valid_from"])
+        if kwargs.get("valid_until") is not None:
+            store_kwargs["valid_until"] = float(kwargs["valid_until"])
 
         result = self._aura.store(content, **store_kwargs)
         if isinstance(result, str):
@@ -612,6 +653,53 @@ class _AuraCompat:
         results = self._aura.recall_structured(query, **rs_kwargs)
         return self._normalize_recall_results(results)
 
+    def recall_as_of(
+        self, query, timestamp, top_k=15, min_strength=None,
+        expand_connections=None, namespace=None,
+    ):
+        if not self._has_temporal_memory:
+            raise AttributeError("recall_as_of not available on this Aura core version")
+        kwargs = {"top_k": top_k}
+        if min_strength is not None:
+            kwargs["min_strength"] = float(min_strength)
+        if expand_connections is not None:
+            kwargs["expand_connections"] = bool(expand_connections)
+        if namespace is not None:
+            kwargs["namespace"] = namespace
+        return self._normalize_recall_results(
+            self._aura.recall_as_of(query, float(timestamp), **kwargs)
+        )
+
+    def supersede(
+        self, old_id, new_content, level=None, tags=None,
+        namespace=None, effective_at=None,
+    ):
+        kwargs = {}
+        if level is not None:
+            kwargs["level"] = level
+        if tags is not None:
+            kwargs["tags"] = tags
+        if namespace is not None:
+            kwargs["namespace"] = namespace
+        if effective_at is not None:
+            kwargs["effective_at"] = float(effective_at)
+        result = self._aura.supersede(old_id, new_content, **kwargs)
+        return _StoreResult(result) if isinstance(result, str) else self._deserialize_record(result)
+
+    def build_context_capsule(
+        self, purpose, token_budget=2000, namespace=None, valid_at=None,
+    ):
+        if not hasattr(self._aura, "build_context_capsule"):
+            raise AttributeError("build_context_capsule not available on this Aura core version")
+        return self._normalize_runtime_payload(
+            self._aura.build_context_capsule(
+                purpose,
+                token_budget=int(token_budget),
+                namespace=namespace,
+                valid_at=None if valid_at is None else float(valid_at),
+            )
+        )
+
     def recall_full(self, query, top_k=20, include_failures=True, **kwargs):
         if not self._has_recall_full:
             raise AttributeError("recall_full not available on this Aura core version")
@@ -705,10 +793,20 @@ class _AuraCompat:
             return None
         return self._normalize_runtime_payload(self._aura.explain_record(record_id))
 
-    def explain_recall(self, query, top_k=10):
+    def explain_recall(
+        self, query, top_k=10, min_strength=None,
+        expand_connections=None, namespace=None,
+    ):
         if not hasattr(self._aura, 'explain_recall'):
             return {"query": query, "items": []}
-        return self._normalize_runtime_payload(self._aura.explain_recall(query, top_k))
+        kwargs = {"top_k": top_k}
+        if min_strength is not None:
+            kwargs["min_strength"] = float(min_strength)
+        if expand_connections is not None:
+            kwargs["expand_connections"] = bool(expand_connections)
+        if namespace is not None:
+            kwargs["namespace"] = namespace
+        return self._normalize_runtime_payload(self._aura.explain_recall(query, **kwargs))
 
     def explainability_bundle(self, record_id):
         if not hasattr(self._aura, 'explainability_bundle'):
@@ -1331,8 +1429,37 @@ def _allow_automatic_brain_quarantine() -> bool:
 
 
 def get_brain_startup_status() -> dict:
+    registry = _microbrain_registry
+    project_context_error = ""
+    active_brain_provider = ""
+    try:
+        active_project_id = current_project_id()
+        active_brain_provider = get_project_store().require_project(
+            active_project_id
+        ).brain_provider
+    except Exception as exc:
+        active_project_id = ""
+        project_context_error = str(exc)
     return {
         "initialized": _brain_initialized,
+        "active_project_id": active_project_id,
+        "active_brain_provider": active_brain_provider,
+        "available_brain_providers": (
+            registry.available_providers()
+            if registry
+            else [LOCAL_BRAIN_PROVIDER, SERVER_BRAIN_PROVIDER]
+        ),
+        "project_context_error": project_context_error,
+        "initialized_projects": registry.initialized_projects() if registry else [],
+        "microbrain_host": registry.host_status() if registry else {
+            "capacity": settings.MICROBRAIN_MAX_OPEN,
+            "mounted_count": 0,
+            "mounted_projects": [],
+            "pinned_projects": [],
+            "over_capacity": False,
+            "ownership_known": not bool(project_context_error),
+            "eviction_errors": [],
+        },
         "quarantined_at_startup": _brain_quarantined_at_startup,
         "quarantine_reason": _brain_quarantine_reason,
         "startup_blocked": _brain_startup_blocked,
@@ -1354,8 +1481,14 @@ def brain_runtime_allows_access() -> bool:
 
 
 def brain_is_initialized() -> bool:
-    """Whether the shared Aura brain has been instantiated in this process."""
-    return _brain_initialized and _brain_instance is not None
+    """Whether the active project's MicroBrain has been instantiated."""
+    registry = _microbrain_registry
+    if not _brain_initialized or registry is None:
+        return False
+    try:
+        return registry.is_initialized()
+    except Exception:
+        return False
 
 
 def _is_expected_brain_close_error(exc: Exception) -> bool:
@@ -1506,19 +1639,22 @@ def _load_specialist_base(brain_compat: "_AuraCompat", base_pack_path: str, base
         logger.warning("Specialist base load failed (%s) — continuing without base", e)
 
 
-def _init_brain() -> "_AuraCompat":
-    """Initialize the brain safely across Aura storage-format changes."""
+def _init_brain(project: ProjectRecord | None = None) -> "_AuraCompat":
+    """Initialize one project's MicroBrain across Aura storage-format changes."""
     global _brain_quarantined_at_startup, _brain_quarantine_reason
     global _brain_startup_blocked, _brain_startup_incident
-    brain_path = Path(settings.AURA_BRAIN_PATH)
+    brain_path = Path(project.brain_path if project is not None else settings.AURA_BRAIN_PATH)
     brain_path.mkdir(parents=True, exist_ok=True)
+    is_legacy = project is None or project.project_id == LEGACY_PROJECT_ID
 
     # ── Cognitive snapshot restore (before Aura.open) ──────────────────────────
     # If a specialist base is configured and a sealed snapshot exists,
     # restore .cog files directly — no JSON parsing needed.
-    base_pack_path = settings.REMI_BASE_PACK
-    base_id = settings.REMI_BASE_PACK_ID
-    base_version = settings.REMI_BASE_PACK_VERSION
+    # Specialist packs belong to the existing legacy brain.  A newly-created
+    # project starts with empty memory; capabilities continue to come from code.
+    base_pack_path = settings.REMI_BASE_PACK if is_legacy else None
+    base_id = settings.REMI_BASE_PACK_ID if is_legacy else None
+    base_version = settings.REMI_BASE_PACK_VERSION if is_legacy else None
     _snapshot_restored = False
     if base_pack_path and base_id and base_version:
         _snapshot_restored = _maybe_restore_cognitive_snapshot(brain_path, base_id, base_version)
@@ -1529,20 +1665,24 @@ def _init_brain() -> "_AuraCompat":
         _check_and_backup_on_version_change(brain_path)
         ok, reason = _probe_aura_store_with_retries(brain_path)
         if not ok:
-            _brain_quarantine_reason = reason
-            if _allow_automatic_brain_quarantine():
+            if is_legacy:
+                _brain_quarantine_reason = reason
+            if is_legacy and _allow_automatic_brain_quarantine():
                 _brain_quarantined_at_startup = True
                 brain_path = _quarantine_incompatible_store(brain_path, reason)
             else:
-                _brain_startup_blocked = True
-                _brain_startup_incident = (
+                incident = (
                     f"Aura startup probe failed for existing store at {brain_path}. "
-                    "Automatic quarantine/fresh-store fallback is disabled to avoid silent empty restarts. "
+                    "Automatic quarantine/fresh-store fallback is disabled to avoid "
+                    "silent empty restarts. "
                     f"Reason: {reason or 'unknown startup probe failure'}. "
                     "Set REMY_ALLOW_AURA_AUTO_QUARANTINE=1 only for explicit manual recovery."
                 )
-                logger.error(_brain_startup_incident)
-                raise RuntimeError(_brain_startup_incident)
+                if is_legacy:
+                    _brain_startup_blocked = True
+                    _brain_startup_incident = incident
+                logger.error(incident)
+                raise RuntimeError(incident)
 
     brain_compat = _AuraCompat(str(brain_path))
 
@@ -1630,20 +1770,101 @@ def _maybe_recover_brain_from_history() -> None:
 
 
 # Episodic memory — remembers what happened
-def get_brain():
-    """Return the shared Aura brain, initializing it lazily on first real use."""
-    global _brain_instance, _brain_initialized
-    if _brain_instance is not None:
-        return _brain_instance
-    if _brain_closed:
-        raise RuntimeError("Brain has already been closed for this process.")
+def _open_project_brain(project: ProjectRecord) -> "_AuraCompat":
+    if project.brain_provider != LOCAL_BRAIN_PROVIDER:
+        raise RuntimeError(
+            f"Local Aura opener cannot mount provider {project.brain_provider!r}"
+        )
+    logger.info(
+        "Opening MicroBrain %s for project %s at %s",
+        project.brain_id,
+        project.project_id,
+        project.brain_path,
+    )
+    # Keep the old zero-argument initializer seam usable by local extensions
+    # and tests while the native implementation receives the project record.
+    parameters = inspect.signature(_init_brain).parameters
+    instance = _init_brain(project) if parameters else _init_brain()
+    init_brain_policy(instance)
+    return instance
+
+
+def _open_server_project_brain(project: ProjectRecord):
+    """Mount one project through Aura Memory's official HTTP API."""
+    if project.brain_provider != SERVER_BRAIN_PROVIDER:
+        raise RuntimeError(
+            f"Aura server opener cannot mount provider {project.brain_provider!r}"
+        )
+    from remy.core.aura_server import AuraServerBrain
+
+    logger.info(
+        "Opening server MicroBrain %s for project %s",
+        project.brain_id,
+        project.project_id,
+    )
+    return AuraServerBrain(
+        project.brain_locator,
+        api_key=settings.AURA_SERVER_API_KEY or "",
+        timeout=settings.AURA_SERVER_TIMEOUT_SEC,
+    )
+
+
+def _get_microbrain_registry() -> MicroBrainRegistry:
+    global _microbrain_registry, _legacy_recovery_checked
+    if _microbrain_registry is not None and not _microbrain_registry.closed:
+        return _microbrain_registry
     with _brain_init_lock:
-        if _brain_instance is None:
-            instance = _init_brain()
-            _brain_instance = instance
-            _brain_initialized = True
-            _maybe_recover_brain_from_history()
-    return _brain_instance
+        if _microbrain_registry is None or _microbrain_registry.closed:
+            _microbrain_registry = MicroBrainRegistry(
+                providers={
+                    LOCAL_BRAIN_PROVIDER: _open_project_brain,
+                    SERVER_BRAIN_PROVIDER: _open_server_project_brain,
+                },
+                project_store=get_project_store(),
+                max_open=settings.MICROBRAIN_MAX_OPEN,
+            )
+            _legacy_recovery_checked = False
+    return _microbrain_registry
+
+
+def register_microbrain_provider(
+    name: str,
+    opener: Callable[[ProjectRecord], object],
+    *,
+    replace: bool = False,
+) -> None:
+    """Attach a server/client adapter without importing it into Remy core."""
+    _get_microbrain_registry().register_provider(name, opener, replace=replace)
+
+
+def refresh_microbrain_provider(name: str) -> list[tuple[str, Exception]]:
+    """Unmount one provider so its next use receives current credentials."""
+    registry = _microbrain_registry
+    if registry is None or registry.closed:
+        return []
+    return registry.close_provider(name)
+
+
+def get_brain(project_id: str | None = None):
+    """Return the isolated MicroBrain for the bound or named project."""
+    global _brain_instance, _brain_initialized, _legacy_recovery_checked
+    if _brain_closed:
+        raise RuntimeError("MicroBrain registry has already been closed for this process.")
+
+    resolved_project_id = str(project_id or "").strip() or current_project_id()
+    instance = _get_microbrain_registry().get(resolved_project_id)
+    _brain_instance = instance  # Compatibility for status and shutdown diagnostics.
+    _brain_initialized = True
+
+    if resolved_project_id == LEGACY_PROJECT_ID and not _legacy_recovery_checked:
+        with _brain_init_lock:
+            if not _legacy_recovery_checked:
+                _legacy_recovery_checked = True
+                try:
+                    _maybe_recover_brain_from_history()
+                except Exception:
+                    logger.exception("Legacy MicroBrain history recovery check failed")
+    return instance
 
 
 class _LazyBrainProxy:
@@ -1654,7 +1875,7 @@ class _LazyBrainProxy:
 
     def __repr__(self) -> str:
         if brain_is_initialized():
-            return repr(_brain_instance)
+            return repr(get_brain())
         return "<LazyBrainProxy uninitialized>"
 
 
@@ -1672,28 +1893,71 @@ def _safe_shutdown_log(level: str, message: str, *args) -> None:
 
 
 def close_brain() -> None:
-    """Flush and close the shared Aura brain once per process."""
+    """Flush and close every initialized MicroBrain once per process."""
     global _brain_closed, _brain_shutdown_started, _brain_close_error
     with _brain_close_lock:
         if _brain_closed:
             return
         _brain_shutdown_started = True
-        if _brain_instance is None:
+        registry = _microbrain_registry
+        if registry is None or not registry.initialized_projects():
+            legacy_instance = _brain_instance if _brain_initialized else None
+            if legacy_instance is not None:
+                try:
+                    with brain_lock:
+                        legacy_instance.close()
+                except Exception as exc:  # noqa: BLE001 - shutdown must finish
+                    _brain_close_error = str(exc)
+                    log_level = (
+                        "info" if _is_expected_brain_close_error(exc) else "warning"
+                    )
+                    _safe_shutdown_log(
+                        log_level,
+                        "MicroBrain finished with a late-close condition: %s",
+                        exc,
+                    )
+                _brain_closed = True
+                return
             _brain_closed = True
-            _safe_shutdown_log("info", "Brain close skipped because Aura brain was never initialized")
+            _safe_shutdown_log(
+                "info",
+                "MicroBrain close skipped because Aura was never initialized",
+            )
             return
-        try:
-            with brain_lock:
-                _brain_instance.close()
-            _safe_shutdown_log("info", "Brain closed cleanly")
-        except Exception as exc:
-            _brain_close_error = str(exc)
-            if _is_expected_brain_close_error(exc):
-                _safe_shutdown_log("info", "Brain close finished with expected late-close condition: %s", exc)
-            else:
-                _safe_shutdown_log("warning", "Failed to close Aura brain cleanly: %s", exc)
-        finally:
-            _brain_closed = True
+        orphan_instance = (
+            _brain_instance
+            if _brain_initialized and not registry.owns_instance(_brain_instance)
+            else None
+        )
+        with brain_lock:
+            errors = registry.close_all()
+            if orphan_instance is not None:
+                try:
+                    orphan_instance.close()
+                except Exception as exc:  # noqa: BLE001 - collect close failures
+                    errors.append(("compatibility-instance", exc))
+        if errors:
+            _brain_close_error = "; ".join(
+                f"{project_id}: {exc}" for project_id, exc in errors
+            )
+            for project_id, exc in errors:
+                if _is_expected_brain_close_error(exc):
+                    _safe_shutdown_log(
+                        "info",
+                        "MicroBrain %s finished with expected late-close condition: %s",
+                        project_id,
+                        exc,
+                    )
+                else:
+                    _safe_shutdown_log(
+                        "warning",
+                        "Failed to close MicroBrain %s cleanly: %s",
+                        project_id,
+                        exc,
+                    )
+        else:
+            _safe_shutdown_log("info", "All MicroBrains closed cleanly")
+        _brain_closed = True
 
 
 atexit.register(close_brain)
@@ -1703,12 +1967,13 @@ knowledge = None
 knowledge_lock = threading.Lock()
 
 
-def init_brain_policy() -> None:
+def init_brain_policy(brain_instance=None) -> None:
     """Apply AgentPersona, TagTaxonomy, TrustConfig and ArchivalRules to the brain.
 
     Called once at agent startup. Reads missions.json for role/motivations.
     Safe to call multiple times — overwrites previous config.
     """
+    target_brain = brain_instance or brain
     try:
         # --- Persona ---
         persona = AgentPersona()
@@ -1723,7 +1988,7 @@ def init_brain_policy() -> None:
         traits.conciseness = 0.8
         persona.traits = traits
 
-        brain.set_persona(persona)
+        target_brain.set_persona(persona)
 
         # --- Tag Taxonomy ---
         tax = TagTaxonomy()
@@ -1732,7 +1997,7 @@ def init_brain_policy() -> None:
         tax.volatile_tags = {"todo", "temp", "debug", "draft"}
         tax.sensitive_tags = {"wallet", "api-key", "credentials", "private-key"}
         tax.archive_protected_tags = {"mission", "aurasdk", "survival"}
-        brain.set_taxonomy(tax)
+        target_brain.set_taxonomy(tax)
 
         # --- Trust Config ---
         trust = TrustConfig()
@@ -1745,10 +2010,10 @@ def init_brain_policy() -> None:
         }
         trust.recency_half_life_days = 30.0
         trust.recency_boost_max = 0.2
-        brain.set_trust_config(trust)
+        target_brain.set_trust_config(trust)
 
         # --- Maintenance / Archival Rules ---
-        if hasattr(brain, "configure_maintenance"):
+        if hasattr(target_brain, "configure_maintenance"):
             mc = MaintenanceConfig()
             mc.decay_enabled = True
             mc.consolidation_enabled = True
@@ -1759,7 +2024,7 @@ def init_brain_policy() -> None:
                 ArchivalRule("temp", max_age_days=1, keep_recent=0),
                 ArchivalRule("todo", max_age_days=14, keep_recent=5),
             ]
-            brain.configure_maintenance(mc)
+            target_brain.configure_maintenance(mc)
 
         logger.info("Brain policy initialised (persona=Remy, taxonomy=%d tags, trust=%d sources)",
                     len(tax.identity_tags) + len(tax.stable_tags),

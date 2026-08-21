@@ -15,6 +15,7 @@ from pathlib import Path
 from google.genai import types
 from remy.core.scheduling import normalize_schedule_args
 from remy.core.brain_tools import get_user_profile_record
+from remy.core.project_store import project_artifact_dir
 
 logger = logging.getLogger("BrainTools")
 
@@ -132,6 +133,8 @@ def _store_tool_consequence(
             scope=[
                 "tool-call",
                 "direct-tool-dispatch",
+                "legacy-brain-tools",
+                "canonical-tool-pipeline",
                 f"tool:{name}",
                 f"channel:{channel}" if channel else "channel:",
                 f"session:{session_id}" if session_id else "session:",
@@ -168,7 +171,11 @@ def _finalize_tool_result(
     session_id: str | None,
     channel: str | None,
 ) -> str:
+    from remy.core.cancellation import check_cancelled
+
+    check_cancelled()
     _store_tool_consequence(name, args, result, session_id, channel)
+    check_cancelled()
     return result
 
 
@@ -176,6 +183,307 @@ def _finalize_tool_result(
 
 
 def execute_tool(
+    name: str, args: dict, session_id: str | None = None, channel: str | None = None
+) -> str:
+    """Execute a tool through the canonical ordered ToolPipeline."""
+    from remy.core.cancellation import check_cancelled
+    from remy.core.tool_pipeline import ToolPipeline, spill_large_tool_result
+
+    check_cancelled()
+    pipeline = ToolPipeline(
+        executor=_pipeline_execute,
+        provenance=_pipeline_provenance,
+        pre_policy=_pipeline_pre_policy_receipt,
+        monotonic_guards=_pipeline_monotonic_guards,
+        approval=_pipeline_approval,
+        post_policy=_pipeline_post_policy_receipt,
+        artifact_spill=spill_large_tool_result,
+        durable_observation=_pipeline_durable_observation,
+    )
+    result = pipeline.run(name, args, session_id=session_id, channel=channel)
+    check_cancelled()
+    return result
+
+
+def _pipeline_execute(ctx) -> str:
+    return _execute_tool_backend(
+        ctx.resolved_name,
+        ctx.args,
+        ctx.session_id or None,
+        ctx.channel or None,
+    )
+
+
+def _pipeline_provenance(ctx) -> dict:
+    from remy.core.provenance import _get_provenance
+
+    return _get_provenance(ctx.channel or None)
+
+
+def _pipeline_pre_policy_receipt(ctx) -> dict | None:
+    """Apply consequence memory before any handler or approval side effect."""
+
+    bt = _get_bt()
+    bypass = getattr(bt, "_CONSEQUENCE_GATE_BYPASS_TOOLS", frozenset())
+    if ctx.resolved_name in bypass:
+        ctx.policy["consequence_gate"] = {
+            "mode": "pipeline-enforced",
+            "status": "bypassed",
+        }
+        return None
+    hint = _blocked_tool_policy_hint(
+        ctx.resolved_name,
+        ctx.args,
+        ctx.session_id or None,
+        ctx.channel or None,
+    )
+    if not hint:
+        ctx.policy["consequence_gate"] = {
+            "mode": "pipeline-enforced",
+            "status": "allow",
+        }
+        return None
+    return {
+        "decision": "deny",
+        "reason": "consequence memory denied a previously refuted action",
+        "result": _blocked_tool_response(ctx.resolved_name, hint),
+        "policy": {
+            "consequence_gate": {
+                "mode": "pipeline-enforced",
+                "status": "deny",
+                "hint": str(hint.get("hint") or "avoid"),
+                "should_block": bool(hint.get("should_block", True)),
+            }
+        },
+    }
+
+
+def _pipeline_monotonic_guards(ctx) -> list[dict]:
+    """Evaluate circuit, provenance and workspace security as hard guards."""
+
+    bt = _get_bt()
+    name = ctx.resolved_name
+    guards: list[dict] = []
+
+    if not bt.tool_health.is_available(name):
+        report = bt.tool_health.get_health_report()
+        status = report.get(name, "unavailable")
+        return [
+            {
+                "decision": "deny",
+                "reason": "tool circuit breaker is open",
+                "result": json.dumps(
+                    {"error": f"Tool '{name}' temporarily unavailable: {status}"},
+                    ensure_ascii=False,
+                ),
+                "policy": {
+                    "circuit_breaker": {
+                        "mode": "pipeline-enforced",
+                        "status": "deny",
+                        "health": str(status),
+                    }
+                },
+            }
+        ]
+    guards.append(
+        {
+            "decision": "allow",
+            "policy": {
+                "circuit_breaker": {
+                    "mode": "pipeline-enforced",
+                    "status": "allow",
+                }
+            },
+        }
+    )
+
+    from remy.core.provenance import _TRUST_ENFORCED_TOOLS, _validate_action_data
+
+    if name in _TRUST_ENFORCED_TOOLS:
+        with bt.brain_lock:
+            block_msg = _validate_action_data(name, ctx.args)
+        if block_msg:
+            guards.append(
+                {
+                    "decision": "deny",
+                    "reason": "provenance guard denied unverified sensitive action data",
+                    "result": json.dumps({"error": block_msg}, ensure_ascii=False),
+                    "policy": {
+                        "provenance_guard": {
+                            "mode": "pipeline-enforced",
+                            "status": "deny",
+                            "sensitive_action": True,
+                        }
+                    },
+                }
+            )
+            return guards
+        else:
+            guards.append(
+                {
+                    "decision": "allow",
+                    "policy": {
+                        "provenance_guard": {
+                            "mode": "pipeline-enforced",
+                            "status": "allow",
+                            "sensitive_action": True,
+                        }
+                    },
+                }
+            )
+    else:
+        ctx.policy["provenance_guard"] = {
+            "mode": "pipeline-enforced",
+            "status": "not-applicable",
+        }
+
+    from remy.core.workspace_permissions import preflight_workspace_access
+
+    workspace = preflight_workspace_access(name, ctx.args)
+    if workspace.get("applies"):
+        safe_workspace = {
+            key: workspace[key]
+            for key in (
+                "allowed",
+                "permission",
+                "workspace_id",
+                "error_type",
+                "defense_in_depth",
+            )
+            if key in workspace
+        }
+        if not workspace.get("allowed"):
+            guards.append(
+                {
+                    "decision": "deny",
+                    "reason": "workspace capability guard denied access",
+                    "result": json.dumps(
+                        {"error": str(workspace.get("reason") or "Workspace access denied")},
+                        ensure_ascii=False,
+                    ),
+                    "policy": {"workspace_guard": safe_workspace},
+                }
+            )
+        else:
+            guards.append(
+                {
+                    "decision": "allow",
+                    "policy": {"workspace_guard": safe_workspace},
+                }
+            )
+    else:
+        ctx.policy["workspace_guard"] = {
+            "status": "not-applicable",
+        }
+    return guards
+
+
+def _pipeline_approval(ctx) -> dict:
+    """Record approval requirements without duplicating handler-owned prompts."""
+    try:
+        from remy.core.approval_queue import approval_queue, needs_approval
+
+        required = bool(
+            needs_approval(
+                ctx.resolved_name,
+                ctx.args,
+                url=str(ctx.args.get("url") or "") or None,
+                channel=ctx.channel or None,
+            )
+        )
+        if ctx.resolved_name == "shell_exec" and approval_queue.enabled:
+            required = True
+    except Exception as exc:
+        logger.debug("Approval classification skipped for %s: %s", ctx.resolved_name, exc)
+        required = False
+    return {
+        "required": required,
+        "mode": "handler-managed" if required else "not-required",
+    }
+
+
+def _pipeline_post_policy_receipt(ctx) -> None:
+    consequence = ctx.policy.get("consequence_gate") or {}
+    if consequence.get("status") == "deny":
+        ctx.policy["consequence_capture"] = {
+            "mode": "pipeline-enforced",
+            "status": "skipped-self-denial",
+        }
+        return
+    if ctx.approval_required:
+        try:
+            parsed = json.loads(ctx.result)
+        except (TypeError, ValueError):
+            parsed = None
+        approval_error = str(parsed.get("error") or "") if isinstance(parsed, dict) else ""
+        approval_denied = any(
+            marker in approval_error.lower()
+            for marker in ("rejected by user", "timed out", "approval denied")
+        )
+        if approval_denied:
+            from remy.core.tool_pipeline import ToolDecision
+
+            ctx.tighten(ToolDecision.DENY, "handler approval denied")
+    _store_tool_consequence(
+        ctx.resolved_name,
+        ctx.args,
+        ctx.result,
+        ctx.session_id or None,
+        ctx.channel or None,
+    )
+    ctx.policy["consequence_capture"] = {
+        "mode": "pipeline-enforced",
+        "status": "recorded",
+    }
+
+
+def _pipeline_durable_observation(ctx) -> None:
+    """Append a privacy-safe stage receipt to the active session event stream."""
+    try:
+        import hashlib
+
+        canonical_args = json.dumps(ctx.args, ensure_ascii=False, sort_keys=True, default=str)
+        from remy.core.trajectory_store import get_trajectory_store
+
+        get_trajectory_store().record_diagnostics(
+            session_id=ctx.session_id,
+            entries=[
+                {
+                    "type": "epistemic_governance",
+                    "subtype": "tool_pipeline",
+                    "invocation_id": ctx.invocation_id,
+                    "tool": ctx.resolved_name,
+                    "decision": ctx.decision.name.lower(),
+                    "decision_reason": ctx.decision_reason,
+                    "policy": ctx.policy,
+                    "approval_required": ctx.approval_required,
+                    "approval_mode": ctx.approval_mode,
+                    "provenance": ctx.provenance,
+                    "argument_keys": sorted(str(key) for key in ctx.args),
+                    "argument_sha256": hashlib.sha256(
+                        canonical_args.encode("utf-8")
+                    ).hexdigest(),
+                    "result_chars": len(ctx.result),
+                    "artifacts": ctx.artifacts,
+                    "stages": [
+                        *ctx.stage_trace,
+                        {
+                            "stage": "durable_observation",
+                            "status": "completed",
+                            "duration_ms": 0,
+                            "decision": ctx.decision.name.lower(),
+                        },
+                    ],
+                    "duration_ms": max(0, int((time.time() - ctx.started_at) * 1000)),
+                    "error": ctx.error,
+                }
+            ],
+        )
+    except Exception as exc:
+        logger.debug("Tool pipeline observation skipped for %s: %s", ctx.resolved_name, exc)
+
+
+def _execute_tool_backend(
     name: str, args: dict, session_id: str | None = None, channel: str | None = None
 ) -> str:
     """Execute a brain tool, sandbox meta-tool, or sandbox tool.
@@ -189,89 +497,71 @@ def execute_tool(
         session_id: Session ID for co-activation tracking (per-channel).
         channel: Channel context for provenance tracking (autonomous/desktop/telegram/voice).
     """
-    from remy.core.provenance import _TRUST_ENFORCED_TOOLS, _validate_action_data
+    from remy.core.cancellation import check_cancelled
+
+    check_cancelled()
 
     # Access handlers and _execute_tool_locked via brain_tools module
     # so tests can patch remy.core.brain_tools._handle_delegate_task etc.
     bt = _get_bt()
 
-    policy_block = _blocked_tool_policy_hint(name, args, session_id, channel)
-    if policy_block:
-        return _blocked_tool_response(name, policy_block)
-
     # delegate_task runs OUTSIDE brain_lock — workers acquire it per-tool-call.
     # Running inside brain_lock would deadlock (orchestrator holds lock → workers need lock).
     if name == "delegate_task":
-        return _finalize_tool_result(
-            name,
-            args,
-            bt._handle_delegate_task(args, session_id, channel),
-            session_id,
-            channel,
-        )
+        return bt._handle_delegate_task(args, session_id, channel)
+
+    if name in {
+        "list_child_sessions",
+        "get_child_report",
+        "follow_up_child_session",
+        "interrupt_child_session",
+        "resume_child_session",
+    }:
+        from remy.core.tool_handlers.delegate import _handle_child_session_tool
+
+        return _handle_child_session_tool(name, args, session_id, channel)
+
+    # PTC orchestration must stay outside brain_lock because every accepted
+    # read-only step re-enters this canonical ToolPipeline independently.
+    if name in {"list_ptc_tools", "validate_ptc_program", "run_ptc_program"}:
+        from remy.core.ptc_pilot import handle_ptc_tool
+
+        return handle_ptc_tool(name, args, session_id=session_id, channel=channel)
 
     # Browser tools run OUTSIDE brain_lock — async I/O + vision API calls.
-    # But trust validation needs brain_lock for brain.search().
+    # Provenance validation has already run in the monotonic guard stage.
     if name in ("browse_page", "browser_act", "browser_close"):
-        if name in _TRUST_ENFORCED_TOOLS:
-            with bt.brain_lock:
-                block_msg = _validate_action_data(name, args)
-            if block_msg:
-                return _finalize_tool_result(
-                    name,
-                    args,
-                    json.dumps({"error": block_msg}),
-                    session_id,
-                    channel,
-                )
-        return _finalize_tool_result(
-            name,
-            args,
-            bt._handle_browser_tool(name, args, session_id, channel),
-            session_id,
-            channel,
-        )
+        return bt._handle_browser_tool(name, args, session_id, channel)
 
     if name in ("scratchpad", "filter_working"):
         if hasattr(bt, "_execute_unlocked_working_memory_tool"):
-            return _finalize_tool_result(
-                name,
-                args,
-                bt._execute_unlocked_working_memory_tool(name, args, session_id, channel),
-                session_id,
-                channel,
-            )
-        return _finalize_tool_result(
-            name,
-            args,
-            _execute_tool_inner(name, args, session_id, channel),
-            session_id,
-            channel,
-        )
+            return bt._execute_unlocked_working_memory_tool(name, args, session_id, channel)
+        return _execute_tool_inner(name, args, session_id, channel)
+
+    # Pure filesystem/subprocess handlers manage their own safety boundaries;
+    # keeping them outside the AuraMemory lock preserves the legacy behavior.
+    unlocked_handlers = {
+        "fs_read": "_handle_fs_read",
+        "fs_write": "_handle_fs_write",
+        "fs_search": "_handle_fs_search",
+        "shell_exec": "_handle_shell_exec",
+    }
+    handler_name = unlocked_handlers.get(name)
+    if handler_name and hasattr(bt, handler_name):
+        return getattr(bt, handler_name)(args)
 
     with bt.brain_lock:
         result = bt._execute_tool_locked(name, args, session_id, channel)
-    return _finalize_tool_result(name, args, result, session_id, channel)
+    check_cancelled()
+    return result
 
 
 def _execute_tool_locked(
     name: str, args: dict, session_id: str | None = None, channel: str | None = None
 ) -> str:
-    """Inner execute_tool, called under brain_lock."""
-    from remy.core.provenance import _validate_action_data
+    """Run a locked handler after canonical ToolPipeline guards pass."""
     from remy.core.tool_health import tool_health
     from remy.core.tool_utils import _NETWORK_TOOLS
-
-    # Circuit breaker check
-    if not tool_health.is_available(name):
-        report = tool_health.get_health_report()
-        status = report.get(name, "unavailable")
-        return json.dumps({"error": f"Tool '{name}' temporarily unavailable: {status}"})
-
-    # Trust enforcement — block actions with unverified sensitive data
-    block_msg = _validate_action_data(name, args)
-    if block_msg:
-        return json.dumps({"error": block_msg})
 
     _start_ts = time.time()
     result = _execute_tool_inner(name, args, session_id, channel)
@@ -293,6 +583,7 @@ def _execute_tool_locked(
                 _audit_status = "error"
                 _audit_error = result
         from remy.core.audit_trail import get_audit_logger
+        from remy.core.microbrain import current_project_id
 
         get_audit_logger().log_action(
             tool_name=name,
@@ -302,6 +593,8 @@ def _execute_tool_locked(
             execution_time_ms=_elapsed,
             channel=channel,
             error_message=_audit_error,
+            project_id=current_project_id(),
+            session_id=str(session_id or f"audit:{channel or 'runtime'}"),
         )
 
     # Track health only for network/infra-dependent tools
@@ -346,8 +639,11 @@ def _generate_image(args: dict, session_id: str | None, channel: str | None) -> 
     prompt = args["prompt"]
     client = get_genai_client()
 
-    image_dir = Path(settings.DATA_DIR) / "generated_images"
-    image_dir.mkdir(parents=True, exist_ok=True)
+    image_dir = project_artifact_dir(
+        "generated_images",
+        legacy_data_dir=settings.DATA_DIR,
+        create=True,
+    )
 
     contents = [
         genai_types.Content(
@@ -454,7 +750,13 @@ def _generate_report(args: dict, session_id: str | None, channel: str | None) ->
     from remy.core.brain_tools import _normalize_report_sections
     sections = _normalize_report_sections(sections)
 
-    report_dir = str(Path(settings.DATA_DIR) / "reports")
+    report_dir = str(
+        project_artifact_dir(
+            "reports",
+            legacy_data_dir=settings.DATA_DIR,
+            create=True,
+        )
+    )
     report = ReportBuilder(
         title=title,
         subtitle=subtitle,
@@ -600,7 +902,13 @@ def _generate_presentation(args: dict, session_id: str | None, channel: str | No
         from remy.core.brain_tools import _parse_markdown_to_slides
         title, slides = _parse_markdown_to_slides(args["content"])
 
-    pres_dir = str(Path(settings.DATA_DIR) / "presentations")
+    pres_dir = str(
+        project_artifact_dir(
+            "presentations",
+            legacy_data_dir=settings.DATA_DIR,
+            create=True,
+        )
+    )
     pres = PresentationBuilder(
         title=title,
         subtitle=subtitle,
@@ -778,6 +1086,88 @@ def _execute_tool_inner(
                 result["unknown"] = invalid
             return json.dumps(result)
 
+        elif name == "list_available_skills":
+            from remy.core.skill_catalog import list_skills
+
+            return json.dumps({"available_skills": list_skills()})
+
+        elif name == "enable_skill":
+            from remy.core.skill_catalog import SKILL_CATALOG, tools_for_skill
+
+            skill_name = str(args.get("skill_name") or "").strip()
+            if skill_name not in SKILL_CATALOG:
+                return json.dumps({"error": "Unknown skill", "skill_name": skill_name})
+            enabled = tools_for_skill(skill_name, set(EXTENDED_TOOL_NAMES) | set(CORE_TOOL_NAMES))
+            return json.dumps(
+                {
+                    "skill": skill_name,
+                    "bundle": f"skill:{skill_name}",
+                    "enabled_bundles": [f"skill:{skill_name}"],
+                    "enabled": enabled,
+                }
+            )
+
+        elif name == "list_capability_profiles":
+            from remy.core.capability_overlays import list_capability_profiles
+
+            return json.dumps({"profiles": list_capability_profiles()}, ensure_ascii=False)
+
+        elif name == "activate_capability_profile":
+            from remy.core.capability_overlays import get_overlay_registry
+
+            profile_id = str(args.get("profile_id") or "").strip().lower()
+            registry_overlay = get_overlay_registry()
+            profile = registry_overlay.get_profile(profile_id)
+            if profile is None:
+                return json.dumps(
+                    {
+                        "error": "Unknown capability profile",
+                        "profile_id": profile_id,
+                        "available_profiles": [
+                            item.id for item in registry_overlay.list_profiles()
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            overlay = registry_overlay.resolve(
+                profile_id=profile.id,
+                channel=channel or "desktop",
+                available_tools={tool.name for tool in BRAIN_TOOLS},
+                core_tools=CORE_TOOL_NAMES,
+            )
+            return json.dumps(
+                {
+                    "activated_profile": profile.id,
+                    "profile": profile.id,
+                    "enabled_bundles": list(overlay.bundle_ids),
+                    "enabled": sorted(overlay.tool_names - CORE_TOOL_NAMES),
+                    "overlay": overlay.to_summary(),
+                },
+                ensure_ascii=False,
+            )
+
+        elif name == "list_pipeline_candidates":
+            from remy.core.pipeline_evolution import list_candidates
+
+            return json.dumps(
+                {"items": list_candidates(status=str(args.get("status") or "draft"), limit=50)},
+                ensure_ascii=False,
+            )
+
+        elif name == "propose_pipeline_candidate":
+            from remy.core.pipeline_evolution import observe_successful_turn
+
+            task = str(args.get("task") or "").strip()
+            if not task:
+                return json.dumps({"error": "task is required"})
+            item = observe_successful_turn(
+                session_id=session_id or "agent-proposal",
+                user_text=task,
+                session_log=[],
+                force_draft=True,
+            )
+            return json.dumps({"candidate": item}, ensure_ascii=False)
+
         # ---- Sandbox meta-tools ----
         elif name == "sandbox_create_tool":
             return _sandbox_create_tool(args)
@@ -932,7 +1322,12 @@ def _execute_tool_inner(
             # their unfiltered view.
             try:
                 from remy.core.agent_tools import _apply_factual_recall_filter
-                brain_results = _apply_factual_recall_filter(brain_results)
+                # The general `recall` tool is conversation memory, not a
+                # citation surface — keep session summaries retrievable so the
+                # agent remembers prior turns instead of re-asking.
+                brain_results = _apply_factual_recall_filter(
+                    brain_results, allow_conversation_memory=True
+                )
             except Exception:
                 pass
 
@@ -1046,6 +1441,8 @@ def _execute_tool_inner(
 
         elif name == "store":
             tags = [_clean_tag(t) for t in args.get("tags", "").split(",") if t.strip()]
+            from remy.core.temporal_memory import temporal_store_kwargs
+            temporal_kwargs = temporal_store_kwargs(args)
             level_map = {
                 "L1_WORKING": Level.WORKING,
                 "L2_DECISIONS": Level.DECISIONS,
@@ -1085,9 +1482,13 @@ def _execute_tool_inner(
                             metadata=_meta,
                             channel=channel,
                             semantic_type=semantic_type,
+                            **temporal_kwargs,
                         )
                     clear_recall_cache(args["content"])
                     _result: dict = {"stored": True, "id": _rec.id}
+                    if temporal_kwargs:
+                        _result["valid_from"] = temporal_kwargs.get("valid_from")
+                        _result["valid_until"] = temporal_kwargs.get("valid_until")
                     if _existing:
                         _result["similar_existing"] = _existing
                         _result["note"] = (
@@ -1124,10 +1525,14 @@ def _execute_tool_inner(
                     metadata=store_meta,
                     channel=channel,
                     semantic_type=semantic_type,
+                    **temporal_kwargs,
                 )
             clear_recall_cache(args["content"])
 
             result = {"stored": True, "id": rec.id}
+            if temporal_kwargs:
+                result["valid_from"] = temporal_kwargs.get("valid_from")
+                result["valid_until"] = temporal_kwargs.get("valid_until")
             if store_meta.get("actionable") is False:
                 result["actionable"] = False
                 result["warning"] = (
@@ -1913,16 +2318,42 @@ def _execute_tool_inner(
         elif name == "review_history_memory_gaps":
             from remy.config.settings import settings
             from remy.core.history_replay import analyze_history_memory_gaps
+            from remy.core.microbrain import current_project_id
+            from remy.core.project_store import LEGACY_PROJECT_ID, project_data_root
 
             sample_limit = int(args.get("sample_limit", 12) or 12)
             sample_limit = max(1, min(sample_limit, 50))
+            project_id = current_project_id()
+            history_root = (
+                settings.DATA_DIR
+                if project_id == LEGACY_PROJECT_ID
+                else project_data_root(project_id)
+            )
             with brain_lock:
                 report = analyze_history_memory_gaps(
                     lambda **search_kwargs: brain.search(**search_kwargs),
-                    history_dir=settings.DATA_DIR / "history",
+                    history_dir=history_root / "history",
                     sample_limit=sample_limit,
                 )
             return json.dumps(report, ensure_ascii=False)
+
+        elif name == "search_transcript_history":
+            from remy.core.microbrain import current_project_id
+            from remy.core.project_store import LEGACY_PROJECT_ID
+            from remy.core.transcript_store import get_transcript_store
+
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return json.dumps({"error": "query is required"}, ensure_ascii=False)
+            project_id = current_project_id()
+            items = get_transcript_store().search(
+                query,
+                session_id=str(args.get("session_id") or "").strip(),
+                owner_project_id=project_id,
+                include_legacy_unscoped=project_id == LEGACY_PROJECT_ID,
+                limit=int(args.get("limit", 10) or 10),
+            )
+            return json.dumps({"items": items}, ensure_ascii=False)
 
         elif name == "schedule_task":
             # Guard: autonomous/proactive/worker channels cannot create tasks
@@ -2145,14 +2576,14 @@ def _execute_tool_inner(
                 try:
                     from ddgs import DDGS
 
-                    # v9 multi-backend metasearch — skips yandex (429s from UA
-                    # IPs) and bing (disabled=True in v9). startpage added as
-                    # privacy-friendly Google proxy. Longer timeout since the
-                    # default 5s lets a single slow backend sink the whole call.
+                    # v9 multi-backend metasearch - skips yandex (429s from UA
+                    # IPs), bing (disabled), and startpage (removed from ddgs).
+                    # Longer timeout since the default 5s lets a single slow
+                    # backend sink the whole call.
                     raw = DDGS(timeout=15).text(
                         query,
                         max_results=10,
-                        backend="duckduckgo,brave,google,mojeek,startpage,yahoo",
+                        backend="duckduckgo,brave,google,mojeek,yahoo",
                     )
                     grounding_chunks = [
                         {
@@ -2295,107 +2726,21 @@ def _execute_tool_inner(
                 }
             )
 
+        elif name == "list_local_workspaces":
+            from remy.core.workspace_permissions import get_workspace_manager
+            return json.dumps({"workspaces": get_workspace_manager().list_grants()}, ensure_ascii=False)
+
         elif name == "read_file":
-            raw_path = args["path"]
-            data_dir = Path(settings.DATA_DIR).resolve()
-            allowed_paths = [
-                Path(p).resolve() for p in getattr(settings, "AUTONOMY_ALLOWED_READ_PATHS", [])
-            ]
-
-            # Resolve path
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Security: must be inside data_dir or an allowed path
-            allowed = any(target.is_relative_to(ap) for ap in [data_dir] + allowed_paths)
-            if not allowed:
-                return json.dumps({"error": f"Access denied: {raw_path} is outside allowed paths"})
-
-            if not target.exists():
-                return json.dumps({"error": f"File not found: {raw_path}"})
-            if not target.is_file():
-                return json.dumps({"error": f"Not a file: {raw_path}"})
-
-            try:
-                content = target.read_text(encoding="utf-8", errors="replace")[:10000]
-                return json.dumps(
-                    {
-                        "path": str(target),
-                        "size": target.stat().st_size,
-                        "content": content,
-                    }
-                )
-            except Exception as e:
-                return json.dumps({"error": f"Read error: {e}"})
+            from remy.core.workspace_permissions import workspace_read
+            return workspace_read(args, tool="read_file")
 
         elif name == "write_file":
-            raw_path = args["path"]
-            content = args["content"]
-            data_dir = Path(settings.DATA_DIR).resolve()
-
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Security: must be inside data_dir only
-            if not target.is_relative_to(data_dir):
-                return json.dumps({"error": f"Write denied: {raw_path} is outside data directory"})
-
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-                return json.dumps(
-                    {
-                        "written": True,
-                        "path": str(target),
-                        "size": len(content),
-                    }
-                )
-            except Exception as e:
-                return json.dumps({"error": f"Write error: {e}"})
+            from remy.core.workspace_permissions import workspace_write
+            return workspace_write(args, tool="write_file")
 
         elif name == "list_directory":
-            raw_path = args.get("path", ".")
-            data_dir = Path(settings.DATA_DIR).resolve()
-            allowed_paths = [
-                Path(p).resolve() for p in getattr(settings, "AUTONOMY_ALLOWED_READ_PATHS", [])
-            ]
-
-            target = Path(raw_path)
-            if not target.is_absolute():
-                target = data_dir / raw_path
-            target = target.resolve()
-
-            # Security check
-            allowed = any(target.is_relative_to(ap) for ap in [data_dir] + allowed_paths)
-            if not allowed:
-                return json.dumps({"error": f"Access denied: {raw_path} is outside allowed paths"})
-
-            if not target.exists() or not target.is_dir():
-                return json.dumps({"error": f"Directory not found: {raw_path}"})
-
-            try:
-                entries = []
-                for entry in sorted(target.iterdir()):
-                    entries.append(
-                        {
-                            "name": entry.name,
-                            "type": "dir" if entry.is_dir() else "file",
-                            "size": entry.stat().st_size if entry.is_file() else None,
-                        }
-                    )
-                return json.dumps(
-                    {
-                        "path": str(target),
-                        "entries": entries[:50],  # Cap at 50
-                        "total": len(entries),
-                    }
-                )
-            except Exception as e:
-                return json.dumps({"error": f"List error: {e}"})
+            from remy.core.workspace_permissions import workspace_list
+            return workspace_list(args, tool="list_directory")
 
         elif name == "start_research":
             return _start_research(args, session_id, channel)
@@ -2542,10 +2887,14 @@ def _execute_tool_inner(
 
             try:
                 downloaded = trafilatura.fetch_url(url)
+                fetch_method = "trafilatura"
                 if not downloaded:
-                    return json.dumps(
-                        {"error": "Failed to fetch URL (no response or blocked)", "url": url}
-                    )
+                    # Some CDNs reject Trafilatura's default downloader while
+                    # serving ordinary browser-like requests normally.
+                    from remy.core.web_content import fetch_html
+
+                    downloaded = fetch_html(url)
+                    fetch_method = "http_fallback"
 
                 text = trafilatura.extract(
                     downloaded,
@@ -2553,6 +2902,19 @@ def _execute_tool_inner(
                     include_tables=include_tables,
                     favor_recall=True,
                 )
+
+                # SSR/Next.js landing pages often contain valid visible text
+                # that article-oriented extraction reduces to one small card.
+                # Prefer the server-rendered visible text when it is materially
+                # more complete; it is still direct page evidence.
+                from remy.core.web_content import extract_visible_text
+
+                visible_text, fallback_title = extract_visible_text(downloaded)
+                if visible_text and len(visible_text) > max(800, len(text or "") * 2):
+                    text = visible_text
+                    extraction_method = f"{fetch_method}+visible_html"
+                else:
+                    extraction_method = f"{fetch_method}+trafilatura"
 
                 if not text:
                     return json.dumps(
@@ -2563,7 +2925,11 @@ def _execute_tool_inner(
                     )
 
                 metadata = trafilatura.extract_metadata(downloaded)
-                result = {"url": url, "content": text[:16000]}
+                result = {
+                    "url": url,
+                    "content": text[:16000],
+                    "extraction_method": extraction_method,
+                }
                 if metadata:
                     if metadata.title:
                         result["title"] = metadata.title
@@ -2573,6 +2939,8 @@ def _execute_tool_inner(
                         result["date"] = metadata.date
                     if metadata.sitename:
                         result["site"] = metadata.sitename
+                if not result.get("title") and fallback_title:
+                    result["title"] = fallback_title
 
                 if len(text) > 16000:
                     result["truncated"] = True
@@ -3075,6 +3443,14 @@ def _execute_tool_inner(
         elif name == "get_thermal_map":
             return _get_thermal_map(args)
 
+        elif name in {
+            "recall_memory_as_of",
+            "supersede_memory",
+            "explain_memory_recall",
+            "build_memory_context",
+        }:
+            return _temporal_memory_tool(name, args, channel=channel)
+
         elif name == "aura_cognitive_ops":
             result = _aura_cognitive_ops(args)
             try:
@@ -3263,10 +3639,10 @@ def _get_belief_health(args: dict) -> str:
 def _get_thermal_map(args: dict) -> str:
     """Get cognitive heat map — hot zones, cold mass, routing advice."""
     import json
-    from remy.config.settings import settings
+    from remy.core.project_store import local_brain_path
     from remy.core.thermal_advisor import compute_thermal_map, format_thermal_report_json
 
-    report = compute_thermal_map(str(settings.AURA_BRAIN_PATH))
+    report = compute_thermal_map(str(local_brain_path()))
     if not report:
         return json.dumps({"error": "No belief graph available"})
     return json.dumps(format_thermal_report_json(report))
@@ -3275,10 +3651,10 @@ def _get_thermal_map(args: dict) -> str:
 def _get_plasticity_audit(args: dict) -> str:
     """Audit synaptic plasticity — edge health, pruning history, leak ratio."""
     import json
-    from remy.config.settings import settings
+    from remy.core.project_store import local_brain_path
     from remy.core.synaptic_plasticity import get_plasticity_audit
 
-    audit = get_plasticity_audit(str(settings.AURA_BRAIN_PATH))
+    audit = get_plasticity_audit(str(local_brain_path()))
     return json.dumps(audit, ensure_ascii=False)
 
 
@@ -3292,6 +3668,183 @@ def _serialize_correction(item) -> dict:
                   "priority_score", "severity", "namespace"]
         if hasattr(item, k)
     }
+
+
+# ============================================================
+# AURA TEMPORAL MEMORY (v1.57+)
+# ============================================================
+
+def _temporal_memory_tool(name: str, args: dict, *, channel: str | None = None) -> str:
+    """Expose Aura's business-time memory operations with bounded payloads."""
+    from remy.core.agent_tools import Level
+    from remy.core.memory_policy import sanitize_memory_content
+    from remy.core.temporal_memory import parse_memory_timestamp
+
+    bt = _get_bt()
+    brain = bt.brain
+
+    def _bounded_int(value, default: int, maximum: int) -> int:
+        try:
+            return max(1, min(maximum, int(value)))
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_record_payload(item: dict) -> dict:
+        payload = dict(item)
+        record_id = str(payload.get("id") or payload.get("record_id") or "")
+        if record_id:
+            try:
+                record = brain.get(record_id)
+                if record is not None:
+                    tags = list(getattr(record, "tags", []) or [])
+                    metadata = dict(getattr(record, "metadata", {}) or {})
+                    payload["content"] = sanitize_memory_content(
+                        str(payload.get("content") or getattr(record, "content", "")),
+                        metadata=metadata,
+                        tags=tags,
+                    )
+                    if "content_preview" in payload:
+                        payload["content_preview"] = payload["content"][:300]
+            except Exception:
+                payload.pop("content", None)
+                payload.pop("content_preview", None)
+        return payload
+
+    if name == "recall_memory_as_of":
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return json.dumps({"error": "query is required"})
+        timestamp = parse_memory_timestamp(args.get("timestamp"), field_name="timestamp")
+        top_k = _bounded_int(args.get("top_k"), 10, 20)
+        results = brain.recall_as_of(
+            query,
+            timestamp,
+            top_k=top_k,
+            namespace=args.get("namespace") or None,
+        )
+        safe_results = [_safe_record_payload(item) for item in results]
+        return json.dumps(
+            {
+                "query": query,
+                "as_of": timestamp,
+                "result_count": len(safe_results),
+                "results": safe_results,
+                "historical": True,
+                "activated_records": False,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    if name == "supersede_memory":
+        record_id = str(args.get("record_id") or "").strip()
+        new_content = str(args.get("new_content") or "").strip()
+        if not record_id or not new_content:
+            return json.dumps({"error": "record_id and new_content are required"})
+        existing = brain.get(record_id)
+        if existing is None:
+            return json.dumps({"error": f"Record '{record_id}' not found"})
+        existing_meta = dict(getattr(existing, "metadata", {}) or {})
+        if channel in _NON_INTERACTIVE_CHANNELS and (
+            existing_meta.get("source") == "user-confirmed"
+            or existing_meta.get("verified") is True
+            or float(existing_meta.get("trust_score", 0) or 0) >= 0.9
+        ):
+            return json.dumps(
+                {"error": "User-confirmed memory cannot be superseded from autonomous mode"},
+                ensure_ascii=False,
+            )
+
+        level_map = {
+            "l1_working": Level.WORKING,
+            "working": Level.WORKING,
+            "l2_decisions": Level.DECISIONS,
+            "decisions": Level.DECISIONS,
+            "l3_domain": Level.DOMAIN,
+            "domain": Level.DOMAIN,
+            "l4_identity": Level.IDENTITY,
+            "identity": Level.IDENTITY,
+        }
+        level = level_map.get(str(args.get("level") or "").casefold(), existing.level)
+        tags_arg = args.get("tags")
+        tags = (
+            [part.strip().lower() for part in str(tags_arg).split(",") if part.strip()]
+            if tags_arg not in (None, "")
+            else list(getattr(existing, "tags", []) or [])
+        )
+        effective_at = None
+        if args.get("effective_at") not in (None, ""):
+            effective_at = parse_memory_timestamp(
+                args["effective_at"], field_name="effective_at"
+            )
+        new_record = brain.supersede(
+            record_id,
+            new_content,
+            level=level,
+            tags=tags,
+            namespace=args.get("namespace") or None,
+            effective_at=effective_at,
+        )
+        new_id = str(getattr(new_record, "id", new_record))
+        old_after = brain.get(record_id)
+        new_after = brain.get(new_id)
+        try:
+            bt.clear_recall_cache(new_content)
+        except Exception:
+            pass
+        return json.dumps(
+            {
+                "superseded": True,
+                "old_id": record_id,
+                "new_id": new_id,
+                "effective_at": getattr(new_after, "valid_from", effective_at),
+                "old_valid_until": getattr(old_after, "valid_until", None),
+                "superseded_at": getattr(old_after, "superseded_at", None),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    if name == "explain_memory_recall":
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return json.dumps({"error": "query is required"})
+        top_k = _bounded_int(args.get("top_k"), 10, 20)
+        result = brain.explain_recall(
+            query,
+            top_k=top_k,
+            min_strength=args.get("min_strength"),
+            namespace=args.get("namespace") or None,
+        )
+        for key in ("items", "rejected_candidates"):
+            if isinstance(result.get(key), list):
+                result[key] = [_safe_record_payload(item) for item in result[key]]
+        result, meta = _aura_op_compress_if_huge(result, name, brief=False)
+        payload = {"explanation": result}
+        if meta:
+            payload["_meta"] = meta
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    purpose = str(args.get("purpose") or "").strip()
+    if not purpose:
+        return json.dumps({"error": "purpose is required"})
+    token_budget = _bounded_int(args.get("token_budget"), 2000, 8000)
+    valid_at = None
+    if args.get("valid_at") not in (None, ""):
+        valid_at = parse_memory_timestamp(args["valid_at"], field_name="valid_at")
+    capsule = brain.build_context_capsule(
+        purpose,
+        token_budget=token_budget,
+        namespace=args.get("namespace") or None,
+        valid_at=valid_at,
+    )
+    if isinstance(capsule.get("entries"), list):
+        capsule["entries"] = [_safe_record_payload(item) for item in capsule["entries"]]
+    capsule, meta = _aura_op_compress_if_huge(capsule, name, brief=False)
+    payload = {"context_capsule": capsule, "valid_at": valid_at}
+    if meta:
+        payload["_meta"] = meta
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 # ============================================================
@@ -3354,7 +3907,8 @@ def _aura_op_briefify_record(item):
         return item
     out = {}
     for k in ("id", "record_id", "tags", "strength", "activation_count",
-              "created_at", "namespace", "speaker_id"):
+              "created_at", "valid_from", "valid_until", "superseded_at",
+              "namespace", "speaker_id"):
         if k in item:
             out[k] = item[k]
     content = item.get("content")

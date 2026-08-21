@@ -11,7 +11,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
+
+from .plugin_context import PluginContext
 
 
 class AuthMode(str, Enum):
@@ -51,17 +53,6 @@ class PluginCapability:
 
 
 @dataclass
-class PluginContext:
-    mission_id: str = ""
-    actor: str = "chief"
-    specialist: str = ""
-    budget_remaining_usd: float = 0.0
-    use_cheap_model: bool = False
-    evidence_required: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class PluginRequest:
     action: str
     payload: dict[str, Any] = field(default_factory=dict)
@@ -91,6 +82,16 @@ class BaseIntegrationPlugin(ABC):
     risk_level: str = "low"
     capabilities: tuple[PluginCapability, ...] = ()
 
+    def setup(self, ctx: PluginContext) -> Callable[[], None] | None:
+        """Register plugin-owned resources and optionally return extra cleanup."""
+
+        return None
+
+    def teardown(self, ctx: PluginContext) -> None:
+        """Final plugin cleanup after registered resources are disposed."""
+
+        return None
+
     @abstractmethod
     def supports(self, action: str) -> bool:
         raise NotImplementedError
@@ -108,4 +109,3 @@ class BaseIntegrationPlugin(ABC):
 
     def requires_manual_assist(self, request: PluginRequest) -> str | None:
         return None
-

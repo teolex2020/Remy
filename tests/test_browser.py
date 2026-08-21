@@ -356,7 +356,9 @@ class TestBrowserToolDispatch:
         mock_mgr = MagicMock()
         mock_mgr.navigate = AsyncMock(return_value=b"\x89PNGfake")
         mock_mgr.get_page_url = AsyncMock(return_value="https://example.com")
-        mock_mgr.get_page_text = AsyncMock(return_value="Hello World")
+        mock_mgr.get_page_text = AsyncMock(
+            return_value="Hello World — this is readable page content extracted from the DOM."
+        )
         mock_mgr.save_screenshot.return_value = "ss_abc123.png"
 
         vision_result = {
@@ -378,6 +380,22 @@ class TestBrowserToolDispatch:
         assert data["url"] == "https://example.com"
         assert data["description"] == "Example page"
         assert "ss_abc123.png" in data["screenshot"]
+        assert data["verified"] is True
+        assert data["page_text"].startswith("Hello World")
+
+    def test_browse_page_requires_readable_text_for_verification(self):
+        from remy.core.tool_handlers.browser_dispatch import _verify_browser_step
+
+        result = _verify_browser_step(
+            tool="browse_page",
+            action=None,
+            requested_url="https://example.com",
+            page_url="https://example.com",
+            page_text="",
+        )
+
+        assert result["verified"] is False
+        assert result["status"] == "loaded_without_readable_content"
 
     def test_browser_act_click(self):
         """Mock page.click(), verify screenshot taken."""

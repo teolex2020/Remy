@@ -18,6 +18,10 @@ def main() -> None:
     setup_logging(log_to_file=True)
     ensure_directories()
 
+    from remy.optional_dependencies import require_extra
+
+    require_extra("webview", "desktop", "desktop mode")
+
     from remy.core.desktop_gui import DesktopGUI
 
     gui = DesktopGUI()

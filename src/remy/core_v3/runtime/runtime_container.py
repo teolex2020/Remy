@@ -81,6 +81,11 @@ class RuntimeContainer:
     integrations: Any
     integration_registry: Any
 
+    def dispose(self):
+        """Release plugin-owned runtime resources in reverse load order."""
+
+        return self.integration_registry.dispose_all()
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "chief": self.chief,
@@ -150,6 +155,7 @@ class RuntimeContainer:
             "loop": self.loop,
             "integrations": self.integrations,
             "integration_registry": self.integration_registry,
+            "dispose": self.dispose,
         }
 
     @classmethod
@@ -238,11 +244,15 @@ class RuntimeContainer:
 
         registry = SpecialistRegistry()
         integration_registry = IntegrationRegistry()
-        integration_registry.register(EmailInboxPlugin())
-        integration_registry.register(EmailSendPlugin())
-        integration_registry.register(GitHubPlugin())
-        integration_registry.register(TelegramPlugin())
-        integration_registry.register(BrowserPlugin())
+        try:
+            integration_registry.register(EmailInboxPlugin())
+            integration_registry.register(EmailSendPlugin())
+            integration_registry.register(GitHubPlugin())
+            integration_registry.register(TelegramPlugin())
+            integration_registry.register(BrowserPlugin())
+        except Exception:
+            integration_registry.dispose_all()
+            raise
         integrations = IntegrationGateway(
             registry=integration_registry,
             policy=policy,

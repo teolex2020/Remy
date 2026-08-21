@@ -232,7 +232,20 @@ _ROTATE_EVERY_N = 50  # rotate at most once every 50 writes
 
 
 def _metrics_file_path():
-    return settings.DATA_DIR / "eval_metrics.jsonl"
+    # Preserve module-level settings patching used by lightweight unit tests.
+    # Production uses the canonical singleton and follows the active project.
+    from remy.config.settings import settings as runtime_settings
+
+    if settings is not runtime_settings:
+        return settings.DATA_DIR / "eval_metrics.jsonl"
+
+    from remy.core.project_store import project_state_path
+
+    return project_state_path(
+        "metrics",
+        "eval_metrics.jsonl",
+        legacy_data_root=True,
+    )
 
 
 def store_eval_metrics(metrics: ResponseMetrics) -> None:

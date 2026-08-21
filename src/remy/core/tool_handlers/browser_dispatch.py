@@ -332,11 +332,21 @@ def _verify_browser_step(
 ) -> dict:
     """Produce a conservative verification result for browser steps."""
     if tool == "browse_page":
-        if page_url and (not requested_url or _same_origin(requested_url, page_url)):
+        if (
+            page_url
+            and (not requested_url or _same_origin(requested_url, page_url))
+            and len(page_text.strip()) >= 40
+        ):
             return {
                 "verified": True,
                 "status": "verified",
-                "reason": "Page loaded and current URL matches the requested origin.",
+                "reason": "Page URL matches the requested origin and readable page text was extracted.",
+            }
+        if page_url and (not requested_url or _same_origin(requested_url, page_url)):
+            return {
+                "verified": False,
+                "status": "loaded_without_readable_content",
+                "reason": "Page URL loaded, but no meaningful page text was extracted.",
             }
         return {
             "verified": False,
@@ -1095,7 +1105,21 @@ async def _handle_browse_page(args: dict, session_id: str | None, channel: str |
             try:
                 pinch = PinchTabManager.get()
                 pinch_result = await pinch.browse_page(url=url, question=question)
-                return json.dumps(_pinchtab_browse_result(pinch_result), ensure_ascii=False)
+                result_data = _pinchtab_browse_result(pinch_result)
+                if result_data.get("verified"):
+                    try:
+                        from remy.core.claim_provenance import record_turn_fetch_evidence
+
+                        record_turn_fetch_evidence(
+                            session_id or "",
+                            tool="browse_page",
+                            url=str(result_data.get("url") or url),
+                            title="",
+                            site=urlparse(str(result_data.get("url") or url)).hostname or "",
+                        )
+                    except Exception:
+                        pass
+                return json.dumps(result_data, ensure_ascii=False)
             except Exception as exc:
                 if _browser_backend_mode() == "pinchtab":
                     logger.error("PinchTab browse_page failed: %s", exc)
@@ -1179,11 +1203,28 @@ async def _handle_browse_page(args: dict, session_id: str | None, channel: str |
                 page_text=page_text,
             ),
             **analysis,
+            # The model must ground its description in extracted DOM text, not
+            # only in a vision-model description of the screenshot.
+            "page_text": page_text[:12000],
+            "page_text_char_count": len(page_text),
         }
         if visible_error_text:
             result_data["visible_error_text"] = visible_error_text
         result_data["verified"] = result_data["verification"]["verified"]
         result_data["status"] = result_data["verification"]["status"]
+        if result_data["verified"]:
+            try:
+                from remy.core.claim_provenance import record_turn_fetch_evidence
+
+                record_turn_fetch_evidence(
+                    session_id or "",
+                    tool="browse_page",
+                    url=page_url,
+                    title="",
+                    site=urlparse(page_url).hostname or "",
+                )
+            except Exception:
+                pass
 
         page_state = analysis.get("page_state", "normal")
         if page_state == "captcha":

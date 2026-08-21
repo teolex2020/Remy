@@ -33,7 +33,7 @@
       "input_cost_per_1m_tokens": 1.25,
       "output_cost_per_1m_tokens": 10.00
     },
-    "ollama/*": {
+    "llamacpp/*": {
       "input_cost_per_1m_tokens": 0.0,
       "output_cost_per_1m_tokens": 0.0
     },

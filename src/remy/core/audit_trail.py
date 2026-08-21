@@ -68,12 +68,51 @@ class AuditLogger:
     # Genesis hash for the first entry in each daily file
     GENESIS_HASH = "0" * 16
 
-    def __init__(self, log_dir: Path):
+    def __init__(self, log_dir: Path, *, event_store=None):
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._event_store = event_store
+        self._use_default_event_store = event_store is None
         self._prev_hash: str = self.GENESIS_HASH
         self._prev_hash_loaded: bool = False
         self._lock = threading.Lock()
+
+    def _session_events(self):
+        if self._event_store is not None:
+            return self._event_store
+        if not self._use_default_event_store:
+            return None
+        try:
+            from remy.core.session_event_store import get_session_event_store
+
+            self._event_store = get_session_event_store()
+        except Exception as exc:
+            logger.debug("Audit session journal unavailable: %s", exc)
+            return None
+        return self._event_store
+
+    def _mirror_entry(self, entry: dict, *, project_id: str, session_id: str) -> None:
+        if not project_id or not session_id:
+            return
+        store = self._session_events()
+        if store is None:
+            return
+        try:
+            store.append_event(
+                subject_event_id=(
+                    f"audit:{entry.get('timestamp') or time.time_ns()}:"
+                    f"{entry.get('checksum') or 'unknown'}"
+                ),
+                project_id=project_id,
+                session_id=session_id,
+                event_type="audit.recorded",
+                kind="AUDIT",
+                status=str(entry.get("status") or "unknown"),
+                payload={"entry": entry},
+                changed_fields=("entry",),
+            )
+        except Exception as exc:
+            logger.warning("Could not mirror critical-action audit event: %s", exc)
 
     def _get_log_path(self) -> Path:
         """One JSONL file per day."""
@@ -141,6 +180,8 @@ class AuditLogger:
         execution_time_ms: float,
         channel: str | None = None,
         error_message: str | None = None,
+        project_id: str = "",
+        session_id: str = "",
     ) -> dict:
         """Append a critical action entry to the audit log. Returns the entry.
 
@@ -178,10 +219,42 @@ class AuditLogger:
             except OSError as e:
                 logger.error("Failed to write audit log: %s", e)
 
+        self._mirror_entry(
+            entry,
+            project_id=str(project_id or "").strip(),
+            session_id=str(session_id or "").strip(),
+        )
         return entry
 
-    def get_recent_logs(self, n: int = 20, tool_name: str | None = None) -> list[dict]:
+    def get_recent_logs(
+        self,
+        n: int = 20,
+        tool_name: str | None = None,
+        *,
+        project_id: str = "",
+        session_id: str = "",
+    ) -> list[dict]:
         """Return the last N audit entries, newest first. Optionally filter by tool."""
+        if project_id:
+            store = self._session_events()
+            if store is not None:
+                try:
+                    from remy.core.session_event_store import AuditProjection
+
+                    events = (
+                        store.list_events(project_id=project_id, session_id=session_id)
+                        if session_id
+                        else store.list_project_events(project_id=project_id, kinds={"AUDIT"})
+                    )
+                    projected = AuditProjection().project(events)
+                    if tool_name:
+                        projected = [
+                            row for row in projected if row.get("tool_name") == tool_name
+                        ]
+                    if projected:
+                        return projected[: max(1, int(n))]
+                except Exception as exc:
+                    logger.warning("Audit projection read failed; using JSONL: %s", exc)
         entries: list[dict] = []
         log_files = sorted(self.log_dir.glob("audit_*.jsonl"), reverse=True)
 
@@ -207,7 +280,7 @@ class AuditLogger:
         entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return entries[:n]
 
-    def verify_integrity(self) -> dict:
+    def verify_integrity(self, *, project_id: str = "", session_id: str = "") -> dict:
         """Verify both per-entry checksums AND Merkle chain continuity.
 
         Returns:
@@ -250,18 +323,43 @@ class AuditLogger:
             except OSError:
                 continue
 
-        ok = corrupted == 0 and chain_breaks == 0
+        event_log_entries = 0
+        event_log_corrupted = 0
+        if project_id:
+            store = self._session_events()
+            if store is not None:
+                try:
+                    events = (
+                        store.list_events(project_id=project_id, session_id=session_id)
+                        if session_id
+                        else store.list_project_events(project_id=project_id, kinds={"AUDIT"})
+                    )
+                    audit_events = [row for row in events if row.get("kind") == "AUDIT"]
+                    event_log_entries = len(audit_events)
+                    event_log_corrupted = sum(
+                        1 for row in audit_events if not row.get("integrity_ok")
+                    )
+                except Exception as exc:
+                    logger.warning("Audit event-log verification failed: %s", exc)
+        ok = corrupted == 0 and chain_breaks == 0 and event_log_corrupted == 0
         return {
             "total_entries": total,
             "corrupted_entries": corrupted,
             "chain_breaks": chain_breaks,
             "integrity": "OK" if ok else "COMPROMISED",
             "files_checked": files_checked,
+            "event_log_entries": event_log_entries,
+            "event_log_corrupted": event_log_corrupted,
+            "event_log_integrity": "OK" if event_log_corrupted == 0 else "COMPROMISED",
         }
 
-    def get_summary(self) -> dict:
+    def get_summary(self, *, project_id: str = "", session_id: str = "") -> dict:
         """Aggregate stats by tool and status."""
-        logs = self.get_recent_logs(n=1000)
+        logs = self.get_recent_logs(
+            n=1000,
+            project_id=project_id,
+            session_id=session_id,
+        )
         by_status = {"total": len(logs), "success": 0, "error": 0, "timeout": 0}
         by_tool: dict[str, dict] = {}
 

@@ -1,5 +1,8 @@
 import json
 import asyncio
+import os
+import threading
+import time
 from contextlib import nullcontext
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -34,6 +37,7 @@ def test_system_pack_toggle_updates_runtime_settings(tmp_path, monkeypatch):
     runtime_file = tmp_path / "runtime_settings.json"
     monkeypatch.setattr(settings, "PACKS_DISABLED", [])
     monkeypatch.setattr(settings_module, "RUNTIME_SETTINGS_FILE", runtime_file)
+    monkeypatch.delenv("PACKS_DISABLED", raising=False)
 
     client = _make_client()
     res = client.post("/api/system/packs/publisher", json={"enabled": False})
@@ -45,6 +49,7 @@ def test_system_pack_toggle_updates_runtime_settings(tmp_path, monkeypatch):
 
     saved = json.loads(runtime_file.read_text(encoding="utf-8"))
     assert saved["PACKS_DISABLED"] == ["publisher"]
+    assert json.loads(os.environ["PACKS_DISABLED"]) == ["publisher"]
 
 
 def test_resolve_pack_falls_back_when_pack_disabled(monkeypatch):
@@ -97,6 +102,7 @@ def test_system_status_includes_recent_operator_alerts(monkeypatch):
             ],
         )
         res = client.get("/api/system/status")
+        alerts_res = client.get("/api/system/operator-alerts?limit=2")
 
     assert res.status_code == 200
     data = res.json()
@@ -112,6 +118,62 @@ def test_system_status_includes_recent_operator_alerts(monkeypatch):
     assert data["operator_alerts"]["items"][0]["requested"] == 1
     assert data["operator_alerts"]["items"][0]["applied"] == 0
     assert data["operator_alerts"]["items"][0]["skipped"] == 1
+    assert alerts_res.status_code == 200
+    assert alerts_res.json()["operator_alerts"]["items"][0]["id"] == "alert-1"
+
+
+def test_system_status_route_is_registered_once():
+    from remy.web.routes.system_routes import router
+
+    matching = [
+        route
+        for route in router.routes
+        if getattr(route, "path", "") == "/system/status"
+        and "GET" in getattr(route, "methods", set())
+    ]
+    assert len(matching) == 1
+
+
+def test_slow_runtime_snapshot_does_not_block_event_loop(monkeypatch):
+    import remy.web.routes.system_routes as system_routes
+
+    fake_api = type("Api", (), {})()
+    fake_api._start_time = time.time()
+    fake_api.brain = type("Brain", (), {})()
+    fake_api.settings = type("Settings", (), {"DATA_DIR": "data"})()
+    started = threading.Event()
+    timeline = []
+
+    def slow_snapshot():
+        started.set()
+        time.sleep(0.15)
+        return {"autonomy": {}, "approvals": {}, "budget": {}, "evaluation": {}, "factuality": {}}
+
+    async def fast_memory(_api):
+        return {}
+
+    monkeypatch.setattr(system_routes, "_get_api", lambda: fake_api)
+    monkeypatch.setattr(system_routes, "_get_cached_memory_status", fast_memory)
+    monkeypatch.setattr(
+        "remy.core.combined_runner.get_operator_console_snapshot",
+        slow_snapshot,
+    )
+
+    async def marker():
+        while not started.is_set():
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
+        timeline.append("event-loop-responsive")
+
+    async def build_status():
+        await system_routes.build_system_status_payload()
+        timeline.append("status-complete")
+
+    async def run_probe():
+        await asyncio.gather(build_status(), marker())
+
+    asyncio.run(run_probe())
+    assert timeline[0] == "event-loop-responsive"
 
 
 def test_acknowledge_operator_alert_route(monkeypatch):
