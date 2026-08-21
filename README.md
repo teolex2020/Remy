@@ -205,17 +205,41 @@ cd remy/app
 python -m venv .venv
 .venv\Scripts\activate
 
-pip install -e .
-pip install vendor/aura_memory-1.5.4-cp312-cp312-win_amd64.whl
+pip install -e .      # minimal web installation
+pip install vendor/aura_memory-1.58.0-cp312-cp312-win_amd64.whl
 
 cp .env.example .env
 # optional for development: edit .env and set GEMINI_API_KEY
 
 remy-app             # installed desktop-style launcher target
-remy --desktop       # developer CLI: native desktop window
-remy --serve         # developer CLI: local web interface at 127.0.0.1:8080
+remy desktop         # native desktop window
+remy web             # local web interface at 127.0.0.1:8080
+remy setup           # first-time setup wizard
+remy doctor          # installation and configuration diagnostics
 remy --autonomous-v3 # developer CLI: v3 mission runtime, headless
 remy                 # developer CLI: voice mode, microphone required
+```
+
+Install only the optional capabilities you need:
+
+```bash
+pip install "remy[desktop]"    # native PyWebView window
+pip install "remy[voice]"      # microphone and live audio
+pip install "remy[browser]"    # Playwright browser automation
+pip install "remy[documents]"  # PDF, PPTX and XLSX tools
+pip install "remy[telegram]"   # Telegram channel
+pip install "remy[providers]"  # OpenAI, Anthropic and NVIDIA providers
+pip install "remy[all]"        # every optional capability
+```
+
+For an editable source checkout, use the same extra syntax with the local
+project, for example `pip install -e ".[desktop,browser]"`.
+
+The legacy `--desktop`, `--web`, `--setup`, and `--doctor` flags remain
+supported. After the package is published, the no-install quick start target is:
+
+```bash
+uvx remy web
 ```
 
 If the project folder was moved or renamed, refresh the editable install from
@@ -225,7 +249,31 @@ the `app` directory:
 python -m pip install -e . --no-deps
 ```
 
-For end users the target distribution is a Windows installer/executable with a Start Menu shortcut — no Docker, Python, or terminal required. First run opens the app even without an API key; chat stays read-only until keys are added from Settings. The local server must remain bound to `127.0.0.1`.
+### Windows installer
+
+Regular Windows users do not need Python, Docker, or a terminal. Download
+`RemySetup.exe` from the GitHub Releases page, run it, and launch Remy from the
+Start menu. Installation is per-user and does not request administrator rights.
+The optional desktop shortcut is disabled by default. First run opens the app
+even without an API key; chat stays read-only until keys are added in Settings.
+
+Release builds are produced automatically for `v*` tags and can also be built
+manually from GitHub Actions. A local release build requires Python 3.12 and
+Inno Setup 6:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -Python python -Clean
+```
+
+The command creates `release\RemySetup.exe` and
+`release\RemySetup.sha256`. Chromium is bundled for browser automation, so the
+installed application does not download it on first use. Use `-SkipBrowser` for
+a smaller internal build or `-SkipInstaller` to produce only the standalone
+application directory.
+
+The local server remains bound to `127.0.0.1`. Public production builds should
+be Authenticode-signed before distribution to avoid Windows SmartScreen
+warnings; signing credentials are intentionally not stored in the repository.
 
 ---
 
@@ -239,7 +287,7 @@ GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-2.5-flash
 OPENAI_API_KEY=...           # optional
 OPENROUTER_API_KEY=...       # optional
-OLLAMA_BASE_URL=http://127.0.0.1:11434   # optional local LLMs
+LLAMA_CPP_BASE_URL=http://127.0.0.1:11435/v1   # optional local GGUF models
 
 # Channels
 TELEGRAM_BOT_TOKEN=...
