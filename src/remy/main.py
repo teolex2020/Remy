@@ -5,6 +5,7 @@ Local-first AI workflow automation with governed memory and human-approved execu
 
 import asyncio
 import argparse
+from collections.abc import Sequence
 
 from dotenv import load_dotenv
 
@@ -12,8 +13,17 @@ load_dotenv()
 
 from .config.settings import settings
 from .core.logging_config import setup_logging
+from .optional_dependencies import require_extra
 
 logger = setup_logging(log_to_file=True)
+
+
+_COMMAND_FLAGS = {
+    "web": "web",
+    "desktop": "desktop",
+    "setup": "setup",
+    "doctor": "doctor",
+}
 
 
 async def _run_autonomy_entrypoint(coro_factory):
@@ -84,9 +94,16 @@ def _sandbox_approve():
             print(f"  -> Skipped.")
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser_arg = argparse.ArgumentParser(
-        description="Remy - local-first AI workflow automation"
+        description="Remy - local-first AI workflow automation",
+    )
+    parser_arg.add_argument(
+        "command",
+        nargs="?",
+        choices=tuple(_COMMAND_FLAGS),
+        metavar="{web,desktop,setup,doctor}",
+        help="Start Remy or run a maintenance command",
     )
     parser_arg.add_argument(
         "--log-level",
@@ -107,10 +124,33 @@ def main():
     parser_arg.add_argument("--serve-all", action="store_true", help="Start all channels enabled in .env (web + telegram + autonomy)")
     parser_arg.add_argument("--setup", action="store_true", help="Run first-time setup wizard")
     parser_arg.add_argument("--doctor", action="store_true", help="Run system diagnostics and check configuration")
-    args = parser_arg.parse_args()
+    return parser_arg
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse the friendly command form while keeping legacy flags working."""
+    parser_arg = _build_parser()
+    args = parser_arg.parse_args(argv)
+
+    if args.command:
+        command_flag = _COMMAND_FLAGS[args.command]
+        setattr(args, command_flag, True)
+
+    return args
+
+
+def main(argv: Sequence[str] | None = None):
+    args = _parse_args(argv)
 
     # Re-initialize logging with CLI-specified level
     setup_logging(log_to_file=True, log_level=args.log_level)
+
+    # Validate command-level optional features before starting onboarding or
+    # importing their larger runtime stacks.
+    if args.desktop:
+        require_extra("webview", "desktop", "desktop mode")
+    if args.telegram or (args.serve_all and bool(settings.TELEGRAM_BOT_TOKEN)):
+        require_extra("telegram", "telegram", "Telegram mode")
 
     # Setup wizard
     from .core.setup import needs_setup, run_setup_wizard, ensure_directories
@@ -214,6 +254,7 @@ def main():
         gui.run_web_only()
         return
 
+    require_extra("pyaudio", "voice", "voice mode")
     from .core.gemini_live import run_gemini_live
     try:
         asyncio.run(run_gemini_live())

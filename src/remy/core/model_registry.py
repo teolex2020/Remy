@@ -31,8 +31,8 @@ _AUTO_MIGRATED_MODELS = frozenset({
 def detect_provider(model_name: str) -> str:
     """Auto-detect provider from model name prefix."""
     name = model_name.lower().strip()
-    if name.startswith("ollama:"):
-        return "ollama"
+    if name.startswith("llamacpp:"):
+        return "llamacpp"
     if name.startswith(("gpt-", "o1-", "o3-", "o4-", "chatgpt-")):
         return "openai"
     if name.startswith("claude-"):
@@ -48,6 +48,17 @@ def detect_provider(model_name: str) -> str:
         return "openrouter"
     # Default to google for unknown models
     return "google"
+
+
+def get_provider_for_model(model_name: str) -> str:
+    """Resolve an explicitly registered provider before prefix heuristics.
+
+    NVIDIA and OpenRouter both use ``publisher/model`` identifiers, so the
+    model name alone cannot distinguish their endpoints.
+    """
+    entry = load_registry().get(model_name, {})
+    provider = str(entry.get("provider") or "").strip().lower()
+    return provider or detect_provider(model_name)
 
 
 # ============== REGISTRY I/O ==============

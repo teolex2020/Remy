@@ -299,12 +299,45 @@ async def run_scheduled_pipeline_now(schedule_id: str):
     steps = pipeline_data.get("steps", [])
 
     from remy.core.pipeline_runner import run_pipeline_steps
+    from remy.core.workflow_runs import (
+        finish_workflow_run,
+        start_workflow_run,
+        update_workflow_run_progress,
+    )
     import asyncio
 
     outputs = []
-    async for event in run_pipeline_steps(steps, input_text):
-        if event.get("type") == "step_done":
-            outputs.append({"step": event.get("label", ""), "output": event.get("output", "")})
+    run_record = start_workflow_run(
+        kind="scheduled_pipeline",
+        workflow_id=schedule_id,
+        workflow_name=str(target_meta.get("name") or schedule_id),
+        input_text=input_text,
+        trigger="manual",
+    )
+    try:
+        async for event in run_pipeline_steps(steps, input_text):
+            if event.get("type") == "step_done":
+                outputs.append({"step": event.get("label", ""), "output": event.get("output", "")})
+                update_workflow_run_progress(
+                    run_record,
+                    step=str(event.get("label") or event.get("step") or "Pipeline step"),
+                    signature=str(event.get("id") or event.get("step_id") or event.get("label") or ""),
+                )
+    except asyncio.CancelledError:
+        finish_workflow_run(
+            run_record, status="cancelled", error="Scheduled pipeline was cancelled",
+            trace=outputs, steps_run=len(outputs),
+        )
+        raise
+    except Exception as exc:
+        finish_workflow_run(
+            run_record, status="error", error=str(exc), trace=outputs, steps_run=len(outputs),
+        )
+        raise
+    final_output = outputs[-1]["output"] if outputs else ""
+    finish_workflow_run(
+        run_record, status="ok", output=final_output, trace=outputs, steps_run=len(outputs),
+    )
 
     # Update last_run_at in brain
     def _update_meta():
@@ -328,4 +361,10 @@ async def run_scheduled_pipeline_now(schedule_id: str):
                     break
 
     await run_in_thread(_update_meta)
-    return {"ok": True, "steps_run": len(outputs), "outputs": outputs}
+    return {
+        "ok": True,
+        "run_id": run_record["run_id"],
+        "run": run_record.get("run_envelope", {}),
+        "steps_run": len(outputs),
+        "outputs": outputs,
+    }

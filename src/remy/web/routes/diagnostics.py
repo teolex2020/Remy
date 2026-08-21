@@ -18,6 +18,20 @@ logger = logging.getLogger("WebAPI")
 router = APIRouter()
 
 
+def _project_scope() -> dict:
+    """Describe the MicroBrain that owns project-facing diagnostics."""
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
+
+    project = get_project_store().require_project(current_project_id())
+    return {
+        "kind": "project",
+        "project_id": project.project_id,
+        "brain_id": project.brain_id,
+        "project_name": project.name,
+    }
+
+
 @router.get("/health")
 async def health_check():
     """Lightweight liveness probe."""
@@ -70,6 +84,69 @@ async def ping():
     return {"status": "ok", "session": None}
 
 
+@router.get("/agent/checkpoint")
+async def get_agent_checkpoint():
+    """Return a compact, non-sensitive durable-execution status."""
+    api = _get_api()
+    manager = api.get_session_manager()
+    session = manager.get_or_create_session()
+
+    from remy.core.agent import get_durable_agent_graph
+    from remy.core.durable_graph_runtime import (
+        durable_config,
+        durable_thread_id,
+        get_durable_graph_runtime,
+    )
+    from remy.core.microbrain import current_project_id
+    from remy.core.session_event_store import CheckpointProjection, get_session_event_store
+
+    graph = await get_durable_agent_graph("desktop")
+    config = durable_config(session.session_id, "desktop")
+    snapshot = await graph.aget_state(config)
+    tasks = list(snapshot.tasks or ())
+    interrupt_count = sum(len(task.interrupts or ()) for task in tasks)
+    if interrupt_count:
+        status = "waiting_for_input"
+    elif snapshot.next:
+        status = "resumable"
+    elif snapshot.values:
+        status = "completed"
+    else:
+        status = "empty"
+    direct = {
+        "status": status,
+        "thread_id": durable_thread_id(session.session_id, "desktop"),
+        "next": list(snapshot.next or ()),
+        "pending_tasks": [
+            {
+                "name": task.name,
+                "has_error": bool(task.error),
+                "interrupts": len(task.interrupts or ()),
+            }
+            for task in tasks
+        ],
+        "checkpoint_created_at": snapshot.created_at,
+    }
+    await get_durable_graph_runtime().record_checkpoint_status(
+        session_id=session.session_id,
+        channel="desktop",
+        project_id=current_project_id(),
+        status=status,
+        next_nodes=direct["next"],
+        pending_tasks=direct["pending_tasks"],
+        checkpoint_created_at=snapshot.created_at,
+    )
+    try:
+        projected = get_session_event_store().project(
+            CheckpointProjection(),
+            project_id=current_project_id(),
+            session_id=session.session_id,
+        )
+        return projected or direct
+    except Exception:
+        return direct
+
+
 @router.get("/chat/brain-voice")
 async def get_brain_voice(locale: str = "en", limit: int = 10):
     """Return pending proactive brain-voice events for the chat view.
@@ -104,21 +181,24 @@ async def get_task_metrics():
     """Per-family task execution metrics (completion rate, blocked rate, etc)."""
     try:
         from remy.core.combined_runner import get_goal_runtime_snapshot
+        from remy.core.microbrain import bind_project, current_project_id
         from remy.core.task_metrics import task_metrics
 
-        metrics = task_metrics.get_all()
-        goals = await run_in_thread(
-            lambda: get_goal_runtime_snapshot(goal_limit=5, approval_limit=10)
-        )
-        active_goals = int(goals.get("active", 0) or 0)
-        blocked_goals = int(goals.get("blocked", 0) or 0)
-        total_goals = int(goals.get("total", 0) or 0)
+        project_id = current_project_id()
+        with bind_project(project_id):
+            metrics = task_metrics.get_all()
+            goals = await run_in_thread(
+                lambda: get_goal_runtime_snapshot(goal_limit=5, approval_limit=10)
+            )
+            active_goals = int(goals.get("active", 0) or 0)
+            blocked_goals = int(goals.get("blocked", 0) or 0)
+            total_goals = int(goals.get("total", 0) or 0)
 
-        if "totals" in metrics:
-            metrics["totals"]["active_goals"] = active_goals
-            metrics["totals"]["blocked_goals"] = blocked_goals
-            metrics["totals"]["total_goals"] = total_goals
-            
+            if "totals" in metrics:
+                metrics["totals"]["active_goals"] = active_goals
+                metrics["totals"]["blocked_goals"] = blocked_goals
+                metrics["totals"]["total_goals"] = total_goals
+            metrics["scope"] = _project_scope()
         return metrics
     except Exception as e:
         return {"error": str(e)}
@@ -130,7 +210,10 @@ async def get_task_metrics_family(family: str):
     try:
         from remy.core.task_metrics import task_metrics
 
-        return task_metrics.get_family(family)
+        return {
+            **task_metrics.get_family(family),
+            "scope": _project_scope(),
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -142,8 +225,14 @@ async def get_execution_log(limit: int = 50, pack: str | None = None):
         from remy.core.execution_log import execution_log
 
         if pack:
-            return {"entries": execution_log.get_by_pack(pack, limit=limit)}
-        return {"entries": execution_log.get_recent(limit=limit)}
+            return {
+                "scope": _project_scope(),
+                "entries": execution_log.get_by_pack(pack, limit=limit),
+            }
+        return {
+            "scope": _project_scope(),
+            "entries": execution_log.get_recent(limit=limit),
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -155,6 +244,7 @@ async def get_execution_log_summary():
         from remy.core.execution_log import execution_log
 
         return {
+            "scope": _project_scope(),
             "packs": execution_log.get_pack_summary(),
             "step_efficiency": execution_log.get_step_efficiency(),
         }
@@ -182,7 +272,7 @@ async def end_session():
     api = _get_api()
     try:
         manager = api.get_session_manager()
-        await manager.close_session()
+        await manager.suspend_session()
         return {"ok": True}
     except Exception as e:
         logger.warning(f"end-session failed: {e}")
@@ -225,6 +315,18 @@ async def get_diagnostics():
     uptime_sec = int(time.time() - api._start_time)
     hours, remainder = divmod(uptime_sec, 3600)
     minutes, seconds = divmod(remainder, 60)
+    from remy.core.project_store import (
+        LOCAL_BRAIN_PROVIDER,
+        get_project_store,
+        local_brain_path,
+    )
+
+    active_project = get_project_store().get_active_project()
+    brain_location = (
+        str(local_brain_path(active_project.project_id))
+        if active_project.brain_provider == LOCAL_BRAIN_PROVIDER
+        else active_project.brain_uri
+    )
 
     return {
         "status": "ok" if api_key and brain_status == "ok" else "degraded",
@@ -236,7 +338,9 @@ async def get_diagnostics():
         "brain": {
             "status": brain_status,
             "records": record_count,
-            "path": str(api.settings.AURA_BRAIN_PATH),
+            "path": brain_location,
+            "provider": active_project.brain_provider,
+            "brain_uri": active_project.brain_uri,
         },
         "tools": tool_count,
         "browser_failures": get_browser_failure_report(limit=5),
@@ -253,24 +357,41 @@ async def get_diagnostics():
 async def get_audit_logs(n: int = 20, tool: str | None = None):
     """Recent audit log entries."""
     from remy.core.audit_trail import get_audit_logger
+    from remy.core.microbrain import current_project_id
 
-    return {"logs": get_audit_logger().get_recent_logs(n=n, tool_name=tool)}
+    session = _get_api().get_session_manager().get_or_create_session()
+    return {"logs": get_audit_logger().get_recent_logs(
+        n=n,
+        tool_name=tool,
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )}
 
 
 @router.get("/audit/integrity")
 async def get_audit_integrity():
     """Check audit log integrity."""
     from remy.core.audit_trail import get_audit_logger
+    from remy.core.microbrain import current_project_id
 
-    return get_audit_logger().verify_integrity()
+    session = _get_api().get_session_manager().get_or_create_session()
+    return get_audit_logger().verify_integrity(
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )
 
 
 @router.get("/audit/summary")
 async def get_audit_summary():
     """Aggregate audit stats."""
     from remy.core.audit_trail import get_audit_logger
+    from remy.core.microbrain import current_project_id
 
-    return get_audit_logger().get_summary()
+    session = _get_api().get_session_manager().get_or_create_session()
+    return get_audit_logger().get_summary(
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )
 
 
 # ============== EVALUATION METRICS ==============
@@ -281,7 +402,10 @@ async def get_eval_metrics(channel: str | None = None, limit: int = 50):
     """Aggregated evaluation metrics for agent responses."""
     from remy.core.eval_metrics import get_metrics_summary
 
-    return get_metrics_summary(channel=channel, limit=limit)
+    return {
+        **get_metrics_summary(channel=channel, limit=limit),
+        "scope": _project_scope(),
+    }
 
 
 @router.get("/harness-eval-history")

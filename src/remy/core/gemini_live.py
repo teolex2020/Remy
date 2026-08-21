@@ -236,6 +236,8 @@ class GeminiLiveSession:
         )
 
         from remy.core.agent_tools import brain_lock
+        from remy.core.project_store import brain_display_location
+
         with brain_lock:
             brain_count = brain.count()
         sandbox_count = len(registry.manifest.get_approved_tools())
@@ -245,7 +247,7 @@ class GeminiLiveSession:
         print("FAMILY HISTORIAN — GEMINI LIVE AUDIO")
         print(f"Model: {self.model}")
         print(f"Voice: {self.voice}")
-        print(f"Brain: {settings.AURA_BRAIN_PATH} ({brain_count} records)")
+        print(f"Brain: {brain_display_location()} ({brain_count} records)")
         print(f"Tools: {len(tool_names)} ({len(tool_names) - sandbox_count} core + {sandbox_count} sandbox)")
         print(f"  {', '.join(tool_names)}")
         print(f"Session: {self.session_id[:8]}...")

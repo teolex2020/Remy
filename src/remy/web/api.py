@@ -196,10 +196,30 @@ from remy.web.scheduler import Scheduler
 _scheduler = Scheduler()
 
 async def start_scheduler():
-    if _scheduler.running:
-        return
-    logger.info("Starting background scheduler...")
-    await _scheduler.start()
+    from remy.core.run_envelope import recover_interrupted_runs
+    from remy.core.worker_tasks import recover_interrupted_child_sessions
+
+    recovered_attempts = await asyncio.to_thread(recover_interrupted_runs)
+    recovered_children = await asyncio.to_thread(
+        recover_interrupted_child_sessions,
+        recovered_attempts,
+    )
+    if recovered_attempts:
+        logger.warning(
+            "Marked %d interrupted execution attempt(s) unknown; no side effects were replayed",
+            len(recovered_attempts),
+        )
+    if recovered_children:
+        logger.warning(
+            "Settled %d interrupted child session attempt(s) for cold resume",
+            recovered_children,
+        )
+    if not _scheduler.running:
+        logger.info("Starting background scheduler...")
+        await _scheduler.start()
+    from remy.core.research_supervisor import start_research_supervisor
+
+    await start_research_supervisor()
 
 async def load_push_subscription():
     try:
@@ -209,17 +229,46 @@ async def load_push_subscription():
         logger.warning(f"Failed to load push subscription: {e}")
 
 async def shutdown_cleanup():
+    try:
+        from remy.core.worker_tasks import shutdown_worker_task_runtime
+
+        shutdown_worker_task_runtime()
+    except Exception as e:
+        logger.warning("Background worker task shutdown failed: %s", e)
+    try:
+        from remy.core.research_supervisor import stop_research_supervisor
+
+        await stop_research_supervisor()
+    except Exception as e:
+        logger.warning(f"Research supervisor stop on shutdown failed: {e}")
     logger.info("Server shutting down — closing active session...")
     try:
         manager = get_session_manager()
-        await manager.close_session()
+        await manager.close_session(
+            generate_summary=False,
+            preserve_for_resume=True,
+        )
     except Exception as e:
         logger.warning(f"Session close on shutdown failed: {e}")
+    try:
+        from remy.core.durable_graph_runtime import close_durable_graph_runtime
+
+        await close_durable_graph_runtime()
+    except Exception as e:
+        logger.warning("LangGraph checkpoint shutdown failed: %s", e)
     logger.info("Stopping background scheduler...")
     try:
         await _scheduler.stop()
     except Exception as e:
         logger.warning(f"Scheduler stop on shutdown failed: {e}")
+    try:
+        from remy.core.memory_write_queue import get_memory_write_queue
+
+        drained = await asyncio.to_thread(get_memory_write_queue().close, 15.0)
+        if not drained:
+            logger.warning("Background memory write queue did not fully drain before shutdown")
+    except Exception as e:
+        logger.warning(f"Background memory write queue shutdown failed: {e}")
     try:
         from remy.core.agent_tools import close_brain
 
@@ -317,19 +366,38 @@ async def get_llm_optimization_models():
 @router.get("/stats")
 async def get_brain_stats():
     """Get brain statistics."""
-    """Get brain statistics."""
-    try:
-        count = await brain_run(brain.count, timeout=3.0)
-        stats  = await brain_run(brain.stats,  timeout=3.0)
-    except Exception:
-        return {"error": "busy", "message": "Agent is busy, try again in a moment"}
+    from remy.core.microbrain import bind_project, current_project_id
+
+    project_id = current_project_id()
+    with bind_project(project_id):
+        try:
+            count = await brain_run(brain.count, timeout=3.0)
+            stats = await brain_run(brain.stats, timeout=3.0)
+        except Exception:
+            return {"error": "busy", "message": "Agent is busy, try again in a moment"}
     
     # Get token usage
     usage = usage_tracker.get_stats()
     # Calculate total if not present (handled by JS but good to have)
     usage["total_tokens"] = usage.get("user_tokens", 0) + usage.get("autonomy_tokens", 0)
-    
-    return {"total_records": count, "stats": stats, "usage": usage}
+
+    from remy.core.project_store import get_project_store
+
+    project = get_project_store().require_project(project_id)
+    return {
+        "scope": {
+            "kind": "project",
+            "project_id": project.project_id,
+            "brain_id": project.brain_id,
+            "project_name": project.name,
+        },
+        "total_records": count,
+        "stats": stats,
+        # Token accounting is currently server-wide. Keep it visible, but never
+        # imply that it belongs only to the active MicroBrain.
+        "usage_scope": {"kind": "server", "label": "All Remy projects"},
+        "usage": usage,
+    }
 
 
 @router.get("/records")
@@ -549,9 +617,10 @@ async def get_graph_data(mode: str = "user", scope: str | None = None):
     if graph_mode not in {"user", "full"}:
         raise HTTPException(status_code=400, detail="Invalid graph mode")
 
+    min_strength = 0.0 if graph_mode == "full" else 0.01
     try:
-        all_records = await brain_run(brain.list_records, min_strength=0.01, timeout=4.0)
-        if not all_records:
+        all_records = await brain_run(brain.list_records, min_strength=min_strength, timeout=4.0)
+        if not all_records and min_strength:
             all_records = await brain_run(brain.list_records, min_strength=0.0, timeout=4.0)
     except Exception:
         all_records = []
@@ -560,16 +629,36 @@ async def get_graph_data(mode: str = "user", scope: str | None = None):
     nodes = []
     edges = []
     seen_edges = set()
+    dangling_connections = 0
+    level_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
 
     valid_ids = {r.id for r in records}
+    connected_ids = set()
 
     for r in records:
+        metadata = getattr(r, "metadata", None) or {}
+        level = level_name(r.level) if hasattr(r, "level") else ""
+        record_type = str(metadata.get("type") or "memory")
+        level_counts[level or "UNKNOWN"] = level_counts.get(level or "UNKNOWN", 0) + 1
+        type_counts[record_type] = type_counts.get(record_type, 0) + 1
         node = {
             "id": r.id,
             "label": r.content[:60],
-            "level": level_name(r.level) if hasattr(r, "level") else "",
+            "excerpt": r.content[:600],
+            "level": level,
             "tags": list(r.tags) if r.tags else [],
             "strength": round(r.strength, 3),
+            "record_type": record_type,
+            "timestamp": (
+                metadata.get("timestamp")
+                or metadata.get("created_at")
+                or metadata.get("updated_at")
+                or metadata.get("recovered_at")
+                or metadata.get("last_updated_at")
+                or getattr(r, "created_at", None)
+                or getattr(r, "updated_at", None)
+            ),
         }
         if hasattr(r, "importance"):
             node["importance"] = round(r.importance, 4)
@@ -577,18 +666,37 @@ async def get_graph_data(mode: str = "user", scope: str | None = None):
 
         for conn_id, weight in r.connections.items():
             if conn_id not in valid_ids:
+                dangling_connections += 1
                 continue
                 
             edge_key = tuple(sorted([r.id, conn_id]))
             if edge_key not in seen_edges:
                 seen_edges.add(edge_key)
+                connected_ids.update(edge_key)
                 edges.append({
                     "source": r.id,
                     "target": conn_id,
                     "weight": round(weight, 3),
                 })
 
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "coverage": {
+            "mode": graph_mode,
+            "minimum_strength": min_strength,
+            "records_scanned": len(all_records),
+            "records_returned": len(records),
+            "records_hidden_by_mode": len(all_records) - len(records),
+            "connected_records": len(connected_ids),
+            "isolated_records": len(valid_ids - connected_ids),
+            "edges_returned": len(edges),
+            "dangling_connections": dangling_connections,
+            "levels": level_counts,
+            "record_types": type_counts,
+            "source": "Aura memory record store",
+        },
+    }
 
 
 # ============== SETTINGS ==============
@@ -790,7 +898,10 @@ async def export_brain():
 @router.get("/history")
 async def list_history():
     """List past session logs."""
-    history_dir = settings.DATA_DIR / "history"
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import project_data_root
+
+    history_dir = project_data_root(current_project_id()) / "history"
     if not history_dir.exists():
         return {"sessions": []}
 
@@ -825,7 +936,10 @@ async def get_history_session(filename: str):
     if safe_name != filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
-    history_dir = settings.DATA_DIR / "history"
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import project_data_root
+
+    history_dir = project_data_root(current_project_id()) / "history"
     filepath = history_dir / safe_name
 
     if not filepath.exists() or not filepath.is_file():
@@ -900,14 +1014,14 @@ async def get_metrics():
 
 @router.post("/end-session")
 async def end_session():
-    """Close active session: save history, generate summary, end brain session.
+    """Persist the active session so page unload does not destroy continuity.
 
     Called by navigator.sendBeacon() on page unload as a last-resort backup.
-    The primary close path is the WebSocket disconnect handler.
+    Only the explicit New Session action closes the current conversation.
     """
     try:
         manager = get_session_manager()
-        await manager.close_session()
+        await manager.suspend_session()
         return {"ok": True}
     except Exception as e:
         logger.warning(f"end-session failed: {e}")
@@ -945,6 +1059,18 @@ async def get_diagnostics():
     # Knowledge base (Aura Memory) stats
     kb_status = "unified into brain"
     kb_records = 0
+    from remy.core.project_store import (
+        LOCAL_BRAIN_PROVIDER,
+        get_project_store,
+        local_brain_path,
+    )
+
+    active_project = get_project_store().get_active_project()
+    brain_location = (
+        str(local_brain_path(active_project.project_id))
+        if active_project.brain_provider == LOCAL_BRAIN_PROVIDER
+        else active_project.brain_uri
+    )
 
     return {
         "status": "ok" if api_key and brain_status == "ok" else "degraded",
@@ -956,7 +1082,9 @@ async def get_diagnostics():
         "brain": {
             "status": brain_status,
             "records": record_count,
-            "path": str(settings.AURA_BRAIN_PATH),
+            "path": brain_location,
+            "provider": active_project.brain_provider,
+            "brain_uri": active_project.brain_uri,
             "startup": startup_status,
         },
         "knowledge": {
@@ -977,21 +1105,41 @@ async def get_diagnostics():
 async def get_audit_logs(n: int = 20, tool: str | None = None):
     """Recent audit log entries for critical tool executions."""
     from remy.core.audit_trail import get_audit_logger
-    return {"logs": get_audit_logger().get_recent_logs(n=n, tool_name=tool)}
+    from remy.core.microbrain import current_project_id
+
+    session = get_session_manager().get_or_create_session()
+    return {"logs": get_audit_logger().get_recent_logs(
+        n=n,
+        tool_name=tool,
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )}
 
 
 @router.get("/audit/integrity")
 async def get_audit_integrity():
     """Check audit log integrity (SHA-256 checksums)."""
     from remy.core.audit_trail import get_audit_logger
-    return get_audit_logger().verify_integrity()
+    from remy.core.microbrain import current_project_id
+
+    session = get_session_manager().get_or_create_session()
+    return get_audit_logger().verify_integrity(
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )
 
 
 @router.get("/audit/summary")
 async def get_audit_summary():
     """Aggregate audit stats by tool and status."""
     from remy.core.audit_trail import get_audit_logger
-    return get_audit_logger().get_summary()
+    from remy.core.microbrain import current_project_id
+
+    session = get_session_manager().get_or_create_session()
+    return get_audit_logger().get_summary(
+        project_id=current_project_id(),
+        session_id=session.session_id,
+    )
 
 
 # ============== EVALUATION METRICS ==============
@@ -1001,7 +1149,19 @@ async def get_audit_summary():
 async def get_eval_metrics(channel: str | None = None, limit: int = 50):
     """Aggregated evaluation metrics for agent responses."""
     from remy.core.eval_metrics import get_metrics_summary
-    return get_metrics_summary(channel=channel, limit=limit)
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
+
+    project = get_project_store().require_project(current_project_id())
+    return {
+        **get_metrics_summary(channel=channel, limit=limit),
+        "scope": {
+            "kind": "project",
+            "project_id": project.project_id,
+            "brain_id": project.brain_id,
+            "project_name": project.name,
+        },
+    }
 
 
 # ============== ACTIVITY LOG ==============
@@ -1026,48 +1186,9 @@ async def get_activity():
 
 def _classify_error(error_text: str) -> dict:
     """Classify error for user-friendly message + recovery estimation."""
-    e = error_text.lower()
-    if "quota" in e or "429" in e or "resource_exhausted" in e:
-        return {
-            "message": "API rate limit reached. Please wait a moment and try again.",
-            "retryable": True,
-            "error_class": "rate_limit",
-        }
-    if "402" in e or "insufficient" in e or "credits" in e or "can only afford" in e:
-        return {
-            "message": "Insufficient credits on OpenRouter. Top up at openrouter.ai/settings/credits or switch to a free model (add :free suffix).",
-            "retryable": False,
-            "error_class": "billing",
-        }
-    if "api key" in e or "401" in e or "403" in e or "permission" in e:
-        return {
-            "message": "API authentication error. Check your API key in Settings.",
-            "retryable": False,
-            "error_class": "auth",
-        }
-    if "timeout" in e or "deadline" in e:
-        return {
-            "message": "Request timed out. Try again or simplify your message.",
-            "retryable": True,
-            "error_class": "timeout",
-        }
-    if "connect" in e or "network" in e or "unreachable" in e or "getaddrinfo" in e:
-        return {
-            "message": "Network error. Check your internet connection.",
-            "retryable": True,
-            "error_class": "network",
-        }
-    if "subscriptable" in e:
-        return {
-            "message": "API response parsing error. Retrying automatically...",
-            "retryable": True,
-            "error_class": "transient",
-        }
-    return {
-        "message": "Something went wrong. Try again.",
-        "retryable": True,
-        "error_class": "unknown",
-    }
+    from remy.core.error_classification import classify_llm_error
+
+    return classify_llm_error(error_text)
 
 
 @router.websocket("/ws/chat")
@@ -1165,24 +1286,74 @@ async def websocket_chat(websocket: WebSocket):
 
                 try:
                     streamed_any = False
-                    async for event in manager.gemini_respond_stream(user_text):
+                    partial_text = ""
+                    turn_token_usage = None
+                    workspace_id = str(data.get("workspace_id") or "").strip() or None
+                    response_options = {}
+                    if workspace_id:
+                        response_options["workspace_id"] = workspace_id
+                    requested_team_mode = str(data.get("team_mode") or "off")
+                    if requested_team_mode != "off":
+                        response_options["team_mode"] = requested_team_mode
+                    response_stream = manager.gemini_respond_stream(
+                        user_text,
+                        **response_options,
+                    )
+                    async for event in response_stream:
                         if event["type"] == "token":
                             await websocket.send_json({
                                 "type": "token",
                                 "content": event["content"]
                             })
+                            partial_text += event["content"]
                             streamed_any = True
+                        elif event["type"] == "provisional_token":
+                            content = event.get("content", "")
+                            await websocket.send_json({
+                                "type": "provisional_token",
+                                "content": content,
+                            })
+                            partial_text += content
+                            streamed_any = True
+                        elif event["type"] == "provisional_reset":
+                            await websocket.send_json({"type": "provisional_reset"})
+                            partial_text = ""
+                            streamed_any = False
+                        elif event["type"] == "provisional_commit":
+                            await websocket.send_json({"type": "provisional_commit"})
+                        elif event["type"] == "provider_status":
+                            await websocket.send_json({
+                                "type": "provider_status",
+                                "phase": event.get("phase", "working"),
+                                "model": event.get("model", ""),
+                                "provider": event.get("provider", ""),
+                                "message": event.get("message", ""),
+                            })
                         elif event["type"] == "tool_start":
-                            await websocket.send_json({
+                            tool_payload = {
                                 "type": "tool_start",
-                                "content": event["tool"]
-                            })
+                                "content": event["tool"],
+                            }
+                            if event.get("args"):
+                                tool_payload["args"] = event["args"]
+                            await websocket.send_json(tool_payload)
                         elif event["type"] == "tool_end":
-                            await websocket.send_json({
+                            tool_payload = {
                                 "type": "tool_end",
-                                "content": event["tool"]
+                                "content": event["tool"],
+                            }
+                            if event.get("result"):
+                                tool_payload["result"] = event["result"]
+                            await websocket.send_json(tool_payload)
+                        elif event["type"] == "thinking":
+                            await websocket.send_json({
+                                "type": "thinking",
+                                "content": event.get("content", "Thinking..."),
                             })
+                        elif event["type"] == "team_status":
+                            await websocket.send_json(event)
                         elif event["type"] == "final":
+                            turn_token_usage = event.get("token_usage")
                             # Only send full text if streaming didn't yield tokens
                             if not streamed_any and event.get("text"):
                                 await websocket.send_json({
@@ -1200,7 +1371,7 @@ async def websocket_chat(websocket: WebSocket):
                         "error_class": err["error_class"],
                     })
 
-                await websocket.send_json({"type": "done"})
+                await websocket.send_json({"type": "done", "token_usage": turn_token_usage})
 
             elif data.get("type") == "voice":
                 audio_b64 = data.get("audio", "")
@@ -1288,16 +1459,12 @@ async def websocket_chat(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        # Graceful session close: save history JSON + generate summary + brain.end_session
-        # Timeout prevents blocking shutdown (Ctrl+C) if summary generation is slow.
         try:
-            await asyncio.wait_for(manager.close_session(), timeout=10.0)
-        except asyncio.TimeoutError:
-            logger.warning("Session close timed out (10s) — skipping summary")
+            await manager.suspend_session()
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("Session close interrupted by shutdown")
+            logger.info("Session suspend interrupted by shutdown")
         except Exception as e:
-            logger.warning(f"Session close on disconnect failed: {e}")
+            logger.warning(f"Session suspend on disconnect failed: {e}")
         metrics_collector.ws_disconnected("chat")
 
 
@@ -1838,7 +2005,11 @@ async def delete_knowledge_item(record_id: str):
 async def serve_generated_image(filename: str):
     """Serve a generated image file."""
     from fastapi.responses import FileResponse
-    image_dir = Path(settings.DATA_DIR) / "generated_images"
+    from remy.core.project_store import project_artifact_dir
+    image_dir = project_artifact_dir(
+        "generated_images",
+        legacy_data_dir=settings.DATA_DIR,
+    )
     filepath = (image_dir / filename).resolve()
     if not filepath.exists() or not filepath.is_relative_to(image_dir.resolve()):
         raise HTTPException(status_code=404, detail="Image not found")
@@ -1856,7 +2027,11 @@ async def serve_generated_image(filename: str):
 async def serve_browser_screenshot(filename: str):
     """Serve a browser screenshot file."""
     from fastapi.responses import FileResponse
-    image_dir = Path(settings.DATA_DIR) / "browser_screenshots"
+    from remy.core.project_store import project_artifact_dir
+    image_dir = project_artifact_dir(
+        "browser_screenshots",
+        legacy_data_dir=settings.DATA_DIR,
+    )
     filepath = (image_dir / filename).resolve()
     if not filepath.exists() or not filepath.is_relative_to(image_dir.resolve()):
         raise HTTPException(status_code=404, detail="Screenshot not found")
@@ -1866,13 +2041,24 @@ async def serve_browser_screenshot(filename: str):
 # ============== GENERATED REPORTS ==============
 
 @router.get("/reports/{filename}")
-async def serve_report(filename: str):
+async def serve_report(filename: str, download: bool = False):
     """Serve a generated PDF report."""
     from fastapi.responses import FileResponse
-    reports_dir = Path(settings.DATA_DIR) / "reports"
+    from remy.core.project_store import project_artifact_dir
+    reports_dir = project_artifact_dir(
+        "reports",
+        legacy_data_dir=settings.DATA_DIR,
+    )
     filepath = (reports_dir / filename).resolve()
     if not filepath.exists() or not filepath.is_relative_to(reports_dir.resolve()):
         raise HTTPException(status_code=404, detail="Report not found")
+    if download:
+        return FileResponse(
+            filepath,
+            media_type="application/pdf",
+            filename=filepath.name,
+            content_disposition_type="attachment",
+        )
     return FileResponse(filepath, media_type="application/pdf")
 
 
@@ -1882,7 +2068,11 @@ async def serve_report(filename: str):
 async def serve_presentation(filename: str):
     """Serve a generated PPTX presentation."""
     from fastapi.responses import FileResponse
-    pres_dir = Path(settings.DATA_DIR) / "presentations"
+    from remy.core.project_store import project_artifact_dir
+    pres_dir = project_artifact_dir(
+        "presentations",
+        legacy_data_dir=settings.DATA_DIR,
+    )
     filepath = (pres_dir / filename).resolve()
     if not filepath.exists() or not filepath.is_relative_to(pres_dir.resolve()):
         raise HTTPException(status_code=404, detail="Presentation not found")

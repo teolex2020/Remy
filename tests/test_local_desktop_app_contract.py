@@ -46,6 +46,17 @@ def test_create_app_keeps_routes_deduplicated():
     assert len(keys) == len(set(keys))
 
 
+def test_project_api_exposes_reversible_lifecycle():
+    from fastapi.testclient import TestClient
+
+    from remy.core.desktop_gui import create_app
+
+    client = TestClient(create_app())
+
+    assert client.get("/api/projects").status_code == 200
+    assert client.post("/api/projects/project-does-not-exist/restore").status_code == 404
+
+
 def test_create_app_exposes_frontend_required_api_endpoints():
     from fastapi.testclient import TestClient
 
@@ -78,6 +89,62 @@ def test_create_app_exposes_frontend_required_api_endpoints():
     assert client.post("/api/workflows/scrape-test", json={"url": "not-a-url"}).status_code == 400
     assert client.delete("/api/pipelines/home-templates/runs").status_code == 200
     assert client.post("/api/end-session").status_code == 200
+
+
+def test_web_ui_exposes_graceful_stop_control():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+
+    assert 'id="btn-stop-remy"' in html
+    assert 'window.apiClient.shutdownServer()' in app_js
+    assert 'server-shutdown-started' in app_js
+
+
+def test_chat_header_omits_unused_optimization_controls():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+
+    assert 'id="context-reducer-compare"' not in html
+    assert 'id="context-reducer-apply"' not in html
+    assert 'id="btn-context-reducer-lab"' not in html
+    assert 'id="btn-compare"' in html
+    assert 'id="tts-enabled"' in html
+
+
+def test_chat_composer_groups_context_tools_model_and_send_action():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+    css = Path("src/remy/web/static/css/main.css").read_text(encoding="utf-8")
+    chat_js = Path("src/remy/web/static/js/chat.js").read_text(encoding="utf-8")
+
+    assert 'class="chat-composer-context"' in html
+    assert 'class="chat-composer-shell"' in html
+    assert 'class="input-row chat-composer-toolbar"' in html
+    assert 'class="chat-composer-tools"' in html
+    assert 'class="chat-composer-routing"' in html
+    assert 'placeholder="Describe what you want Remy to do…"' in html
+    assert html.index('id="project-context-selector"') < html.index('id="chat-input"')
+    assert html.index('id="chat-input"') < html.index('id="chat-model-select"')
+    assert html.index('id="chat-model-select"') < html.index('id="btn-send"')
+    assert 'class="chat-send-button"' in html
+    assert ".chat-composer-shell:focus-within" in css
+    assert ".chat-model-select option" in css
+    assert "color-scheme: dark" in css
+    assert '[data-theme="light"] .chat-model-select option' in css
+    assert "@media (max-width: 760px)" in css
+    assert 'sendBtn.textContent = "Queue"' not in chat_js
+    assert 'sendBtn.setAttribute("aria-label", "Queue message")' in chat_js
+
+
+def test_server_shutdown_endpoint_requests_combined_runner_shutdown():
+    from fastapi.testclient import TestClient
+
+    from remy.core.desktop_gui import create_app
+
+    with patch("remy.core.combined_runner.request_graceful_shutdown", return_value=True) as request_shutdown:
+        response = TestClient(create_app()).post("/api/server/shutdown")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    request_shutdown.assert_called_once_with()
 
 
 def test_local_secret_vault_saves_and_clears_runtime_secret(tmp_path):
@@ -155,6 +222,8 @@ def test_settings_ui_uses_put_for_settings_updates():
     from pathlib import Path
 
     js = Path("src/remy/web/static/js/settings.js").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+    css = Path("src/remy/web/static/css/main.css").read_text(encoding="utf-8")
 
     assert 'fetch("/api/settings", { method: "POST"' not in js
     assert 'fetch("/api/settings", {\n            method: "PUT"' in js
@@ -164,6 +233,14 @@ def test_settings_ui_uses_put_for_settings_updates():
     assert "settings-secret-test" in js
     assert "settings-secret-test-status" in js
     assert "settings-secret-row" in js
+    assert "SETTINGS_CATEGORIES" in js
+    assert "buildSettingsNavigation" in js
+    assert "data-settings-category" in js
+    assert "data-settings-panel" in js
+    assert 'localStorage.getItem("remy.settings.category")' in js
+    assert 'import("./settings.js?v=1.33")' in app_js
+    assert ".settings-hub-tabs" in css
+    assert ".settings-hub-panel[hidden]" in css
 
 
 def test_index_keeps_heavy_views_lazy_loaded():
@@ -174,7 +251,7 @@ def test_index_keeps_heavy_views_lazy_loaded():
 
     assert '/js/api-client.js' in html
     assert '/js/chat.js' in html
-    assert '/js/app.js?v=1.26' in html
+    assert '/js/app.js?v=1.76' in html
     assert 'id="first-run-wizard"' in html
     for module in [
         "memory.js",
@@ -187,10 +264,11 @@ def test_index_keeps_heavy_views_lazy_loaded():
         "approval.js",
         "guidance.js",
         "knowledge.js",
+        "experiments.js",
     ]:
         assert f'/js/{module}' not in html
     assert 'import("./pipelines.js?v=3.0")' in reliability_js
-    assert 'import("./automations.js?v=2.8")' in reliability_js
+    assert 'import("./automations.js?v=2.9")' in reliability_js
 
 
 def test_automations_canvas_exposes_per_block_run_results():
@@ -201,6 +279,161 @@ def test_automations_canvas_exposes_per_block_run_results():
     assert "pf-node-run-badge" in js
     assert "at-step-modal" in js
     assert 'Completed - ${data.steps_run} step(s)</div>${_renderRunTrace(data.trace || [])}' not in js
+
+
+def test_experiment_canvas_is_lazy_and_exposes_required_research_blocks():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+    experiments_js = Path("src/remy/web/static/js/experiments.js").read_text(encoding="utf-8")
+    css = Path("src/remy/web/static/css/main.css").read_text(encoding="utf-8")
+
+    assert 'data-view="experiments"' in html
+    assert 'id="view-experiments"' in html
+    assert 'import("./experiments.js?v=1.15")' in app_js
+    for node_type in ("problem", "role_model", "discussion_group", "shared_board", "success_gate", "synthesis"):
+        assert f'type: "{node_type}"' in experiments_js
+    assert "/api/experiments/canvas/validate" in experiments_js
+    assert 'id="exp-edit"' in experiments_js
+    assert 'id="exp-delete"' in experiments_js
+    assert 'method: "DELETE"' in experiments_js
+    assert 'method: existingId ? "PUT" : "POST"' in experiments_js
+    assert 'id="exp-canvas-workspace"' in experiments_js
+    assert "grid-template-columns:220px minmax(0,1fr) 0px" in experiments_js
+    assert "closeCanvasConfigPanel" in experiments_js
+    assert "/continue`" in experiments_js
+    assert "Continue this experiment" in experiments_js
+    assert "Durable checkpoint:" in experiments_js
+    assert "/pause`" in experiments_js
+    assert "/resume`" in experiments_js
+    assert "Require my approval before final synthesis" in experiments_js
+    assert "Choose responsibility" in experiments_js
+    assert "What this role contributes" in experiments_js
+    assert "Custom role" in experiments_js
+    assert "/api/experiments/roles" in experiments_js
+    assert "proposed next task · not executed" in experiments_js
+    assert "Self-improvement Lab" in experiments_js
+    assert "/api/experiments/self-modifications" in experiments_js
+    assert "/run-evaluation`" in experiments_js
+    assert "Approve exact hash" in experiments_js
+    assert "Refresh & enforce gate" in experiments_js
+    assert "/canary-telemetry/observe" in experiments_js
+    assert "aggregate-only; prompts and responses excluded" in experiments_js
+    assert "statistical confidence" in experiments_js
+    assert "minimum_observation_window" in experiments_js
+    assert "statisticalChecks.failure_rate_non_inferior" in experiments_js
+    assert "/api/experiments/self-modifications/policy" in experiments_js
+    assert "Save project policy" in experiments_js
+    assert "self-mod-live-alerts" in experiments_js
+    assert "open_self_modification_lab" in app_js
+    assert "/api/trajectory/self-modifications/" in experiments_js
+    assert ".self-mod-progress" in css
+    assert "#experiments-content {" in css
+    assert "overflow-y: auto;" in css.split("#experiments-content {", 1)[1].split("}", 1)[0]
+    assert '/css/main.css?v=1.60' in html
+
+
+def test_sidebar_exposes_project_microbrain_switcher():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+    api_js = Path("src/remy/web/static/js/api-client.js").read_text(encoding="utf-8")
+
+    assert 'id="project-select"' in html
+    assert 'id="btn-new-project"' in html
+    assert 'id="btn-manage-projects"' in html
+    assert 'id="project-manager-modal"' in html
+    assert 'id="project-manager-active-list"' in html
+    assert 'id="project-manager-archived-list"' in html
+    assert "Only the project name is required." in html
+    assert "shared project memory" in app_js
+    assert "activateProject(nextProjectId)" in app_js
+    assert "updateProject(project.project_id" in app_js
+    assert "archiveProject(project.project_id)" in app_js
+    assert "restoreProject(project.project_id)" in app_js
+    assert '"/api/projects"' in api_js
+    assert "/activate`" in api_js
+    assert "/restore`" in api_js
+    assert "formatApiErrorDetail" in api_js
+    assert 'const body = { name, activate };' in api_js
+    assert "if (domain) body.domain = domain;" in api_js
+    assert "hasLegacyProjectProfileValidation" in api_js
+
+
+def test_activity_exposes_durable_background_research_controls():
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+    activity_js = Path("src/remy/web/static/js/activity.js").read_text(encoding="utf-8")
+
+    assert 'import("./activity.js?v=1.23")' in app_js
+    assert "refreshBackgroundResearch" in activity_js
+    assert "getKnowledgeResearch" in activity_js
+    assert "background_research" in activity_js
+    assert "pauseResearch(projectId)" in activity_js
+    assert "resumeResearch(projectId)" in activity_js
+    assert "checkpoint ${checkpoint.node}" in activity_js
+
+
+def test_sidebar_is_compact_and_grouped_by_workflow():
+    html = Path("src/remy/web/static/index.html").read_text(encoding="utf-8")
+    css = Path("src/remy/web/static/css/main.css").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+
+    positions = [
+        html.index('<li class="nav-group-label">Work</li>'),
+        html.index('<li class="nav-group-label">Build</li>'),
+        html.index('<li class="nav-group-label">Knowledge</li>'),
+        html.index('<details id="sidebar-insights">'),
+        html.index('<li class="nav-group-label">System</li>'),
+    ]
+    assert positions == sorted(positions)
+    assert 'data-view="home"' not in html
+    assert 'id="view-home"' not in html
+    assert "HOME_TEMPLATES" not in app_js
+    assert "initHomeSurface" not in app_js
+    assert '<li class="nav-item active" data-view="chat">' in html
+    assert 'switchView("chat")' in app_js
+    assert '<span class="nav-label">Memory Map</span>' in html
+    assert '<span class="nav-label">Analytics</span>' in html
+    assert "SIDEBAR_INSIGHTS_OPEN_KEY" in app_js
+    assert 'item.setAttribute("aria-current", "page")' in app_js
+    assert 'item.setAttribute("tabindex", "0")' in app_js
+    assert "overflow-y: auto;" in css.split(".nav-list {", 1)[1].split("}", 1)[0]
+    assert "min-height: 31px;" in css.split(".nav-item {", 1)[1].split("}", 1)[0]
+    assert "--sidebar-width-default: 224px;" in css
+    assert 'id="sidebar-resize-handle"' in html
+    assert 'role="separator"' in html
+    assert "SIDEBAR_WIDTH_KEY" in app_js
+    assert "_initSidebarResize" in app_js
+    assert 'window.localStorage.setItem(SIDEBAR_WIDTH_KEY' in app_js
+    assert "cursor: col-resize;" in css
+    assert "getOperatorAlerts" in app_js
+    assert "getSystemStatus" not in app_js.split("async function _refreshOperatorAlerts", 1)[1].split("}", 1)[0]
+    assert 'const CACHE_NAME = "remy-v1.77"' in Path(
+        "src/remy/web/static/sw.js"
+    ).read_text(encoding="utf-8")
+
+
+def test_glass_brain_exposes_search_details_and_coverage_audit():
+    js = Path("src/remy/web/static/js/glass_brain.js").read_text(encoding="utf-8")
+    css = Path("src/remy/web/static/css/main.css").read_text(encoding="utf-8")
+    app_js = Path("src/remy/web/static/js/app.js").read_text(encoding="utf-8")
+
+    assert 'fetch("/api/graph?mode=full")' in js
+    assert "Coverage audit" in js
+    assert "gb-search" in js
+    assert "gb-level-filter" in js
+    assert "gb-edge-limit" in js
+    assert "_showNodeDetail" in js
+    assert "Thermal mapping" in js
+    assert "_localNodeIds" in js
+    assert "Local Brain" in js
+    assert "_setGraphHighlight" in js
+    assert "_LAYOUT_STORAGE_KEY" in js
+    assert "_saveCurrentLayout" in js
+    assert "Reset layout" in js
+    assert ".gb-graph-tools" in css
+    assert ".gb-node-detail-overlay" in css
+    assert ".gb-local-mode" in css
+    assert ".gb-local-actions" in css
+    assert 'import("./glass_brain.js?v=1.6")' in app_js
 
 
 def test_automations_editor_uses_full_height_resizable_workspace():
@@ -225,15 +458,10 @@ def test_automations_config_opens_from_node_button_not_selection():
     assert "_ensureNodeConfigButtons" in js
     assert "_editor.on(\"nodeSelected\",   id => { _selectedNodeId = String(id); });" in js
     assert "_editor.on(\"nodeSelected\",   id => _openNodeConfig(id));" not in js
-    assert 'import("./automations.js?v=2.8")' in app_js
+    assert 'import("./automations.js?v=2.9")' in app_js
     assert "remy_first_run_done_v1" in app_js
     assert "first-run-save-key" in app_js
-    assert "_instantiateHomeTemplate" in app_js
-    assert "/api/automations/templates/" in app_js
-    assert "/api/pipelines/templates/" in app_js
-    assert "inputs," in app_js
-    assert "remy_pending_automation_open" in app_js
-    assert "remy_pending_pipeline_open" in app_js
+    assert "_instantiateHomeTemplate" not in app_js
     assert "pf-node-config-btn" in css
     assert "_deleteNodeFromCanvas" in js
     assert 'deleteNodeButton?.addEventListener("pointerdown"' in js
@@ -382,7 +610,7 @@ def test_router_block_is_available_in_pipelines_and_automations():
     assert "/runs" in pipelines_js
     assert "/runs" in automations_js
     assert 'import("./pipelines.js?v=3.0")' in app_js
-    assert 'import("./automations.js?v=2.8")' in app_js
+    assert 'import("./automations.js?v=2.9")' in app_js
     assert "data-safety-report" in pipelines_js
     assert "data-safety-report" in automations_js
 

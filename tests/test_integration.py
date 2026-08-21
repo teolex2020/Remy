@@ -367,7 +367,18 @@ class TestWebSocketChatFlow:
         async def mock_stream(text):
             yield {"type": "token", "content": "Hello"}
             yield {"type": "token", "content": " world"}
-            yield {"type": "final", "text": "Hello world"}
+            yield {
+                "type": "final",
+                "text": "Hello world",
+                "token_usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                    "reported_calls": 1,
+                    "total_calls": 1,
+                    "exact": True,
+                },
+            }
 
         manager.gemini_respond_stream = mock_stream
 
@@ -386,6 +397,8 @@ class TestWebSocketChatFlow:
             # No "text" event because streamed_any=True
             msg4 = ws.receive_json()
             assert msg4["type"] == "done"
+            assert msg4["token_usage"]["total_tokens"] == 12
+            assert msg4["token_usage"]["exact"] is True
 
     def test_ws_text_no_stream_sends_text(self, ws_app):
         """No tokens yielded → falls back to text event."""
@@ -409,6 +422,29 @@ class TestWebSocketChatFlow:
 
             msg3 = ws.receive_json()
             assert msg3["type"] == "done"
+
+    def test_ws_passes_active_code_workspace_to_session(self, ws_app):
+        client = ws_app["client"]
+        manager = ws_app["manager"]
+        captured = {}
+
+        async def mock_stream(text, **kwargs):
+            captured.update(kwargs)
+            yield {"type": "final", "text": "Code inspected"}
+
+        manager.gemini_respond_stream = mock_stream
+
+        with client.websocket_connect("/api/ws/chat") as ws:
+            ws.send_json({
+                "type": "message",
+                "text": "Map the architecture",
+                "workspace_id": "ws-code123",
+            })
+            assert ws.receive_json()["type"] == "typing"
+            assert ws.receive_json()["type"] == "text"
+            assert ws.receive_json()["type"] == "done"
+
+        assert captured["workspace_id"] == "ws-code123"
 
     def test_ws_tool_events(self, ws_app):
         """Tool start/end events forwarded to client."""
@@ -463,6 +499,57 @@ class TestWebSocketChatFlow:
 
             msg = ws.receive_json()
             assert msg["type"] == "done"
+
+    def test_ws_forwards_provider_and_provisional_stream_events(self, ws_app):
+        """Provider phases and retractable draft tokens reach the browser."""
+        client = ws_app["client"]
+        manager = ws_app["manager"]
+
+        async def mock_stream(text):
+            yield {
+                "type": "provider_status",
+                "phase": "waiting_first_token",
+                "provider": "openrouter",
+                "model": "moonshotai/kimi-k3",
+                "message": "Request sent; waiting for the first token",
+            }
+            yield {"type": "provisional_token", "content": "Draft"}
+            yield {"type": "provisional_reset"}
+            yield {"type": "tool_start", "tool": "web_search"}
+            yield {"type": "tool_end", "tool": "web_search"}
+            yield {"type": "provisional_token", "content": "Final"}
+            yield {"type": "provisional_commit"}
+            yield {"type": "final", "text": "Final"}
+
+        manager.gemini_respond_stream = mock_stream
+
+        with client.websocket_connect("/api/ws/chat") as ws:
+            ws.send_json({"type": "message", "text": "research"})
+
+            messages = []
+            while True:
+                message = ws.receive_json()
+                messages.append(message)
+                if message["type"] == "done":
+                    break
+
+            assert messages[0]["type"] == "typing"
+            assert any(item["type"] == "provider_status" for item in messages), messages
+            status = next(item for item in messages if item["type"] == "provider_status")
+            assert status["provider"] == "openrouter"
+            assert status["model"] == "moonshotai/kimi-k3"
+            event_types = [item["type"] for item in messages]
+            assert event_types == [
+                "typing",
+                "provider_status",
+                "provisional_token",
+                "provisional_reset",
+                "tool_start",
+                "tool_end",
+                "provisional_token",
+                "provisional_commit",
+                "done",
+            ]
 
     def test_ws_voice_message(self, ws_app):
         """Voice message → multimodal response with speak=True."""

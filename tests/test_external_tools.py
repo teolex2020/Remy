@@ -14,11 +14,14 @@ def tools_env(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    with patch("remy.core.brain_tools.settings") as mock_settings:
+    with patch("remy.core.brain_tools.settings") as mock_settings, \
+         patch("remy.core.workspace_permissions.settings") as workspace_settings:
         mock_settings.DATA_DIR = data_dir
         mock_settings.AUTONOMY_ALLOWED_READ_PATHS = []
         mock_settings.GEMINI_API_KEY = "test-key"
         mock_settings.SUMMARY_MODEL = "test-model"
+        workspace_settings.DATA_DIR = data_dir
+        workspace_settings.AUTONOMY_ALLOWED_READ_PATHS = []
 
         with patch("remy.core.brain_tools.brain", brain):
             yield {
@@ -33,14 +36,22 @@ def tools_env(tmp_path):
 class TestReadFile:
     """Tests for read_file tool."""
 
+    def test_agent_can_list_but_not_grant_workspaces(self, tools_env):
+        from remy.core.brain_tools import execute_tool
+
+        data = json.loads(execute_tool("list_local_workspaces", {}))
+        assert data["workspaces"][0]["workspace_id"] == "data"
+        assert data["workspaces"][0]["permissions"] == ["read", "write"]
+
     def test_read_file_in_data_dir(self, tools_env):
         from remy.core.brain_tools import execute_tool
 
         # Create a test file
-        test_file = tools_env["data_dir"] / "test.txt"
+        test_file = tools_env["data_dir"] / "sandbox" / "test.txt"
+        test_file.parent.mkdir()
         test_file.write_text("Hello, World!", encoding="utf-8")
 
-        result = execute_tool("read_file", {"path": "test.txt"})
+        result = execute_tool("read_file", {"path": "sandbox/test.txt"})
         data = json.loads(result)
 
         assert "content" in data
@@ -59,7 +70,7 @@ class TestReadFile:
     def test_read_nonexistent_file(self, tools_env):
         from remy.core.brain_tools import execute_tool
 
-        result = execute_tool("read_file", {"path": "nonexistent.txt"})
+        result = execute_tool("read_file", {"path": "sandbox/nonexistent.txt"})
         data = json.loads(result)
 
         assert "error" in data
@@ -68,11 +79,12 @@ class TestReadFile:
     def test_read_file_in_allowed_path(self, tools_env):
         from remy.core.brain_tools import execute_tool
 
-        # Add an allowed path
+        # Add an explicit read-only workspace
         allowed_dir = tools_env["data_dir"].parent / "allowed"
         allowed_dir.mkdir()
         (allowed_dir / "ok.txt").write_text("Allowed content", encoding="utf-8")
-        tools_env["settings"].AUTONOMY_ALLOWED_READ_PATHS = [str(allowed_dir)]
+        from remy.core.workspace_permissions import get_workspace_manager
+        get_workspace_manager().add_grant(str(allowed_dir), permissions={"read"})
 
         result = execute_tool("read_file", {"path": str(allowed_dir / "ok.txt")})
         data = json.loads(result)
@@ -87,25 +99,25 @@ class TestWriteFile:
         from remy.core.brain_tools import execute_tool
 
         result = execute_tool("write_file", {
-            "path": "output.txt",
+            "path": "sandbox/output.txt",
             "content": "Generated content",
         })
         data = json.loads(result)
 
         assert data["written"] is True
-        assert (tools_env["data_dir"] / "output.txt").read_text() == "Generated content"
+        assert (tools_env["data_dir"] / "sandbox" / "output.txt").read_text() == "Generated content"
 
     def test_write_file_creates_subdirs(self, tools_env):
         from remy.core.brain_tools import execute_tool
 
         result = execute_tool("write_file", {
-            "path": "subdir/deep/file.txt",
+            "path": "sandbox/subdir/deep/file.txt",
             "content": "Deep file",
         })
         data = json.loads(result)
 
         assert data["written"] is True
-        assert (tools_env["data_dir"] / "subdir" / "deep" / "file.txt").exists()
+        assert (tools_env["data_dir"] / "sandbox" / "subdir" / "deep" / "file.txt").exists()
 
     def test_write_file_outside_data_dir_denied(self, tools_env):
         from remy.core.brain_tools import execute_tool
@@ -127,11 +139,13 @@ class TestListDirectory:
         from remy.core.brain_tools import execute_tool
 
         # Create some files
-        (tools_env["data_dir"] / "a.txt").write_text("a")
-        (tools_env["data_dir"] / "b.txt").write_text("b")
-        (tools_env["data_dir"] / "subdir").mkdir()
+        sandbox_dir = tools_env["data_dir"] / "sandbox"
+        sandbox_dir.mkdir()
+        (sandbox_dir / "a.txt").write_text("a")
+        (sandbox_dir / "b.txt").write_text("b")
+        (sandbox_dir / "subdir").mkdir()
 
-        result = execute_tool("list_directory", {"path": "."})
+        result = execute_tool("list_directory", {"path": "sandbox"})
         data = json.loads(result)
 
         assert "entries" in data

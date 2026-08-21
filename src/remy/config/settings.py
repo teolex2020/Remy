@@ -44,6 +44,11 @@ class Settings(BaseSettings):
 
     # ============== AURA COGNITIVE (episodic memory) ==============
     AURA_BRAIN_PATH: Path = Field(default_factory=lambda: _app_root() / "data" / "brain")
+    # Optional Bearer token for projects backed by Aura's HTTP server.  The
+    # server URL is project-specific and is never returned by the public API.
+    AURA_SERVER_API_KEY: Optional[str] = Field(default=None)
+    AURA_SERVER_TIMEOUT_SEC: float = Field(default=10.0, ge=0.1, le=120.0)
+    MICROBRAIN_MAX_OPEN: int = Field(default=8, ge=1, le=128)
 
     # ============== SPECIALIST BASE (cognitive module) ==============
     # Path to a BasePack JSON file to load on startup (e.g. security-ops-v1.json).
@@ -62,7 +67,7 @@ class Settings(BaseSettings):
     SANDBOX_DIR: Path = Field(default_factory=lambda: _app_root() / "data" / "sandbox")
     SANDBOX_TOOLS_DIR: Path = Field(default_factory=lambda: _src_root() / "sandbox" / "tools")
     AURA_WHEEL_PATH: Path = Field(
-        default_factory=lambda: _app_root() / "vendor" / "aura_memory-1.5.4-cp312-cp312-win_amd64.whl"
+        default_factory=lambda: _app_root() / "vendor" / "aura_memory-1.58.0-cp312-cp312-win_amd64.whl"
     )
 
     # ============== PROACTIVE ==============
@@ -84,6 +89,51 @@ class Settings(BaseSettings):
     # memory. It does not route by prompt keywords.
     MODEL_ROUTER_ENABLED: bool = Field(default=True)
 
+    # ============== CONTEXT COMPACTION ==============
+    # Model-aware prompt budgets. Exact model names (or ``provider:google``)
+    # can be overridden through a JSON object in MODEL_CONTEXT_WINDOWS.
+    CONTEXT_COMPACTION_ENABLED: bool = Field(default=True)
+    CONTEXT_COMPACTION_DEFAULT_WINDOW: int = Field(default=32_768, ge=1_024)
+    CONTEXT_COMPACTION_THRESHOLD_RATIO: float = Field(default=0.80, ge=0.20, le=0.95)
+    CONTEXT_COMPACTION_TARGET_RATIO: float = Field(default=0.55, ge=0.10, le=0.90)
+    CONTEXT_COMPACTION_OVERFLOW_TARGET_RATIO: float = Field(default=0.35, ge=0.05, le=0.80)
+    CONTEXT_COMPACTION_OUTPUT_RESERVE_TOKENS: int = Field(default=8_192, ge=256)
+    CONTEXT_COMPACTION_MAX_RECENT_MESSAGES: int = Field(default=32, ge=1, le=256)
+    CONTEXT_COMPACTION_MIN_RECENT_MESSAGES: int = Field(default=6, ge=1, le=64)
+    CONTEXT_COMPACTION_RECENT_RATIO: float = Field(default=0.16, ge=0.05, le=0.80)
+    CONTEXT_COMPACTION_OVERFLOW_RETRIES: int = Field(default=1, ge=0, le=2)
+    CONTEXT_TOOL_PRUNE_THRESHOLD_CHARS: int = Field(default=8_192, ge=512)
+    CONTEXT_TOOL_PRUNE_HEAD_CHARS: int = Field(default=4_096, ge=128)
+    CONTEXT_TOOL_PRUNE_TAIL_CHARS: int = Field(default=1_024, ge=64)
+    MODEL_CONTEXT_WINDOWS: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("MODEL_CONTEXT_WINDOWS", mode="before")
+    @classmethod
+    def parse_model_context_windows(cls, value):
+        if not value:
+            return {}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = {}
+                for item in value.split(","):
+                    key, separator, raw_window = item.partition("=")
+                    if separator and key.strip():
+                        parsed[key.strip()] = raw_window.strip()
+            value = parsed
+        if not isinstance(value, dict):
+            return {}
+        windows: dict[str, int] = {}
+        for model, raw_window in value.items():
+            try:
+                window = int(raw_window)
+            except (TypeError, ValueError):
+                continue
+            if window >= 1_024:
+                windows[str(model).strip().lower()] = window
+        return windows
+
     # ============== PRIVACY ==============
     # Tokenize personal data at the LLM boundary and restore it locally.
     PII_SHIELD_ENABLED: bool = Field(default=True)
@@ -91,7 +141,7 @@ class Settings(BaseSettings):
     # ============== OPENROUTER ==============
     OPENROUTER_API_KEY: Optional[str] = Field(default=None)
 
-    OLLAMA_BASE_URL: str = Field(default="http://127.0.0.1:11434")
+    LLAMA_CPP_BASE_URL: str = Field(default="http://127.0.0.1:11435/v1")
 
     @field_validator("FALLBACK_MODELS", mode="before")
     @classmethod
@@ -263,6 +313,11 @@ def _serialize_runtime_value(value):
 def _set_env_mirror(key: str, value) -> None:
     if value is None:
         os.environ.pop(key, None)
+    elif isinstance(value, (list, dict, tuple)):
+        # Pydantic settings decodes complex environment values as JSON.
+        # ``str(["x"])`` produces invalid JSON and breaks any later Settings()
+        # construction in the same process.
+        os.environ[key] = json.dumps(value, ensure_ascii=False)
     else:
         os.environ[key] = str(value)
 

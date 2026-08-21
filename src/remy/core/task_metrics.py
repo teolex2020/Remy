@@ -177,17 +177,40 @@ class TaskMetricsTracker:
     """Thread-safe per-family metrics tracker with persistence."""
 
     def __init__(self, path=None):
+        self._dynamic_scope = path is None
         if path is not None:
             from pathlib import Path
 
             self._path = Path(path) / METRICS_FILE if Path(path).is_dir() else Path(path)
         else:
-            from remy.core.meta_store import resolve_path
-
-            self._path = resolve_path(METRICS_FILE, "metrics")
+            self._path = None
         self._lock = threading.Lock()
         self._families: dict[str, FamilyMetrics] = {}
         self._last_save = 0.0
+        self._dirty = False
+        with self._lock:
+            self._activate_scope_locked()
+
+    def _activate_scope_locked(self) -> None:
+        """Load metrics owned by the currently bound MicroBrain."""
+        if self._dynamic_scope:
+            from remy.core.project_store import project_state_path
+
+            target = project_state_path("metrics", METRICS_FILE)
+            if self._path == target:
+                return
+            if self._path is not None and self._dirty:
+                self._save()
+            self._path = target
+            self._families = {}
+            self._last_save = 0.0
+            self._dirty = False
+        elif self._path is None:
+            return
+        else:
+            if getattr(self, "_fixed_scope_loaded", False):
+                return
+            self._fixed_scope_loaded = True
         self._load()
 
     def _load(self):
@@ -229,6 +252,7 @@ class TaskMetricsTracker:
 
             atomic_write(self._path, json.dumps(data, indent=2))
             self._last_save = time.time()
+            self._dirty = False
         except Exception as e:
             logger.warning("Failed to save task metrics: %s", e)
 
@@ -237,6 +261,7 @@ class TaskMetricsTracker:
         family = outcome.family if outcome.family in TASK_FAMILIES else "general"
 
         with self._lock:
+            self._activate_scope_locked()
             fm = self._families.setdefault(family, FamilyMetrics())
             fm.total_cycles += 1
             fm.total_duration_ms += outcome.duration_ms
@@ -268,6 +293,7 @@ class TaskMetricsTracker:
             if outcome.session_resumed:
                 fm.session_resumes += 1
 
+            self._dirty = True
             # Persist every 5 cycles or every 60s
             if fm.total_cycles % 5 == 0 or time.time() - self._last_save > 60:
                 self._save()
@@ -275,6 +301,7 @@ class TaskMetricsTracker:
     def get_family(self, family: str) -> dict:
         """Get summary for one task family."""
         with self._lock:
+            self._activate_scope_locked()
             fm = self._families.get(family)
             if not fm:
                 return {"family": family, "total_cycles": 0}
@@ -286,6 +313,7 @@ class TaskMetricsTracker:
     def get_all(self) -> dict:
         """Get summary for all families + totals."""
         with self._lock:
+            self._activate_scope_locked()
             result = {}
             totals = FamilyMetrics()
 
@@ -321,6 +349,7 @@ class TaskMetricsTracker:
     def flush(self):
         """Force-save to disk."""
         with self._lock:
+            self._activate_scope_locked()
             self._save()
 
 

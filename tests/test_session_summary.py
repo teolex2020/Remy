@@ -57,28 +57,27 @@ class TestGenerateSummary:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_calls_gemini_with_log(self):
-        """With log entries → calls client.models.generate_content."""
+    async def test_calls_provider_aware_llm_with_log(self):
+        """With log entries, use the configured provider-aware LLM layer."""
         from remy.core.brain_tools import generate_session_summary
 
         mock_response = MagicMock()
-        mock_response.text = "User stored family member Maria and asked about grandmother."
+        mock_response.content = "User stored family member Maria and asked about grandmother."
         mock_client = MagicMock()
-        mock_client.models.generate_content = MagicMock(return_value=mock_response)
 
         session_log = [
             {"type": "tool_call", "tool": "store_person", "args": {"full_name": "Maria"}, "result": "stored"},
             {"type": "user_text", "text": "розкажи про бабусю"},
         ]
 
-        with patch("remy.core.brain_tools.brain") as mock_brain:
+        with patch("remy.core.llm.call_llm_async", new_callable=AsyncMock, return_value=mock_response) as mock_call, \
+             patch("remy.core.brain_tools.brain") as mock_brain:
             mock_brain.store.return_value = MagicMock(id="test-id")
             result = await generate_session_summary(mock_client, session_log, "test-session")
 
         assert result == "User stored family member Maria and asked about grandmother."
-        mock_client.models.generate_content.assert_called_once()
-        call_kwargs = mock_client.models.generate_content.call_args
-        prompt = call_kwargs[1]["contents"] if "contents" in call_kwargs[1] else call_kwargs[0][0]
+        mock_call.assert_awaited_once()
+        prompt = mock_call.await_args.args[0]
         assert "Maria" in str(prompt)
 
     @pytest.mark.asyncio
@@ -87,11 +86,14 @@ class TestGenerateSummary:
         from remy.core.brain_tools import generate_session_summary
 
         mock_client = MagicMock()
-        mock_client.models.generate_content = MagicMock(side_effect=RuntimeError("API down"))
-
         session_log = [{"type": "user_text", "text": "hello"}]
 
-        result = await generate_session_summary(mock_client, session_log, "test-session")
+        with patch(
+            "remy.core.llm.call_llm_async",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("API down"),
+        ):
+            result = await generate_session_summary(mock_client, session_log, "test-session")
         assert result is None
 
     @pytest.mark.asyncio
@@ -100,13 +102,17 @@ class TestGenerateSummary:
         from remy.core.brain_tools import generate_session_summary
 
         mock_response = MagicMock()
-        mock_response.text = None
+        mock_response.content = None
         mock_client = MagicMock()
-        mock_client.models.generate_content = MagicMock(return_value=mock_response)
 
         session_log = [{"type": "user_text", "text": "hello"}]
 
-        result = await generate_session_summary(mock_client, session_log, "test-session")
+        with patch(
+            "remy.core.llm.call_llm_async",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ):
+            result = await generate_session_summary(mock_client, session_log, "test-session")
         assert result is None
 
 

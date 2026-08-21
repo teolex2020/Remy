@@ -53,6 +53,20 @@ def test_web_search_returns_candidate_discovery_on_first_call():
     assert r["sources"][0]["uri"] == "https://example.com/1"
 
 
+def test_web_search_uses_only_supported_ddgs_backends():
+    with patch("ddgs.DDGS") as mock_ddgs, \
+         patch.object(brain_tools, "_get_cached_search", return_value=None), \
+         patch.object(brain_tools, "_cache_search_result"):
+        mock_ddgs.return_value.text.return_value = _fake_ddgs_results()
+        brain_tools._execute_tool_locked(
+            "web_search", {"query": "supported backend check"}, session_id="backend-test",
+        )
+
+    backend = mock_ddgs.return_value.text.call_args.kwargs["backend"]
+    assert "startpage" not in backend.split(",")
+    assert {"duckduckgo", "brave", "google"}.issubset(set(backend.split(",")))
+
+
 def test_same_intent_retry_cap_fires_on_fourth_call():
     q = "some identical query"
     for i in range(brain_tools._SAME_INTENT_RETRY_CAP):

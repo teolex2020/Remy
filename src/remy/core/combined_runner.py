@@ -38,6 +38,7 @@ _operator_watch_task: asyncio.Task | None = None
 _autonomy_runtime = None
 _autonomy_version_override: str | None = None
 _shutdown_event: asyncio.Event | None = None
+_shutdown_loop: asyncio.AbstractEventLoop | None = None
 _autonomy_restarting: bool = False  # True during session-restart gap
 
 
@@ -182,16 +183,41 @@ def _clear_autonomy_runtime() -> None:
     _autonomy_restarting = False
 
 
+def _dispose_autonomy_runtime() -> list:
+    """Release resources owned by the active runtime before dropping it."""
+
+    runtime = _autonomy_runtime
+    dispose = runtime.get("dispose") if isinstance(runtime, dict) else getattr(runtime, "dispose", None)
+    if not callable(dispose):
+        return []
+    try:
+        reports = list(dispose() or [])
+        failures = [failure for report in reports for failure in getattr(report, "failures", ())]
+        if failures:
+            logger.warning("Plugin disposal completed with %d cleanup failure(s)", len(failures))
+        return reports
+    except Exception as exc:
+        logger.warning("Plugin runtime disposal failed: %s", exc)
+        return []
+
+
 def request_graceful_shutdown() -> bool:
     """Request the shared combined-runner shutdown path if active."""
-    global _shutdown_event
+    global _shutdown_event, _shutdown_loop
     event = _shutdown_event
     if event is None:
         return False
-    event.set()
+    loop = _shutdown_loop
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(event.set)
+    else:
+        event.set()
     return True
 
 
+def is_graceful_shutdown_requested() -> bool:
+    """Return whether the combined runner has entered its shutdown path."""
+    return bool(_shutdown_event is not None and _shutdown_event.is_set())
 def _launch_autonomy_task(
     task_name: str = "autonomous",
     *,
@@ -876,6 +902,7 @@ async def stop_autonomy():
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
 
+    _dispose_autonomy_runtime()
     _clear_autonomy_runtime()
     channel_stopped("autonomy")
 
@@ -960,7 +987,7 @@ async def run_combined(
     cleanup_fns.append(operator_watch_stop.set)
 
     # --- Signal handling for graceful shutdown ---
-    global _shutdown_event
+    global _shutdown_event, _shutdown_loop
     shutdown_event = asyncio.Event()
     _shutdown_event = shutdown_event
     fast_shutdown_requested = False
@@ -970,6 +997,7 @@ async def run_combined(
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
+    _shutdown_loop = loop
     _is_windows = False
 
     # Suppress noisy Windows ProactorEventLoop errors from subprocess transports.
@@ -1111,6 +1139,13 @@ async def run_combined(
         except Exception as e:
             logger.warning("PinchTab shutdown error: %s", e)
 
+        try:
+            from remy.core.llama_cpp_service import llama_cpp_service
+
+            await asyncio.to_thread(llama_cpp_service.stop)
+        except Exception as e:
+            logger.warning("llama.cpp shutdown error: %s", e)
+
         for task in tasks:
             if not task.done():
                 if task.get_name() == "uvicorn":
@@ -1136,9 +1171,11 @@ async def run_combined(
         if default_executor is not None:
             default_executor.shutdown(wait=False, cancel_futures=True)
 
+        _dispose_autonomy_runtime()
         _clear_autonomy_runtime()
         _autonomy_version_override = previous_version_override
         _shutdown_event = None
+        _shutdown_loop = None
 
 
 async def run_autonomy_standalone(*, version_override: str | None = None) -> None:

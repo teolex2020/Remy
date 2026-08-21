@@ -7,7 +7,7 @@ import logging
 from html import escape
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from remy.web.routes._helpers import _get_api, run_in_thread, _TIMEOUT_SLOW, _TIMEOUT_EVAL
@@ -129,15 +129,17 @@ async def toggle_autonomy():
 
 
 @router.post("/server/shutdown")
-async def shutdown_server():
+async def shutdown_server(background_tasks: BackgroundTasks):
     """Gracefully shut down the entire server (all channels)."""
     logger.info("Server shutdown requested via API")
 
     try:
         from remy.core.combined_runner import request_graceful_shutdown
 
-        if request_graceful_shutdown():
-            return {"ok": True, "message": "Server shutting down gracefully..."}
+        # Starlette runs this only after the response body has been sent, so the
+        # browser receives success before uvicorn begins shutting down.
+        background_tasks.add_task(request_graceful_shutdown)
+        return {"ok": True, "message": "Server shutting down gracefully..."}
     except Exception as e:
         logger.warning("Graceful shutdown request failed: %s", e)
 

@@ -8,6 +8,8 @@ Stored in Brain with tag "automation".
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import uuid
@@ -72,6 +74,10 @@ class AutomationSave(BaseModel):
     drawflow_data: dict | None = None
     source_template_id: str = ""
     source_template_name: str = ""
+    generated_from_candidate: str = ""
+    success_criteria: list[str] = []
+    risk: dict = {}
+    estimate: dict = {}
 
 
 class AutomationTemplateSave(BaseModel):
@@ -450,6 +456,8 @@ def _store_automation(brain, meta: dict) -> None:
 @router.get("/automations")
 async def list_automations():
     api = _get_api()
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
 
     def _q():
         with api.brain_lock:
@@ -464,7 +472,16 @@ async def list_automations():
         items.append(_record_to_automation(r))
 
     items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return {"automations": items}
+    project = get_project_store().require_project(current_project_id())
+    return {
+        "scope": {
+            "kind": "project",
+            "project_id": project.project_id,
+            "brain_id": project.brain_id,
+            "project_name": project.name,
+        },
+        "automations": items,
+    }
 
 
 @router.get("/automations/templates/list")
@@ -577,6 +594,10 @@ async def create_automation(body: AutomationSave):
         "drawflow_data":      body.drawflow_data,
         "source_template_id": body.source_template_id.strip(),
         "source_template_name": body.source_template_name.strip(),
+        "generated_from_candidate": body.generated_from_candidate.strip(),
+        "success_criteria": body.success_criteria,
+        "risk": body.risk,
+        "estimate": body.estimate,
         "cron":               cron,
         "created_at":         datetime.now().isoformat(),
         "last_run_at":        None,
@@ -733,6 +754,140 @@ def _mark_automation_run(
     return meta
 
 
+def _begin_automation_trajectory(meta: dict, run_record: dict) -> tuple[Any, str]:
+    """Start best-effort observability; automation delivery must never depend on it."""
+    definition = {
+        "steps": meta.get("steps") or [],
+        "trigger": meta.get("trigger") or {},
+        "output_destination": meta.get("output_destination") or {},
+        "drawflow_data": meta.get("drawflow_data") or {},
+    }
+    definition_hash = hashlib.sha256(
+        json.dumps(definition, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    try:
+        from remy.core.trajectory_store import get_trajectory_store
+
+        store = get_trajectory_store()
+        event_id = store.begin_execution_run(
+            scope="automation",
+            project_id=str(run_record.get("owner_project_id") or ""),
+            source_id=str(meta.get("automation_id") or ""),
+            source_name=str(meta.get("name") or "Automation"),
+            run_id=str(run_record.get("run_id") or ""),
+            attempt_id=str(run_record.get("execution_attempt_id") or ""),
+            goal={
+                "trigger": meta.get("trigger") or {},
+                "output_destination": meta.get("output_destination") or {},
+            },
+            definition_hash=definition_hash,
+            schema=definition,
+            metadata={
+                "trigger_type": (meta.get("trigger") or {}).get("type", "manual"),
+                "destination_type": (meta.get("output_destination") or {}).get("type", "chat"),
+                "step_count": len(meta.get("steps") or []),
+            },
+        )
+        if not event_id:
+            return None, ""
+        run_record.update({
+            "trajectory_run_event_id": event_id,
+            "trajectory_result_event_id": "",
+            "trajectory_session_id": (
+                f"automation:{meta.get('automation_id', '')}:{run_record.get('run_id', '')}"
+            ),
+        })
+        try:
+            from remy.core.workflow_runs import save_workflow_run
+
+            save_workflow_run(run_record)
+        except Exception:
+            logger.exception("Could not persist automation trajectory link %s", event_id)
+        store.record_execution_event(
+            parent_event_id=event_id,
+            event_kind="AUTOMATION_TRIGGER",
+            name=f"Trigger · {(meta.get('trigger') or {}).get('type', 'manual')}",
+            input_value=meta.get("trigger") or {},
+            details={"trigger_type": (meta.get("trigger") or {}).get("type", "manual")},
+        )
+        return store, event_id
+    except Exception:
+        logger.exception("Could not start trajectory for automation %s", meta.get("automation_id"))
+        return None, ""
+
+
+def _record_automation_trace(
+    store: Any,
+    parent_event_id: str,
+    trace: list[dict],
+    *,
+    output_destination: dict,
+    delivery_succeeded: bool,
+) -> None:
+    if not store or not parent_event_id:
+        return
+    delivery_recorded = False
+    try:
+        for item in trace:
+            is_delivery = str(item.get("type") or "") == "output"
+            event_kind = "AUTOMATION_DELIVERY" if is_delivery else "AUTOMATION_STEP"
+            item_status = "completed" if item.get("status") in {"ok", "completed"} else "failed"
+            store.record_execution_event(
+                parent_event_id=parent_event_id,
+                event_kind=event_kind,
+                status=item_status,
+                name=str(item.get("label") or item.get("type") or "Automation step"),
+                output_value=item.get("output", ""),
+                details={
+                    "index": item.get("index"),
+                    "step_id": item.get("id", ""),
+                    "step_type": item.get("type", ""),
+                    "retry_attempts": item.get("retry_attempts", 0),
+                    "recovered_from_error": item.get("recovered_from_error", ""),
+                },
+                error=str(item.get("error") or ""),
+            )
+            delivery_recorded = delivery_recorded or is_delivery
+        if not delivery_recorded:
+            store.record_execution_event(
+                parent_event_id=parent_event_id,
+                event_kind="AUTOMATION_DELIVERY",
+                status="completed" if delivery_succeeded else "failed",
+                name=f"Delivery · {output_destination.get('type', 'chat')}",
+                input_value=output_destination,
+                details={"destination_type": output_destination.get("type", "chat")},
+                error="" if delivery_succeeded else "Output was not delivered",
+            )
+    except Exception:
+        logger.exception("Could not append automation trajectory %s", parent_event_id)
+
+
+def _finish_automation_trajectory(
+    store: Any,
+    parent_event_id: str,
+    run_record: dict,
+    *,
+    status: str,
+    output: str = "",
+    error: str = "",
+    steps_run: int = 0,
+) -> None:
+    if not store or not parent_event_id:
+        return
+    try:
+        result_event_id = store.complete_execution_run(
+            event_id=parent_event_id,
+            status=status,
+            output=output,
+            error=error,
+            details={"steps_run": steps_run},
+        )
+        if result_event_id:
+            run_record["trajectory_result_event_id"] = result_event_id
+    except Exception:
+        logger.exception("Could not finish automation trajectory %s", parent_event_id)
+
+
 async def run_automation_record(brain, brain_lock, meta: dict) -> dict:
     automation_id = meta.get("automation_id", "")
     from remy.core.workflow_runs import finish_workflow_run, start_workflow_run
@@ -744,16 +899,46 @@ async def run_automation_record(brain, brain_lock, meta: dict) -> dict:
         input_text="",
         trigger=(meta.get("trigger") or {}).get("type", "manual"),
     )
+    trajectory_store, trajectory_event_id = _begin_automation_trajectory(meta, run_record)
     try:
-        execution = await _execute_automation(meta)
+        execution = await _execute_automation({
+            **meta,
+            "_run_attempt_id": run_record.get("execution_attempt_id", ""),
+        })
         if len(execution) == 2:
             result_output, steps_run = execution
             trace = []
         else:
             result_output, steps_run, trace = execution
+    except asyncio.CancelledError:
+        _record_automation_trace(
+            trajectory_store,
+            trajectory_event_id,
+            [],
+            output_destination=meta.get("output_destination") or {},
+            delivery_succeeded=False,
+        )
+        _finish_automation_trajectory(
+            trajectory_store,
+            trajectory_event_id,
+            run_record,
+            status="cancelled",
+            error="Automation execution was cancelled",
+        )
+        finish_workflow_run(
+            run_record,
+            status="cancelled",
+            error="Automation execution was cancelled",
+            steps_run=0,
+        )
+        raise
     except Exception as exc:
         error = str(exc) or exc.__class__.__name__
         trace = getattr(exc, "trace", [])
+        completed_steps = len([
+            item for item in trace
+            if item.get("type") != "output" and item.get("status") == "ok"
+        ])
 
         def _fail():
             with brain_lock:
@@ -761,28 +946,46 @@ async def run_automation_record(brain, brain_lock, meta: dict) -> dict:
                     brain,
                     automation_id,
                     status="error",
-                    steps_run=0,
+                    steps_run=completed_steps,
                     error=error,
                 )
 
         updated = await run_in_thread(_fail)
+        _record_automation_trace(
+            trajectory_store,
+            trajectory_event_id,
+            trace,
+            output_destination=meta.get("output_destination") or {},
+            delivery_succeeded=False,
+        )
+        _finish_automation_trajectory(
+            trajectory_store,
+            trajectory_event_id,
+            run_record,
+            status="error",
+            error=error,
+            steps_run=completed_steps,
+        )
         finish_workflow_run(
             run_record,
             status="error",
             error=error,
             trace=trace,
-            steps_run=0,
+            steps_run=completed_steps,
         )
         logger.error("Automation '%s' failed: %s", meta.get("name", automation_id), error)
         return {
             "ok": False,
             "run_id": run_record["run_id"],
-            "steps_run": 0,
+            "steps_run": completed_steps,
             "output": "",
             "error": error,
             "trace": trace,
             "enabled": updated.get("enabled", meta.get("enabled", True)),
             "disabled_reason": updated.get("disabled_reason", ""),
+            "trajectory_session_id": run_record.get("trajectory_session_id", ""),
+            "trajectory_run_event_id": run_record.get("trajectory_run_event_id", ""),
+            "trajectory_result_event_id": run_record.get("trajectory_result_event_id", ""),
         }
 
     def _ok():
@@ -797,6 +1000,21 @@ async def run_automation_record(brain, brain_lock, meta: dict) -> dict:
 
     updated = await run_in_thread(_ok)
     output, output_truncated = _clip(result_output, MAX_RUN_OUTPUT_CHARS)
+    _record_automation_trace(
+        trajectory_store,
+        trajectory_event_id,
+        trace,
+        output_destination=meta.get("output_destination") or {},
+        delivery_succeeded=True,
+    )
+    _finish_automation_trajectory(
+        trajectory_store,
+        trajectory_event_id,
+        run_record,
+        status="ok",
+        output=result_output,
+        steps_run=steps_run,
+    )
     finish_workflow_run(
         run_record,
         status="ok",
@@ -815,6 +1033,9 @@ async def run_automation_record(brain, brain_lock, meta: dict) -> dict:
         "trace": trace,
         "enabled": updated.get("enabled", meta.get("enabled", True)),
         "disabled_reason": updated.get("disabled_reason", ""),
+        "trajectory_session_id": run_record.get("trajectory_session_id", ""),
+        "trajectory_run_event_id": run_record.get("trajectory_run_event_id", ""),
+        "trajectory_result_event_id": run_record.get("trajectory_result_event_id", ""),
     }
 
 
@@ -989,10 +1210,21 @@ async def _execute_automation(meta: dict) -> tuple[str, int, list[dict]]:
     steps_run = 0
     trace: list[dict] = []
     flow_nodes = (((meta.get("drawflow_data") or {}).get("drawflow") or {}).get("Home", {}) or {}).get("data", {})
+    coordinator = None
+    run_attempt_id = str(meta.get("_run_attempt_id") or "")
+    if run_attempt_id:
+        from remy.core.run_envelope import RunCoordinator
+
+        coordinator = RunCoordinator(run_attempt_id)
 
     async def _run_step(step: dict, step_index: int, inherited_output: str | None = None) -> str:
         nonlocal last_output, steps_run
         step_id = step.get("id") or f"s{step_index}"
+        if coordinator is not None:
+            coordinator.step(
+                str(step.get("label") or step.get("type") or f"Step {step_index}"),
+                signature=str(step_id),
+            )
         source_output = last_output if inherited_output is None else inherited_output
         ctx["input"] = source_output
         ctx["prev"] = source_output

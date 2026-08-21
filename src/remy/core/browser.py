@@ -441,8 +441,13 @@ class BrowserManager:
 
     def save_screenshot(self, png_bytes: bytes) -> str:
         """Save screenshot to disk and return filename."""
-        ss_dir = Path(settings.DATA_DIR) / "browser_screenshots"
-        ss_dir.mkdir(parents=True, exist_ok=True)
+        from remy.core.project_store import project_artifact_dir
+
+        ss_dir = project_artifact_dir(
+            "browser_screenshots",
+            legacy_data_dir=settings.DATA_DIR,
+            create=True,
+        )
         filename = f"ss_{uuid.uuid4().hex[:8]}.png"
         (ss_dir / filename).write_bytes(png_bytes)
         return filename

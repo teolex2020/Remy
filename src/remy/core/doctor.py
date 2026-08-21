@@ -30,7 +30,7 @@ def check_env_file() -> dict:
     env_path = settings.BASE_DIR / ".env"
     if env_path.exists():
         return _ok(".env file", str(env_path))
-    return _fail(".env file", "Not found", "Run `remy --setup` to create it")
+    return _fail(".env file", "Not found", "Run `remy setup` to create it")
 
 
 def check_gemini_api_key() -> dict:
@@ -72,11 +72,28 @@ def check_duplicate_process() -> dict:
     current_pid = os.getpid()
     try:
         import psutil
+        own_process_ids = {
+            current_pid,
+            *(parent.pid for parent in psutil.Process(current_pid).parents()),
+        }
         remy_procs = []
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
-                cmdline = " ".join(proc.info.get("cmdline") or [])
-                if proc.info["pid"] != current_pid and "remy" in cmdline.lower():
+                args = [str(item).lower() for item in (proc.info.get("cmdline") or [])]
+                process_name = str(proc.info.get("name") or "").lower()
+                is_launcher = process_name in {"remy.exe", "remy-app.exe", "remy"}
+                is_python_module = any(
+                    args[index] == "-m" and args[index + 1] == "remy"
+                    for index in range(max(0, len(args) - 1))
+                )
+                is_python_script = process_name.startswith(("python", "pythonw")) and any(
+                    item.replace("/", "\\").endswith("\\remy\\main.py")
+                    for item in args[1:]
+                )
+                if (
+                    proc.info["pid"] not in own_process_ids
+                    and (is_launcher or is_python_module or is_python_script)
+                ):
                     remy_procs.append(proc.info["pid"])
             except Exception:
                 pass
@@ -98,10 +115,10 @@ def check_playwright() -> dict:
         import importlib
         importlib.import_module("playwright.sync_api")
     except ImportError:
-        return _fail(
+        return _warn(
             "Playwright",
-            "Not installed",
-            "Run: pip install playwright && python -m playwright install chromium"
+            "Optional browser extra is not installed",
+            'Run: pip install "remy[browser]" && python -m playwright install chromium'
         )
     try:
         from playwright.sync_api import sync_playwright
@@ -185,7 +202,7 @@ def check_data_dirs() -> dict:
         return _warn(
             "Data directories",
             f"Missing: {', '.join(missing)}",
-            "Run `remy --setup` or start remy once to auto-create them"
+            "Run `remy setup` or start remy once to auto-create them"
         )
     return _ok("Data directories", str(settings.DATA_DIR))
 

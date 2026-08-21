@@ -507,16 +507,16 @@ def _include_in_graph(record, mode: str) -> bool:
 
 
 @router.get("/graph")
-async def get_graph_data(mode: str = "user"):
+async def get_graph_data(mode: str = "user", scope: str | None = None):
     """Get knowledge graph data for visualization."""
     api = _get_api()
-    graph_mode = (mode or "user").strip().lower()
+    graph_mode = (scope or mode or "user").strip().lower()
     if graph_mode not in {"user", "full"}:
         raise HTTPException(status_code=400, detail="Invalid graph mode")
 
     def _query():
         with api.brain_lock:
-            return api.brain.list_records(min_strength=0.01)
+            return api.brain.list_records(min_strength=0.0 if graph_mode == "full" else 0.01)
 
     all_records = await run_in_thread(_query, timeout=_TIMEOUT_SLOW, error_msg="Graph data fetch timed out")
     records = [r for r in all_records if _include_in_graph(r, graph_mode)]
@@ -524,18 +524,28 @@ async def get_graph_data(mode: str = "user"):
     nodes = []
     edges = []
     seen_edges = set()
+    dangling_connections = 0
+    level_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
 
     valid_ids = {r.id for r in records}
+    connected_ids = set()
 
     for r in records:
+        metadata = getattr(r, "metadata", None) or {}
+        level = level_name(r.level) if hasattr(r, "level") else ""
+        record_type = str(metadata.get("type") or "memory")
+        level_counts[level or "UNKNOWN"] = level_counts.get(level or "UNKNOWN", 0) + 1
+        type_counts[record_type] = type_counts.get(record_type, 0) + 1
         node = {
             "id": r.id,
             "label": r.content[:60],
-            "level": level_name(r.level) if hasattr(r, "level") else "",
+            "excerpt": r.content[:600],
+            "level": level,
             "tags": list(r.tags) if r.tags else [],
             "strength": round(r.strength, 3),
+            "record_type": record_type,
         }
-        metadata = getattr(r, "metadata", None) or {}
         node["timestamp"] = (
             metadata.get("timestamp")
             or metadata.get("created_at")
@@ -551,11 +561,13 @@ async def get_graph_data(mode: str = "user"):
 
         for conn_id, weight in r.connections.items():
             if conn_id not in valid_ids:
+                dangling_connections += 1
                 continue
 
             edge_key = tuple(sorted([r.id, conn_id]))
             if edge_key not in seen_edges:
                 seen_edges.add(edge_key)
+                connected_ids.update(edge_key)
                 edges.append(
                     {
                         "source": r.id,
@@ -564,7 +576,24 @@ async def get_graph_data(mode: str = "user"):
                     }
                 )
 
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "coverage": {
+            "mode": graph_mode,
+            "minimum_strength": 0.0 if graph_mode == "full" else 0.01,
+            "records_scanned": len(all_records),
+            "records_returned": len(records),
+            "records_hidden_by_mode": len(all_records) - len(records),
+            "connected_records": len(connected_ids),
+            "isolated_records": len(valid_ids - connected_ids),
+            "edges_returned": len(edges),
+            "dangling_connections": dangling_connections,
+            "levels": level_counts,
+            "record_types": type_counts,
+            "source": "Aura memory record store",
+        },
+    }
 
 
 @router.post("/import")

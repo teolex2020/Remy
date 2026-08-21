@@ -15,7 +15,7 @@ Six core scenarios:
 """
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 from aura import Aura as CognitiveMemory
@@ -404,11 +404,8 @@ class TestSessionSummary:
         from remy.core.brain_tools import generate_session_summary
 
         mock_client = MagicMock()
-        # Mock the Gemini API response — must be MagicMock (not AsyncMock)
-        # because generate_session_summary uses asyncio.to_thread which calls synchronously
         mock_response = MagicMock()
-        mock_response.text = "User discussed family health history and grandmother's diet."
-        mock_client.models.generate_content.return_value = mock_response
+        mock_response.content = "User discussed family health history and grandmother's diet."
 
         session_log = [
             {"type": "user_text", "text": "Tell me about healthy diets"},
@@ -416,7 +413,8 @@ class TestSessionSummary:
             {"type": "user_text", "text": "My grandmother ate Mediterranean food"},
         ]
 
-        with patch("remy.core.brain_tools.brain", brain):
+        with patch("remy.core.llm.call_llm_async", new_callable=AsyncMock, return_value=mock_response), \
+             patch("remy.core.brain_tools.brain", brain):
             result = await generate_session_summary(mock_client, session_log, "test-session-1")
 
         # Summary should be stored in brain

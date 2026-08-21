@@ -66,7 +66,7 @@ def _available_models() -> tuple[str, ...]:
         for item in list_registered_models():
             name = str(item.get("name") or "").strip()
             provider = str(item.get("provider") or "").strip()
-            if bool(item.get("has_key")) or provider == "ollama":
+            if bool(item.get("has_key")) or provider == "llamacpp":
                 _add_unique(models, name)
     except Exception:
         pass

@@ -72,30 +72,56 @@ class Scheduler:
         if not brain_runtime_allows_access():
             logger.info("Skipping task check because brain shutdown is in progress.")
             return
-        try:
-            reminders = await asyncio.to_thread(_check_scheduled_tasks, brain)
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
 
-            if reminders:
-                logger.debug(f"Found {len(reminders)} due tasks.")
-                report = {
-                    "timestamp": datetime.now().isoformat(),
-                    "task_reminders": reminders,
-                }
-                await send_notifications(report, brain)
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                try:
+                    reminders = await asyncio.to_thread(
+                        _check_scheduled_tasks,
+                        brain,
+                    )
 
-        except Exception as e:
-            logger.error(f"Task check failed: {e}")
+                    if reminders:
+                        logger.debug(
+                            "Found %d due task(s) in project %s.",
+                            len(reminders),
+                            owner.project_id,
+                        )
+                        report = {
+                            "timestamp": datetime.now().isoformat(),
+                            "task_reminders": reminders,
+                            "owner_project_id": owner.project_id,
+                            "brain_id": owner.brain_id,
+                        }
+                        await send_notifications(report, brain)
+
+                except Exception as e:
+                    logger.error(
+                        "Task check failed for project %s: %s",
+                        owner.project_id,
+                        e,
+                    )
 
         # Fire any scheduled pipelines / automations that are due
         await self._run_scheduled_pipelines()
         await self._run_automations()
 
     async def _run_scheduled_pipelines(self):
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
+
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                await self._run_scheduled_pipelines_for_project(owner)
+
+    async def _run_scheduled_pipelines_for_project(self, owner):
         """Check all enabled scheduled pipelines and fire those that are due now."""
         try:
             from remy.web.routes.scheduled_pipeline_routes import _cron_is_due
             from remy.core.pipeline_runner import run_pipeline_steps
-            from remy.config.settings import settings
+            from remy.core.project_store import project_data_root
             import json
 
             now = datetime.now()
@@ -128,12 +154,48 @@ class Scheduler:
 
                 logger.info("Firing scheduled pipeline '%s' (cron=%s)", name, cron)
 
-                pipeline_path = settings.DATA_DIR / "pipelines" / f"{pipeline_id}.json"
+                pipeline_path = (
+                    project_data_root(owner.project_id)
+                    / "pipelines"
+                    / f"{pipeline_id}.json"
+                )
                 if not pipeline_path.exists():
                     logger.warning("Scheduled pipeline '%s': file not found (%s)", name, pipeline_path)
                     continue
 
+                attempt_id = ""
+                run_record = None
                 try:
+                    from remy.core.run_envelope import (
+                        RunCoordinator,
+                        RunLimits,
+                        finish_run,
+                        start_run,
+                    )
+
+                    run_record = start_run(
+                        kind="scheduled_pipeline",
+                        source_id=schedule_id,
+                        goal=input_text or name or "Scheduled pipeline",
+                        idempotency_class="side_effecting",
+                        owner_project_id=owner.project_id,
+                        brain_id=owner.brain_id,
+                        conversation_id=f"schedule:{schedule_id}",
+                        channel="scheduler",
+                        limits=RunLimits(
+                            max_turns=250,
+                            token_budget=250_000,
+                            max_parallel_workers=1,
+                        ),
+                        metadata={
+                            "schedule_id": schedule_id,
+                            "pipeline_id": pipeline_id,
+                            "name": name,
+                            "scheduled_minute": now.strftime('%Y%m%d%H%M'),
+                        },
+                    )
+                    attempt_id = run_record["attempt_id"]
+                    coordinator = RunCoordinator(attempt_id)
                     with open(pipeline_path, "r", encoding="utf-8") as f:
                         pipeline_data = json.load(f)
                     steps = pipeline_data.get("steps", [])
@@ -142,6 +204,10 @@ class Scheduler:
                     async for event in run_pipeline_steps(steps, input_text):
                         if event.get("type") == "step_done":
                             last_output = event.get("output", "")
+                            coordinator.step(
+                                str(event.get("label") or event.get("step") or "Pipeline step"),
+                                signature=str(event.get("id") or event.get("step_id") or event.get("label") or ""),
+                            )
 
                     logger.info("Scheduled pipeline '%s' finished. Output: %s…", name, last_output[:120])
 
@@ -170,15 +236,41 @@ class Scheduler:
                         except Exception as ue:
                             logger.warning("Could not update run metadata for '%s': %s", sid, ue)
 
-                    await asyncio.to_thread(_update)
+                    from remy.core.memory_write_queue import get_memory_write_queue
+                    await get_memory_write_queue().run(_update)
+                    finish_run(
+                        attempt_id,
+                        status="completed",
+                        output_ref=f"scheduled-pipeline:{schedule_id}",
+                        artifacts=[{
+                            "kind": "scheduled_pipeline_output",
+                            "ref": f"scheduled-pipeline:{schedule_id}",
+                            "preview": last_output[:500],
+                        }],
+                    )
 
                 except Exception as pe:
+                    if attempt_id:
+                        try:
+                            from remy.core.run_envelope import finish_run
+
+                            finish_run(attempt_id, status="failed", error=str(pe))
+                        except Exception:
+                            pass
                     logger.error("Scheduled pipeline '%s' failed: %s", name, pe)
 
         except Exception as e:
             logger.error("Scheduled pipelines check failed: %s", e)
 
     async def _run_automations(self):
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
+
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                await self._run_automations_for_project()
+
+    async def _run_automations_for_project(self):
         """Check all automations with schedule trigger and fire those due now."""
         try:
             from remy.web.routes.automation_routes import cron_is_due, run_automation_record
@@ -223,6 +315,14 @@ class Scheduler:
     async def _run_on_start_automations(self):
         """Fire all automations with trigger type 'on_start' once at startup."""
         await asyncio.sleep(10)  # let server fully initialize first
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
+
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                await self._run_on_start_automations_for_project()
+
+    async def _run_on_start_automations_for_project(self):
         try:
             from remy.web.routes.automation_routes import run_automation_record
             from remy.core.agent_tools import brain_lock
@@ -256,6 +356,14 @@ class Scheduler:
     async def _run_missed_automations(self):
         """Catch up simple scheduled automations missed while Remy was not running."""
         await asyncio.sleep(15)
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
+
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                await self._run_missed_automations_for_project()
+
+    async def _run_missed_automations_for_project(self):
         try:
             from remy.web.routes.automation_routes import latest_missed_scheduled_run, run_automation_record
             from remy.core.agent_tools import brain_lock
@@ -291,32 +399,56 @@ class Scheduler:
         if not brain_runtime_allows_access():
             logger.info("Skipping full background maintenance because brain shutdown is in progress.")
             return
-        try:
-            logger.info("Running full background maintenance...")
-            report = await asyncio.to_thread(run_background, brain)
+        from remy.core.microbrain import bind_project
+        from remy.core.project_store import get_project_store
 
-            if report.get("insights_found", 0) > 0 or report.get("cross_connections", 0) > 0:
-                await send_notifications(report, brain)
+        for owner in get_project_store().list_projects(include_archived=False):
+            with bind_project(owner.project_id):
+                try:
+                    logger.info(
+                        "Running full background maintenance for project %s...",
+                        owner.project_id,
+                    )
+                    report = await asyncio.to_thread(run_background, brain)
 
-            # Brain Voice V1 — proactive TCS-driven messages
-            await self._run_brain_voice()
+                    if (
+                        report.get("insights_found", 0) > 0
+                        or report.get("cross_connections", 0) > 0
+                    ):
+                        report["owner_project_id"] = owner.project_id
+                        report["brain_id"] = owner.brain_id
+                        await send_notifications(report, brain)
 
-            self._last_full_run = datetime.now()
-            logger.info("Full background maintenance complete.")
-        except Exception as e:
-            logger.error(f"Full maintenance failed: {e}")
+                    await self._run_brain_voice()
+                except Exception as e:
+                    logger.error(
+                        "Full maintenance failed for project %s: %s",
+                        owner.project_id,
+                        e,
+                    )
+        self._last_full_run = datetime.now()
+        logger.info("Full background maintenance complete.")
 
     async def _run_brain_voice(self):
         """Detect TCS-level events after maintenance and emit via event bus."""
         try:
-            from remy.config.settings import settings
             from remy.core.brain_voice import detect_and_record
             from remy.core.event_bus import event_bus
+            from remy.core.microbrain import current_project_id
+            from remy.core.project_store import get_project_store, local_brain_path
 
-            data_dir = str(settings.AURA_BRAIN_PATH)
+            owner = get_project_store().require_project(current_project_id())
+            data_dir = str(local_brain_path(owner.project_id))
             new_events = await asyncio.to_thread(detect_and_record, data_dir)
             for ev in new_events:
-                event_bus.emit("brain.voice", ev.to_dict())
+                event_bus.emit(
+                    "brain.voice",
+                    {
+                        **ev.to_dict(),
+                        "owner_project_id": owner.project_id,
+                        "brain_id": owner.brain_id,
+                    },
+                )
                 logger.info("brain.voice emitted: kind=%s severity=%s", ev.kind, ev.severity)
         except Exception as e:
             logger.warning(f"Brain voice detection failed: {e}")

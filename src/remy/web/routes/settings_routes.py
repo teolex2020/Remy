@@ -47,6 +47,21 @@ class SettingsPayload(BaseModel):
     smtp_from: str | None = None
 
 
+class WorkspaceGrantPayload(BaseModel):
+    path: str | None = None
+    name: str | None = None
+    read: bool = True
+    write: bool = False
+    execute: bool = False
+
+
+class WorkspaceUpdatePayload(BaseModel):
+    name: str | None = None
+    read: bool = True
+    write: bool = False
+    execute: bool = False
+
+
 # Known models per provider — shown in dropdown when provider has a key
 class SecretUpdatePayload(BaseModel):
     value: str | None = None
@@ -95,94 +110,41 @@ def _secret_status(settings, key: str) -> dict:
     }
 
 
-PROVIDER_MODELS = {
-    "google": [
-        ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
-        ("gemini-3-flash-preview", "Gemini 3 Flash"),
-        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-        ("gemini-2.5-pro", "Gemini 2.5 Pro"),
-        ("gemini-flash-lite-latest", "Gemini Flash Lite"),
-        ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
-    ],
-    "openai": [
-        ("gpt-4o", "GPT-4o"),
-        ("gpt-4o-mini", "GPT-4o Mini"),
-        ("o3-mini", "o3 Mini"),
-    ],
-    "anthropic": [
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-        ("claude-haiku-4-5", "Claude Haiku 4.5"),
-    ],
-    "deepseek": [
-        ("deepseek-chat", "DeepSeek Chat"),
-        ("deepseek-reasoner", "DeepSeek Reasoner"),
-    ],
-    "xai": [
-        ("grok-3-mini", "Grok 3 Mini"),
-        ("grok-3", "Grok 3"),
-    ],
-    "openrouter": [
-        # Free models (no credits needed)
-        ("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash [FREE]"),
-        ("google/gemini-2.5-pro-exp-03-25:free", "Gemini 2.5 Pro Exp [FREE]"),
-        ("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B [FREE]"),
-        ("deepseek/deepseek-r1:free", "DeepSeek R1 [FREE]"),
-        ("deepseek/deepseek-chat-v3-0324:free", "DeepSeek V3 [FREE]"),
-        ("mistralai/mistral-7b-instruct:free", "Mistral 7B [FREE]"),
-        ("qwen/qwen3-8b:free", "Qwen3 8B [FREE]"),
-        # Paid models
-        ("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5"),
-        ("openai/gpt-4o-mini", "GPT-4o Mini"),
-        ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash"),
-    ],
-}
-
-PROVIDER_LABELS = {
-    "google": "Google",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "deepseek": "DeepSeek",
-    "xai": "xAI",
-    "ollama": "Ollama",
-}
+MODEL_PROVIDERS = frozenset(
+    {"google", "openai", "anthropic", "deepseek", "xai", "openrouter", "nvidia", "llamacpp"}
+)
 
 
 @router.get("/models")
 async def list_available_models():
-    """List available models from all configured providers."""
-    from remy.core.model_registry import get_all_providers_with_keys
+    """List only explicitly registered models plus linked local GGUF models."""
+    from remy.core.model_registry import list_registered_models
 
-    models = []
-    api = _get_api()
-    providers_with_keys = get_all_providers_with_keys()
+    models = [
+        {
+            "name": str(item.get("name") or ""),
+            "provider": str(item.get("provider") or ""),
+            "label": str(item.get("name") or ""),
+        }
+        for item in list_registered_models()
+        if item.get("name") and item.get("has_key")
+    ]
+    seen = {item["name"] for item in models}
 
-    # Add known models for each provider that has a key
-    for provider, provider_models in PROVIDER_MODELS.items():
-        if provider in providers_with_keys:
-            plabel = PROVIDER_LABELS.get(provider, provider)
-            for model_name, model_label in provider_models:
-                models.append(
-                    {
-                        "name": model_name,
-                        "provider": provider,
-                        "label": f"{model_label} ({plabel})",
-                    }
-                )
-
-    # Ollama models (query local server) — async to avoid blocking the event loop
+    # Managed llama.cpp GGUF models.
     try:
-        import httpx
+        from remy.core.llama_cpp_service import llama_cpp_service
 
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{api.settings.OLLAMA_BASE_URL}/api/tags")
-        if resp.status_code == 200:
-            for m in resp.json().get("models", []):
-                name = m.get("name", "")
-                size_gb = m.get("size", 0) / (1024**3)
-                label = f"{name} (Ollama, {size_gb:.1f}GB)" if size_gb > 0.1 else f"{name} (Ollama)"
-                models.append({"name": f"ollama:{name}", "provider": "ollama", "label": label})
+        for item in llama_cpp_service.list_models():
+            name = str(item.get("name") or "")
+            if not name or name in seen:
+                continue
+            size_gb = float(item.get("size_gb") or 0)
+            label = f"{item.get('filename')} (llama.cpp, {size_gb:.1f} GB)"
+            models.append({"name": name, "provider": "llamacpp", "label": label})
+            seen.add(name)
     except Exception:
-        pass  # Ollama not running — skip
+        pass  # Local model storage is optional.
 
     return {"models": models}
 
@@ -210,7 +172,11 @@ async def get_model_registry():
 @router.put("/model-registry")
 async def register_model(payload: ModelRegistryPayload):
     """Add or update a model with its API key."""
-    from remy.core.model_registry import register_model as _register, load_registry
+    from remy.core.model_registry import load_registry, register_model as _register
+
+    provider = str(payload.provider or "").strip().lower() or None
+    if provider and provider not in MODEL_PROVIDERS:
+        raise HTTPException(status_code=422, detail=f"Unsupported model provider: {provider}")
 
     api_key = payload.api_key
     if not api_key and payload.copy_key_from:
@@ -222,7 +188,7 @@ async def register_model(payload: ModelRegistryPayload):
     _register(
         payload.model_name,
         api_key,
-        payload.provider,
+        provider,
         input_price=payload.input_price,
         output_price=payload.output_price,
     )
@@ -687,6 +653,118 @@ async def toggle_sandbox_tool(tool_name: str):
             "status": current,
             "note": f"Cannot toggle from '{current}' status.",
         }
+
+
+# ============== LOCAL WORKSPACES ==============
+
+
+def _workspace_permissions(payload: WorkspaceGrantPayload | WorkspaceUpdatePayload) -> set[str]:
+    permissions = set()
+    if payload.read:
+        permissions.add("read")
+    if payload.write:
+        permissions.add("write")
+    if payload.execute:
+        permissions.add("execute")
+    if not permissions:
+        raise HTTPException(status_code=422, detail="Select at least one permission.")
+    return permissions
+
+
+@router.get("/workspaces")
+async def list_local_workspaces():
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    return {"workspaces": get_workspace_manager().list_grants()}
+
+
+@router.get("/workspaces/audit")
+async def list_workspace_audit(limit: int = 100):
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    return {"events": get_workspace_manager().read_audit(limit)}
+
+
+@router.post("/workspaces")
+async def add_local_workspace(payload: WorkspaceGrantPayload):
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    if not payload.path:
+        raise HTTPException(status_code=422, detail="path is required")
+    try:
+        grant = get_workspace_manager().add_grant(
+            payload.path,
+            name=payload.name or "",
+            permissions=_workspace_permissions(payload),
+        )
+        return {"workspace": grant}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/workspaces/select-folder")
+async def select_local_workspace(payload: WorkspaceGrantPayload):
+    """Open the native folder chooser on the machine running Remy."""
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    def choose_folder() -> str:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except ImportError as exc:
+            raise RuntimeError("The native folder picker is unavailable. Enter the path manually.") from exc
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+            return filedialog.askdirectory(title="Choose a folder for Remy", mustexist=True) or ""
+        finally:
+            root.destroy()
+
+    try:
+        # Native picker duration is controlled by the user, not by an API
+        # operation deadline. Wait until they select a folder or cancel.
+        selected = await run_in_thread(choose_folder, timeout=None)
+        if not selected:
+            return {"cancelled": True}
+        grant = get_workspace_manager().add_grant(
+            selected,
+            name=payload.name or "",
+            permissions=_workspace_permissions(payload),
+        )
+        return {"cancelled": False, "workspace": grant}
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/workspaces/{workspace_id}")
+async def update_local_workspace(workspace_id: str, payload: WorkspaceUpdatePayload):
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    try:
+        grant = get_workspace_manager().update_grant(
+            workspace_id,
+            name=payload.name,
+            permissions=_workspace_permissions(payload),
+        )
+        return {"workspace": grant}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Workspace not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/workspaces/{workspace_id}")
+async def revoke_local_workspace(workspace_id: str):
+    from remy.core.workspace_permissions import get_workspace_manager
+
+    try:
+        return {"workspace": get_workspace_manager().revoke_grant(workspace_id), "revoked": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Workspace not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ============== PERSONA ==============

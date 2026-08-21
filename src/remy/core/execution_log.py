@@ -133,12 +133,36 @@ class ExecutionEntry:
 class ExecutionLog:
     """Append-only execution log with in-memory tail for fast queries."""
 
-    def __init__(self):
-        from remy.core.meta_store import resolve_path
+    def __init__(self, path=None):
+        from pathlib import Path
 
-        self._path = resolve_path(LOG_FILE, "metrics")
+        self._dynamic_scope = path is None
+        self._path = Path(path) if path is not None else None
         self._lock = threading.Lock()
         self._entries: list[dict] = []
+        with self._lock:
+            self._activate_scope_locked()
+
+    def _activate_scope_locked(self) -> None:
+        """Load the execution tail owned by the current MicroBrain."""
+        # Some focused tests and compatibility callers construct a lightweight
+        # instance via ``__new__`` and inject an explicit path/tail.
+        if not hasattr(self, "_dynamic_scope"):
+            return
+        if self._dynamic_scope:
+            from remy.core.project_store import project_state_path
+
+            target = project_state_path("metrics", LOG_FILE)
+            if self._path == target:
+                return
+            self._path = target
+            self._entries = []
+        elif self._path is None:
+            return
+        else:
+            if getattr(self, "_fixed_scope_loaded", False):
+                return
+            self._fixed_scope_loaded = True
         self._load_tail()
 
     def _load_tail(self):
@@ -167,6 +191,7 @@ class ExecutionLog:
         data["tool_count"] = len(data["tool_calls"])
 
         with self._lock:
+            self._activate_scope_locked()
             self._entries.append(data)
             if len(self._entries) > MAX_IN_MEMORY:
                 self._entries = self._entries[-MAX_IN_MEMORY:]
@@ -184,23 +209,27 @@ class ExecutionLog:
     def get_recent(self, limit: int = 50) -> list[dict]:
         """Get most recent entries."""
         with self._lock:
+            self._activate_scope_locked()
             return list(self._entries[-limit:])
 
     def get_by_pack(self, pack_id: str, limit: int = 20) -> list[dict]:
         """Get recent entries for a specific pack."""
         with self._lock:
+            self._activate_scope_locked()
             matched = [e for e in self._entries if e.get("pack_id") == pack_id]
             return matched[-limit:]
 
     def get_by_goal(self, goal_id: str, limit: int = 20) -> list[dict]:
         """Get recent entries for a specific goal."""
         with self._lock:
+            self._activate_scope_locked()
             matched = [e for e in self._entries if e.get("goal_id") == goal_id]
             return matched[-limit:]
 
     def get_pack_summary(self) -> dict:
         """Aggregate stats per pack from in-memory entries."""
         with self._lock:
+            self._activate_scope_locked()
             packs: dict[str, dict] = {}
             for entry in self._entries:
                 pid = entry.get("pack_id") or "unknown"
@@ -258,6 +287,7 @@ class ExecutionLog:
     def get_step_efficiency(self) -> dict:
         """Step budget utilization stats — are we burning steps or under-using them?"""
         with self._lock:
+            self._activate_scope_locked()
             by_pack: dict[str, list[float]] = {}
             for entry in self._entries:
                 budget = entry.get("step_budget", 0)

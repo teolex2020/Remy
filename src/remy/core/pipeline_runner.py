@@ -105,6 +105,21 @@ async def _run_llm_call(config: dict) -> str:
     prompt = config.get("prompt", "")
     model = config.get("model", "") or None
 
+    try:
+        from remy.core.project_agent import (
+            build_project_agent_instruction,
+            build_project_knowledge_context,
+        )
+
+        specialization = build_project_agent_instruction()
+        knowledge = build_project_knowledge_context(prompt, max_chars=2200)
+        if specialization or knowledge:
+            prompt = (
+                f"{specialization}\n{knowledge}\n\nWORKFLOW REQUEST:\n{prompt}"
+            ).strip()
+    except Exception:
+        pass
+
     from remy.core.llm import get_llm
     from remy.config.settings import settings
 
@@ -1319,7 +1334,10 @@ async def run_pipeline_steps(
             ctx["prev"] = inherited_output
             ctx[f"s{i}.output"] = inherited_output
 
-            yield {"type": "step_start", "index": i, "id": step_id, "step_type": step_type, "label": label}
+            yield {
+                "type": "step_start", "index": i, "id": step_id,
+                "step_type": step_type, "label": label, "input": inherited_output,
+            }
 
             try:
                 output = await _execute_step(step, ctx)
@@ -1355,7 +1373,11 @@ async def run_pipeline_steps(
                     branch_input = output
 
                 event_type = "step_error" if error_output else "step_done"
-                event = {"type": event_type, "index": i, "id": step_id, "step_type": step_type, "label": label}
+                event = {
+                    "type": event_type, "index": i, "id": step_id,
+                    "step_type": step_type, "label": label,
+                    "route_outputs": route_outputs,
+                }
                 if error_output:
                     event["error"] = trace_output
                 else:
@@ -1383,7 +1405,11 @@ async def run_pipeline_steps(
             except Exception as exc:
                 error_text = str(exc) or exc.__class__.__name__
                 logger.error("Step %d (%s) failed: %s", i, label, exc)
-                yield {"type": "step_error", "index": i, "id": step_id, "step_type": step_type, "label": label, "error": error_text}
+                yield {
+                    "type": "step_error", "index": i, "id": step_id,
+                    "step_type": step_type, "label": label, "error": error_text,
+                    "route_outputs": ["output_2"],
+                }
                 ctx[step_id] = {"output": ""}
                 ctx[f"s{i+1}"] = {"output": ""}
                 if step_type != "router":
@@ -1411,7 +1437,10 @@ async def run_pipeline_steps(
             step_id = step.get("id", f"s{i+1}")
             step_type = step.get("type", "step")
 
-            yield {"type": "step_start", "index": i, "id": step_id, "step_type": step_type, "label": label}
+            yield {
+                "type": "step_start", "index": i, "id": step_id,
+                "step_type": step_type, "label": label, "input": last_output,
+            }
 
             try:
                 ctx["prev"] = last_output
@@ -1429,22 +1458,40 @@ async def run_pipeline_steps(
                 ctx[f"{step_id}.output"] = output
                 ctx[f"s{i+1}.output"] = output
                 if error_output:
-                    yield {"type": "step_error", "index": i, "id": step_id, "step_type": step_type, "label": label, "error": output}
+                    yield {
+                        "type": "step_error", "index": i, "id": step_id,
+                        "step_type": step_type, "label": label, "error": output,
+                        "route_outputs": [],
+                    }
                     last_output = output
                     continue
                 if step_type == "router":
                     trace_output = f"Selected routes: {', '.join(_router_output_names(output))}"
                 elif output == STOP_TOKEN:
                     trace_output = "Stopped by filter"
-                    yield {"type": "step_done", "index": i, "id": step_id, "step_type": step_type, "label": label, "output": trace_output}
+                    yield {
+                        "type": "step_done", "index": i, "id": step_id,
+                        "step_type": step_type, "label": label, "output": trace_output,
+                        "route_outputs": [],
+                    }
                     break
                 else:
                     last_output = output
                     trace_output = output
-                yield {"type": "step_done", "index": i, "id": step_id, "step_type": step_type, "label": label, "output": trace_output}
+                yield {
+                    "type": "step_done", "index": i, "id": step_id,
+                    "step_type": step_type, "label": label, "output": trace_output,
+                    "route_outputs": (
+                        _router_output_names(output) if step_type == "router" else ["output_1"]
+                    ),
+                }
             except Exception as exc:
                 logger.error("Step %d (%s) failed: %s", i, label, exc)
-                yield {"type": "step_error", "index": i, "id": step_id, "step_type": step_type, "label": label, "error": str(exc)}
+                yield {
+                    "type": "step_error", "index": i, "id": step_id,
+                    "step_type": step_type, "label": label, "error": str(exc),
+                    "route_outputs": [],
+                }
                 ctx[step_id] = {"output": ""}
                 ctx[f"s{i+1}"] = {"output": ""}
 

@@ -13,6 +13,7 @@ def test_desktop_entry_opens_gui_without_setup_wizard():
         patch("remy.desktop_entry.load_dotenv") as load_dotenv,
         patch("remy.core.logging_config.setup_logging") as setup_logging,
         patch("remy.core.setup.ensure_directories") as ensure_directories,
+        patch("remy.optional_dependencies.require_extra") as require_extra,
         patch("remy.core.desktop_gui.DesktopGUI", return_value=gui_instance) as desktop_gui,
         patch("remy.core.setup.run_setup_wizard") as run_setup_wizard,
     ):
@@ -21,6 +22,7 @@ def test_desktop_entry_opens_gui_without_setup_wizard():
     load_dotenv.assert_called_once()
     setup_logging.assert_called_once_with(log_to_file=True)
     ensure_directories.assert_called_once()
+    require_extra.assert_called_once_with("webview", "desktop", "desktop mode")
     desktop_gui.assert_called_once()
     gui_instance.run_desktop.assert_called_once()
     run_setup_wizard.assert_not_called()

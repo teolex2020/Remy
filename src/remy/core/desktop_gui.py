@@ -41,7 +41,10 @@ logger = logging.getLogger("DesktopGUI")
 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
+    from remy.core.experiment_lab import recover_interrupted_experiments
+
     await start_scheduler()
+    recover_interrupted_experiments()
     await load_push_subscription()
     try:
         yield
@@ -80,10 +83,15 @@ ROUTE_MODULES = (
     "remy.web.routes.system_routes",
     "remy.web.routes.todos_routes",
     "remy.web.routes.glass_brain_routes",
-    "remy.web.routes.ollama_routes",
+    "remy.web.routes.llama_cpp_routes",
     "remy.web.routes.pipeline_routes",
+    "remy.web.routes.project_routes",
+    "remy.web.routes.conversation_routes",
+    "remy.web.routes.trajectory_routes",
     "remy.web.routes.scheduled_pipeline_routes",
     "remy.web.routes.automation_routes",
+    "remy.web.routes.experiment_routes",
+    "remy.web.routes.run_routes",
     "remy.web.routes.websocket",
 )
 
@@ -208,6 +216,8 @@ class DesktopGUI:
 
     def _print_banner(self, mode: str):
         from remy.core.agent_tools import brain_lock
+        from remy.core.project_store import brain_display_location
+
         with brain_lock:
             brain_count = brain.count()
         registry = get_registry()
@@ -219,7 +229,7 @@ class DesktopGUI:
             print("  ** READONLY MODE — no API key, chat disabled **")
             print("  ** Go to Settings page to configure API key **")
         print(f"Model: {settings.SUMMARY_MODEL}")
-        print(f"Brain: {settings.AURA_BRAIN_PATH} ({brain_count} records)")
+        print(f"Brain: {brain_display_location()} ({brain_count} records)")
         print(f"Tools: {tool_count}")
         print(f"URL: http://{self.host}:{self.port}")
         print("Press Ctrl+C to stop.")
@@ -275,6 +285,8 @@ class DesktopGUI:
         # Window closed — cleanup
         set_web_runtime_enabled(False)
         shutdown_pinchtab_sync()
+        from remy.core.llama_cpp_service import llama_cpp_service
+        llama_cpp_service.stop()
         logger.info("Desktop window closed, shutting down...")
 
     def run_web_only(self):
@@ -287,3 +299,5 @@ class DesktopGUI:
         finally:
             set_web_runtime_enabled(False)
             shutdown_pinchtab_sync()
+            from remy.core.llama_cpp_service import llama_cpp_service
+            llama_cpp_service.stop()

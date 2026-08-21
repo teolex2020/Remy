@@ -219,7 +219,10 @@ class TestBrainAccessInSandbox:
         b.store(content="Note about sleep quality", level=Level.DOMAIN, tags=["health"])
         b.close()
 
-        with patch("remy.core.tool_registry.settings") as mock_settings:
+        with patch("remy.core.tool_registry.settings") as mock_settings, patch(
+            "remy.core.project_store.local_brain_path",
+            return_value=brain_path,
+        ):
             mock_settings.SANDBOX_DIR = tmp_path
             mock_settings.SANDBOX_TOOLS_DIR = tmp_path / "tools"
             mock_settings.AURA_BRAIN_PATH = brain_path

@@ -11,6 +11,7 @@ import logging
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 from remy.config.settings import settings
@@ -348,9 +349,10 @@ def execute_tool(tool_path: Path, args: dict, brain_path: str | None = None) -> 
                 brain.close()
     """)
 
-    result = subprocess.run(
+    result = _run_cancellable(
         [_sandbox_python(), "-c", runner_code, json.dumps(args)],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         timeout=120,
     )
@@ -365,3 +367,29 @@ def execute_tool(tool_path: Path, args: dict, brain_path: str | None = None) -> 
         return False, data.get("error", "Unknown error")
     except (json.JSONDecodeError, KeyError):
         return False, result.stdout[:500]
+def _run_cancellable(command: list[str], *, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """Run a sandbox child with cooperative cancellation and bounded teardown."""
+    from remy.core.cancellation import OperationCancelled, check_cancelled
+
+    check_cancelled()
+    process = subprocess.Popen(command, **kwargs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            check_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    except (OperationCancelled, subprocess.TimeoutExpired):
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+        raise

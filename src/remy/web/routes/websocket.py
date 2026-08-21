@@ -566,42 +566,9 @@ def _build_system_delta_event(event: dict | None) -> dict | None:
 
 def _classify_error(error_text: str) -> dict:
     """Classify error for user-friendly message + recovery estimation."""
-    e = error_text.lower()
-    if "quota" in e or "429" in e or "resource_exhausted" in e:
-        return {
-            "message": "API rate limit reached. Please wait a moment and try again.",
-            "retryable": True,
-            "error_class": "rate_limit",
-        }
-    if "api key" in e or "401" in e or "403" in e or "permission" in e:
-        return {
-            "message": "API authentication error. Check your API key in Settings.",
-            "retryable": False,
-            "error_class": "auth",
-        }
-    if "timeout" in e or "deadline" in e:
-        return {
-            "message": "Request timed out. Try again or simplify your message.",
-            "retryable": True,
-            "error_class": "timeout",
-        }
-    if "connect" in e or "network" in e or "unreachable" in e or "getaddrinfo" in e:
-        return {
-            "message": "Network error. Check your internet connection.",
-            "retryable": True,
-            "error_class": "network",
-        }
-    if "subscriptable" in e:
-        return {
-            "message": "API response parsing error. Retrying automatically...",
-            "retryable": True,
-            "error_class": "transient",
-        }
-    return {
-        "message": "Something went wrong. Try again.",
-        "retryable": True,
-        "error_class": "unknown",
-    }
+    from remy.core.error_classification import classify_llm_error
+
+    return classify_llm_error(error_text)
 
 
 @router.websocket("/ws/chat")
@@ -614,6 +581,7 @@ async def websocket_chat(websocket: WebSocket):
     logger.info("WebSocket chat connected")
 
     _active_task: asyncio.Task | None = None
+    _active_token = None
     inbox: asyncio.Queue = asyncio.Queue()
 
     async def _receive_loop():
@@ -629,58 +597,170 @@ async def websocket_chat(websocket: WebSocket):
     receiver = asyncio.create_task(_receive_loop())
 
     async def _cancel_active():
-        nonlocal _active_task
+        nonlocal _active_task, _active_token
         if _active_task and not _active_task.done():
+            if _active_token is not None:
+                _active_token.cancel("Cancelled from the web interface")
             _active_task.cancel()
             try:
                 await _active_task
             except (asyncio.CancelledError, Exception):
                 pass
             _active_task = None
+            _active_token = None
 
-    async def _do_generation(user_text: str):
+    async def _do_generation(
+        user_text: str,
+        *,
+        model_routing_enabled: bool = False,
+        workspace_id: str | None = None,
+        team_mode: str = "off",
+    ):
         streamed_any = False
         partial_text = ""
         final_answer_text = ""
         generation_ok = False
+        terminal_status = "failed"
+        terminal_reason = ""
+        terminal_error = ""
+        token_usage: dict = {}
+        run = None
+        coordinator = None
+        from remy.core.cancellation import bind_cancellation_token
+        from remy.core.run_envelope import (
+            RunCoordinator,
+            RunLimitExceeded,
+            finish_run,
+            register_run_stop,
+            start_run,
+            unregister_run_stop,
+        )
+
         try:
-            async for event in manager.gemini_respond_stream(user_text):
-                if event["type"] == "token":
-                    await websocket.send_json({"type": "token", "content": event["content"]})
-                    partial_text += event["content"]
-                    streamed_any = True
-                elif event["type"] == "tool_start":
-                    await websocket.send_json({
-                        "type": "tool_start",
-                        "content": event["tool"],
-                        "args": event.get("args", ""),
-                    })
-                elif event["type"] == "tool_end":
-                    await websocket.send_json({
-                        "type": "tool_end",
-                        "content": event["tool"],
-                        "result": event.get("result", ""),
-                    })
-                elif event["type"] == "thinking":
-                    await websocket.send_json({
-                        "type": "thinking",
-                        "content": event.get("content", "Thinking..."),
-                    })
-                elif event["type"] == "final":
-                    final_ev_text = event.get("text", "")
-                    logger.debug(f"Final event: streamed_any={streamed_any}, text_len={len(final_ev_text)}")
-                    final_answer_text = final_ev_text or partial_text
-                    generation_ok = True
-                    if not streamed_any and final_ev_text:
-                        await websocket.send_json({"type": "text", "content": final_ev_text})
-                    if event.get("factuality"):
-                        await websocket.send_json(
-                            {
-                                "type": "factuality",
-                                "factuality": event["factuality"],
-                            }
-                        )
+            session = manager.get_or_create_session()
+            from remy.core.project_store import get_project_store
+
+            owner = get_project_store().require_project(session.project_id)
+            run = start_run(
+                kind="chat",
+                source_id=session.session_id,
+                goal=user_text,
+                owner_project_id=owner.project_id,
+                brain_id=owner.brain_id,
+                conversation_id=session.session_id,
+                channel="web",
+                idempotency_class="read_only",
+                metadata={
+                    "workspace_id": workspace_id or "",
+                    "team_mode": team_mode,
+                },
+            )
+            coordinator = RunCoordinator(run["attempt_id"])
+            register_run_stop(run["run_id"], _active_token.cancel)
+            await websocket.send_json({"type": "run_state", "run": run})
+        except Exception as run_exc:
+            logger.warning("Chat run envelope could not start: %s", run_exc)
+            run = None
+            coordinator = None
+
+        try:
+            with bind_cancellation_token(_active_token):
+                async for event in manager.gemini_respond_stream(
+                    user_text,
+                    model_routing_enabled=model_routing_enabled,
+                    workspace_id=workspace_id,
+                    team_mode=team_mode,
+                ):
+                    if event["type"] == "token":
+                        await websocket.send_json({"type": "token", "content": event["content"]})
+                        partial_text += event["content"]
+                        streamed_any = True
+                    elif event["type"] == "provisional_token":
+                        content = event.get("content", "")
+                        await websocket.send_json({"type": "provisional_token", "content": content})
+                        partial_text += content
+                        streamed_any = True
+                    elif event["type"] == "provisional_reset":
+                        await websocket.send_json({"type": "provisional_reset"})
+                        partial_text = ""
+                        streamed_any = False
+                    elif event["type"] == "provisional_commit":
+                        await websocket.send_json({"type": "provisional_commit"})
+                    elif event["type"] == "provider_status":
+                        if coordinator is not None:
+                            coordinator.heartbeat(
+                                phase=str(event.get("phase") or "working"),
+                                step=str(event.get("message") or "Model is working"),
+                            )
+                        await websocket.send_json({
+                            "type": "provider_status",
+                            "phase": event.get("phase", "working"),
+                            "model": event.get("model", ""),
+                            "provider": event.get("provider", ""),
+                            "message": event.get("message", ""),
+                        })
+                    elif event["type"] == "tool_start":
+                        if coordinator is not None:
+                            coordinator.step(
+                                f"Tool {event['tool']}",
+                                signature=f"tool:{event['tool']}:{event.get('args', '')}",
+                            )
+                        await websocket.send_json({
+                            "type": "tool_start",
+                            "content": event["tool"],
+                            "args": event.get("args", ""),
+                        })
+                    elif event["type"] == "tool_end":
+                        await websocket.send_json({
+                            "type": "tool_end",
+                            "content": event["tool"],
+                            "result": event.get("result", ""),
+                        })
+                    elif event["type"] == "thinking":
+                        await websocket.send_json({
+                            "type": "thinking",
+                            "content": event.get("content", "Thinking..."),
+                        })
+                    elif event["type"] == "team_status":
+                        await websocket.send_json(event)
+                    elif event["type"] == "final":
+                        final_ev_text = event.get("text", "")
+                        logger.debug(f"Final event: streamed_any={streamed_any}, text_len={len(final_ev_text)}")
+                        final_answer_text = final_ev_text or partial_text
+                        generation_ok = True
+                        terminal_status = "completed"
+                        token_usage = dict(event.get("token_usage") or {})
+                        if coordinator is not None:
+                            coordinator.consume_tokens(
+                                input_tokens=int(token_usage.get("input_tokens") or 0),
+                                output_tokens=int(token_usage.get("output_tokens") or 0),
+                            )
+                        if not streamed_any and final_ev_text:
+                            await websocket.send_json({"type": "text", "content": final_ev_text})
+                        if event.get("factuality"):
+                            await websocket.send_json(
+                                {
+                                    "type": "factuality",
+                                    "factuality": event["factuality"],
+                                }
+                            )
+        except RunLimitExceeded as exc:
+            terminal_status = "completed_with_limits"
+            terminal_reason = exc.reason
+            terminal_error = str(exc)
+            logger.warning("Chat run stopped by %s: %s", exc.reason, exc)
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"Run stopped safely: {exc}",
+                    "retryable": False,
+                    "error_class": "run_limit",
+                })
+            except Exception:
+                pass
         except asyncio.CancelledError:
+            terminal_status = "cancelled"
+            terminal_reason = "user_stopped"
             logger.info("Generation cancelled by user")
             try:
                 await websocket.send_json(
@@ -693,6 +773,8 @@ async def websocket_chat(websocket: WebSocket):
                 pass
             return
         except Exception as e:
+            terminal_status = "failed"
+            terminal_error = str(e)
             logger.error(f"Gemini respond error: {e}")
             err = _classify_error(str(e))
             try:
@@ -723,8 +805,59 @@ async def websocket_chat(websocket: WebSocket):
                     )
                 except Exception as shadow_exc:  # noqa: BLE001
                     logger.debug(f"shadow fold scheduling skipped: {shadow_exc}")
+                try:
+                    from remy.core.learning_review import stage_learning_review
+
+                    session = manager.get_or_create_session()
+                    await asyncio.to_thread(
+                        stage_learning_review,
+                        session_id=session.session_id,
+                        user_text=user_text,
+                        assistant_text=final_answer_text,
+                    )
+                except Exception as learning_exc:  # noqa: BLE001
+                    logger.debug("learning review staging skipped: %s", learning_exc)
+                try:
+                    from remy.core.pipeline_evolution import observe_successful_turn
+
+                    session = manager.get_or_create_session()
+                    candidate = await asyncio.to_thread(
+                        observe_successful_turn,
+                        session_id=session.session_id,
+                        user_text=user_text,
+                        session_log=list(session.session_log),
+                    )
+                    if candidate and candidate.get("status") == "draft":
+                        await websocket.send_json({
+                            "type": "pipeline_candidate",
+                            "candidate": {
+                                "candidate_id": candidate["candidate_id"],
+                                "title": candidate["title"],
+                                "occurrence_count": candidate["occurrence_count"],
+                                "risk": candidate["risk"],
+                            },
+                        })
+                except Exception as pipeline_exc:  # noqa: BLE001
+                    logger.debug("pipeline candidate staging skipped: %s", pipeline_exc)
             try:
-                await websocket.send_json({"type": "done"})
+                final_run = {}
+                if run is not None:
+                    try:
+                        final_run = finish_run(
+                            run["attempt_id"],
+                            status=terminal_status,
+                            stop_reason=terminal_reason,
+                            error=terminal_error,
+                            output_ref=(
+                                f"conversation:{run.get('conversation_id', '')}"
+                                if generation_ok else ""
+                            ),
+                        )
+                    except (KeyError, RuntimeError):
+                        final_run = run
+                    unregister_run_stop(run["run_id"])
+                    await websocket.send_json({"type": "run_state", "run": final_run})
+                await websocket.send_json({"type": "done", "token_usage": token_usage, "run": final_run if run is not None else {}})
             except Exception:
                 pass
 
@@ -778,9 +911,57 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_json({"type": "done"})
                     continue
 
+                if data.get("context_reducer_apply"):
+                    await _cancel_active()
+                    await websocket.send_json({"type": "typing"})
+                    try:
+                        from remy.core.context_reducer import apply_context_reducer
+
+                        session = manager.get_or_create_session()
+                        session.session_log.append({"type": "user_text", "text": user_text[:200]})
+                        result = await apply_context_reducer(
+                            user_text=user_text,
+                            session_log=session.session_log,
+                            history=session.history,
+                            session_id=session.session_id,
+                        )
+                        answer = str(result.get("answer") or "")
+                        report = result.get("report") or {}
+                        session.session_log.append({
+                            "type": "model_response",
+                            "text": answer[:200],
+                            "full_text": answer,
+                            "source": "context_reducer_apply",
+                        })
+                        await websocket.send_json({"type": "token", "content": answer})
+                        await websocket.send_json({"type": "llm_optimization_apply", "report": report})
+                    except Exception as e:
+                        logger.error("ContextReducer apply error: %s", e)
+                        err = _classify_error(str(e))
+                        await websocket.send_json({
+                            "type": "error",
+                            "content": err["message"],
+                            "retryable": err["retryable"],
+                            "error_class": err["error_class"],
+                        })
+                    await websocket.send_json({"type": "done"})
+                    continue
+
                 await _cancel_active()
                 await websocket.send_json({"type": "typing"})
-                _active_task = asyncio.create_task(_do_generation(user_text))
+                from remy.core.cancellation import CancellationToken
+                _active_token = CancellationToken()
+                workspace_id = str(data.get("workspace_id") or "").strip() or None
+                from remy.core.team_planner import normalize_team_mode
+
+                team_mode = normalize_team_mode(data.get("team_mode"))
+                _active_task = asyncio.create_task(
+                    _do_generation(
+                        user_text,
+                        workspace_id=workspace_id,
+                        team_mode=team_mode,
+                    )
+                )
 
             elif msg_type == "voice":
                 audio_b64 = data.get("audio", "")
@@ -936,9 +1117,19 @@ async def websocket_chat(websocket: WebSocket):
 
             elif msg_type == "new_session":
                 await _cancel_active()
-                await manager.close_session()
-                manager.get_or_create_session()
-                await websocket.send_json({"type": "session_reset"})
+                from remy.core.conversation_store import get_conversation_store
+                from remy.core.microbrain import current_project_id
+
+                project_id = current_project_id()
+                conversation = get_conversation_store(project_id).create()
+                await manager.switch_conversation(
+                    project_id,
+                    conversation.conversation_id,
+                )
+                await websocket.send_json({
+                    "type": "session_reset",
+                    "conversation": conversation.to_dict(),
+                })
 
     except WebSocketDisconnect:
         logger.info("WebSocket chat disconnected")
@@ -949,13 +1140,11 @@ async def websocket_chat(websocket: WebSocket):
         if _active_task and not _active_task.done():
             _active_task.cancel()
         try:
-            await asyncio.wait_for(manager.close_session(), timeout=10.0)
-        except asyncio.TimeoutError:
-            logger.warning("Session close timed out (10s) — skipping summary")
+            await manager.suspend_session()
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("Session close interrupted by shutdown")
+            logger.info("Session suspend interrupted by shutdown")
         except Exception as e:
-            logger.warning(f"Session close on disconnect failed: {e}")
+            logger.warning(f"Session suspend on disconnect failed: {e}")
         api.metrics_collector.ws_disconnected("chat")
 
 
@@ -970,26 +1159,63 @@ async def websocket_compare(websocket: WebSocket):
     try:
         data = await websocket.receive_json()
         user_text = (data.get("text") or "").strip()
-        models = data.get("models") or []
+        raw_models = data.get("models") or []
+        models = list(dict.fromkeys(
+            str(model or "").strip() for model in raw_models if str(model or "").strip()
+        ))[:4]
 
         if not user_text or not models:
             await websocket.send_json({"type": "error", "content": "Missing text or models."})
             return
 
+        send_lock = asyncio.Lock()
+
+        async def _send(payload: dict):
+            async with send_lock:
+                await websocket.send_json(payload)
+
         async def _stream_model(model: str):
+            streamed_any = False
+            final_text = ""
             try:
-                async for event in manager.gemini_respond_stream(user_text, model_override=model):
+                stream = (
+                    manager.compare_model_stream(user_text, model)
+                    if hasattr(manager, "compare_model_stream")
+                    else manager.gemini_respond_stream(user_text, model_override=model)
+                )
+                async for event in stream:
                     if event["type"] == "token":
-                        await websocket.send_json({"type": "token", "model": model, "content": event["content"]})
-                    elif event["type"] in ("final", "error"):
-                        pass
-                await websocket.send_json({"type": "done", "model": model})
+                        content = str(event.get("content") or "")
+                        if content:
+                            streamed_any = True
+                            await _send({
+                                "type": "token",
+                                "model": model,
+                                "content": content,
+                            })
+                    elif event["type"] == "final":
+                        final_text = str(event.get("text") or "")
+                    elif event["type"] == "error":
+                        raise RuntimeError(str(event.get("content") or "Model failed"))
+                if not streamed_any and final_text:
+                    await _send({
+                        "type": "token",
+                        "model": model,
+                        "content": final_text,
+                    })
+                if not streamed_any and not final_text:
+                    raise RuntimeError("Model completed without response text")
+                await _send({"type": "done", "model": model})
             except Exception as e:
                 logger.error(f"Compare stream error for {model}: {e}")
-                await websocket.send_json({"type": "error", "model": model, "content": str(e)})
+                await _send({
+                    "type": "error",
+                    "model": model,
+                    "content": str(e),
+                })
 
         await asyncio.gather(*[_stream_model(m) for m in models])
-        await websocket.send_json({"type": "all_done"})
+        await _send({"type": "all_done"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket compare disconnected")
@@ -1315,6 +1541,12 @@ async def websocket_runtime(websocket: WebSocket):
         async def forward_events():
             while True:
                 event = await queue.get()
+                owner_project_id = str(event.get("owner_project_id") or "")
+                if owner_project_id:
+                    from remy.core.microbrain import current_project_id
+
+                    if owner_project_id != current_project_id():
+                        continue
                 await websocket.send_json(event)
                 activity_delta = _build_activity_delta_event(event)
                 if activity_delta:

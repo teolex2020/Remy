@@ -56,6 +56,12 @@ class AutonomyLoop:
         max_consecutive_failures: int = 3,
         max_session_minutes: int = 480,
     ):
+        from remy.core.microbrain import current_project_id
+        from remy.core.project_store import get_project_store
+
+        owner = get_project_store().require_project(current_project_id())
+        self.owner_project_id = owner.project_id
+        self.brain_id = owner.brain_id
         self.chief = chief or ChiefAgent()
         self.cycle_interval_sec = cycle_interval_sec
         self.maintenance_interval = maintenance_interval_cycles
@@ -98,6 +104,13 @@ class AutonomyLoop:
     # -------------------------------------------------------------------
 
     async def start(self):
+        """Run this loop only inside the MicroBrain that created it."""
+        from remy.core.microbrain import bind_project
+
+        with bind_project(self.owner_project_id):
+            await self._start_owned()
+
+    async def _start_owned(self):
         """Start the autonomy loop."""
         if self._running:
             log.warning("Autonomy loop already running")
@@ -144,13 +157,16 @@ class AutonomyLoop:
 
     async def run_single_cycle(self) -> CycleResult | None:
         """Run exactly one cycle (for testing or manual triggers)."""
-        return await self._run_one_cycle()
+        from remy.core.microbrain import bind_project
+
+        with bind_project(self.owner_project_id):
+            return await self._run_one_cycle()
 
     # -------------------------------------------------------------------
     # Main cycle
     # -------------------------------------------------------------------
 
-    async def _run_one_cycle(self) -> CycleResult | None:
+    async def _run_one_cycle_impl(self) -> CycleResult | None:
         """Execute one full autonomy cycle."""
         self._cycle_count += 1
 
@@ -217,6 +233,38 @@ class AutonomyLoop:
     # -------------------------------------------------------------------
     # Maintenance
     # -------------------------------------------------------------------
+
+    async def _run_one_cycle(self) -> CycleResult | None:
+        """Execute a v3 cycle with the same durable lifecycle contract as v2."""
+        from remy.core.execution_ledger import get_execution_ledger
+
+        next_cycle = self._cycle_count + 1
+        ledger = get_execution_ledger()
+        attempt = ledger.claim(
+            kind="autonomy_v3_cycle",
+            job_id=f"cycle:{next_cycle}:{id(self)}",
+            idempotency_class="side_effecting",
+            owner_project_id=self.owner_project_id,
+            brain_id=self.brain_id,
+            channel="autonomous-v3",
+            metadata={"cycle": next_cycle},
+        )
+        attempt_id = attempt["attempt_id"]
+        ledger.mark_running(attempt_id)
+        try:
+            result = await self._run_one_cycle_impl()
+            ledger.finish(
+                attempt_id,
+                "completed" if result is not None else "completed_with_limits",
+                metadata={"scheduler_reason": self._last_scheduler_reason},
+            )
+            return result
+        except asyncio.CancelledError:
+            ledger.finish(attempt_id, "cancelled", error="Autonomy v3 cycle cancelled")
+            raise
+        except Exception as exc:
+            ledger.finish(attempt_id, "failed", error=str(exc))
+            raise
 
     async def _run_maintenance(self):
         """Run periodic maintenance tasks."""

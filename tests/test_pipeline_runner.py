@@ -479,9 +479,11 @@ async def test_pipeline_run_events_include_step_identity():
     assert events[1]["type"] == "step_start"
     assert events[1]["id"] == "s42"
     assert events[1]["step_type"] == "template"
+    assert events[1]["input"] == "hello"
     assert events[2]["type"] == "step_done"
     assert events[2]["id"] == "s42"
     assert events[2]["step_type"] == "template"
+    assert events[2]["route_outputs"] == ["output_1"]
 
 
 @pytest.mark.asyncio
@@ -542,6 +544,7 @@ async def test_pipeline_router_follows_selected_output_branch():
     done = [event for event in events if event["type"] == "step_done"]
     assert [event["id"] for event in done] == ["s1", "s3"]
     assert done[0]["output"] == "Selected routes: output_2"
+    assert done[0]["route_outputs"] == ["output_2"]
     assert events[-1]["output"] == "right"
 
 

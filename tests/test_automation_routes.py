@@ -344,6 +344,66 @@ async def test_run_automation_records_success(monkeypatch):
     assert stored["last_output_preview"] == "final output"
 
 
+def test_automation_run_emits_trigger_steps_delivery_and_result(monkeypatch):
+    class FakeTrajectoryStore:
+        def __init__(self):
+            self.events = []
+            self.completed = []
+
+        def begin_execution_run(self, **payload):
+            self.events.append(("begin", payload))
+            return "automation-run-event"
+
+        def record_execution_event(self, **payload):
+            self.events.append((payload["event_kind"], payload))
+            return f"event-{len(self.events)}"
+
+        def complete_execution_run(self, **payload):
+            self.completed.append(payload)
+            return "automation-result-event"
+
+    from remy.core import trajectory_store
+
+    trajectory = FakeTrajectoryStore()
+    monkeypatch.setattr(trajectory_store, "get_trajectory_store", lambda: trajectory)
+    meta = {
+        "automation_id": "auto-1",
+        "name": "Daily brief",
+        "trigger": {"type": "manual"},
+        "steps": [{"id": "s1", "type": "prompt", "label": "Summarize"}],
+        "output_destination": {"type": "chat"},
+    }
+    run_record = {
+        "run_id": "run-1",
+        "execution_attempt_id": "attempt-1",
+        "owner_project_id": "project-1",
+    }
+
+    store, event_id = automation_routes._begin_automation_trajectory(meta, run_record)
+    automation_routes._record_automation_trace(
+        store,
+        event_id,
+        [{"index": 1, "id": "s1", "type": "prompt", "label": "Summarize", "status": "ok", "output": "brief"}],
+        output_destination=meta["output_destination"],
+        delivery_succeeded=True,
+    )
+    automation_routes._finish_automation_trajectory(
+        store,
+        event_id,
+        run_record,
+        status="ok",
+        output="brief",
+        steps_run=1,
+    )
+
+    assert [kind for kind, _ in trajectory.events] == [
+        "begin", "AUTOMATION_TRIGGER", "AUTOMATION_STEP", "AUTOMATION_DELIVERY"
+    ]
+    assert trajectory.completed[0]["status"] == "ok"
+    assert run_record["trajectory_session_id"] == "automation:auto-1:run-1"
+    assert run_record["trajectory_result_event_id"] == "automation-result-event"
+
+
 @pytest.mark.asyncio
 async def test_automation_memory_report_endpoint(tmp_path, monkeypatch):
     from remy.config.settings import settings

@@ -20,8 +20,10 @@ _TIMEOUT = 12.0
 
 
 def _data_dir() -> str:
-    from remy.config.settings import settings
-    return str(settings.AURA_BRAIN_PATH)
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import local_brain_path
+
+    return str(local_brain_path(current_project_id()))
 
 
 # ── Thermal map ───────────────────────────────────────────────────────────────

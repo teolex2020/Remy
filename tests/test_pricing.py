@@ -59,10 +59,10 @@ class TestPricingRegistry:
         reg = self._make_registry(
             tmp_path,
             defaults={
-                "ollama/*": {"input_cost_per_1m_tokens": 0.0, "output_cost_per_1m_tokens": 0.0}
+                "llamacpp/*": {"input_cost_per_1m_tokens": 0.0, "output_cost_per_1m_tokens": 0.0}
             },
         )
-        assert reg.get_price("ollama/llama3") == (0.0, 0.0)
+        assert reg.get_price("llamacpp/qwen") == (0.0, 0.0)
 
     def test_unknown_model_returns_zero(self, tmp_path):
         reg = self._make_registry(
@@ -80,14 +80,14 @@ class TestPricingRegistry:
         reg = self._make_registry(
             tmp_path,
             defaults={
-                "ollama/*": {"input_cost_per_1m_tokens": 0.0, "output_cost_per_1m_tokens": 0.0},
-                "ollama/special": {
+                "llamacpp/*": {"input_cost_per_1m_tokens": 0.0, "output_cost_per_1m_tokens": 0.0},
+                "llamacpp/special": {
                     "input_cost_per_1m_tokens": 1.0,
                     "output_cost_per_1m_tokens": 2.0,
                 },
             },
         )
-        assert reg.get_price("ollama/special") == (1.0, 2.0)
+        assert reg.get_price("llamacpp/special") == (1.0, 2.0)
 
     def test_calculate_cost(self, tmp_path):
         reg = self._make_registry(

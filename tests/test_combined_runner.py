@@ -154,6 +154,26 @@ class TestRunCombined:
 
 class TestRuntimeAccessors:
 
+    def test_graceful_shutdown_request_is_thread_safe(self):
+        import remy.core.combined_runner as combined_runner
+
+        event = MagicMock()
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        original_event = combined_runner._shutdown_event
+        original_loop = combined_runner._shutdown_loop
+        try:
+            combined_runner._shutdown_event = event
+            combined_runner._shutdown_loop = loop
+
+            assert combined_runner.request_graceful_shutdown() is True
+
+            loop.call_soon_threadsafe.assert_called_once_with(event.set)
+            event.set.assert_not_called()
+        finally:
+            combined_runner._shutdown_event = original_event
+            combined_runner._shutdown_loop = original_loop
+
     @pytest.mark.asyncio
     async def test_run_autonomy_standalone_delegates_to_run_combined(self):
         import remy.core.combined_runner as combined_runner

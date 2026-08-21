@@ -4,6 +4,8 @@ Pipeline (Flow Builder) routes — save, load, delete, and run pipelines.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -17,6 +19,7 @@ from pydantic import BaseModel
 
 from remy.core.file_utils import atomic_write
 from remy.core.workflow_validation import PIPELINE_WORKFLOW_STEP_TYPES
+from remy.web.routes._helpers import run_in_thread
 
 logger = logging.getLogger("PipelineRoutes")
 router = APIRouter()
@@ -24,8 +27,9 @@ ALLOWED_PIPELINE_STEP_TYPES = PIPELINE_WORKFLOW_STEP_TYPES
 
 
 def _pipelines_dir() -> Path:
-    from remy.config.settings import settings
-    d = settings.DATA_DIR / "pipelines"
+    from remy.core.project_store import project_data_root
+
+    d = project_data_root() / "pipelines"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -102,6 +106,9 @@ def _raise_validation_errors(errors: list[str]) -> None:
 @router.get("/pipelines")
 async def list_pipelines():
     """Return all saved pipelines (id, name, description, step_count)."""
+    from remy.core.microbrain import current_project_id
+    from remy.core.project_store import get_project_store
+
     result = []
     for f in sorted(_pipelines_dir().glob("*.json")):
         try:
@@ -117,7 +124,16 @@ async def list_pipelines():
             })
         except Exception:
             pass
-    return {"pipelines": result}
+    project = get_project_store().require_project(current_project_id())
+    return {
+        "scope": {
+            "kind": "project",
+            "project_id": project.project_id,
+            "brain_id": project.brain_id,
+            "project_name": project.name,
+        },
+        "pipelines": result,
+    }
 
 
 # ── Get one ───────────────────────────────────────────────────────────────────
@@ -139,6 +155,10 @@ class PipelineSaveRequest(BaseModel):
     drawflow_data: dict | None = None  # raw Drawflow export for canvas restore
     source_template_id: str = ""
     source_template_name: str = ""
+    generated_from_candidate: str = ""
+    success_criteria: list[str] = []
+    risk: dict = {}
+    estimate: dict = {}
 
 
 class PipelineTemplateSaveRequest(BaseModel):
@@ -181,11 +201,137 @@ async def save_pipeline(body: PipelineSaveRequest):
         "drawflow_data": body.drawflow_data,
         "source_template_id": body.source_template_id.strip() or str(existing.get("source_template_id", "") or ""),
         "source_template_name": body.source_template_name.strip() or str(existing.get("source_template_name", "") or ""),
+        "generated_from_candidate": body.generated_from_candidate.strip() or str(existing.get("generated_from_candidate", "") or ""),
+        "success_criteria": body.success_criteria or list(existing.get("success_criteria", []) or []),
+        "risk": body.risk or dict(existing.get("risk", {}) or {}),
+        "estimate": body.estimate or dict(existing.get("estimate", {}) or {}),
         "created_at": existing.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
     logger.info("Saved pipeline %s (%s)", pipeline_id, data["name"])
     return data
+
+
+class PipelineCandidateDryRunRequest(BaseModel):
+    input_text: str = ""
+
+
+class PipelineCandidateDecisionRequest(BaseModel):
+    decision: str
+
+
+@router.get("/pipeline-candidates")
+async def list_pipeline_candidates(status: str = "draft", limit: int = 100):
+    from remy.core.pipeline_evolution import list_candidates
+
+    allowed = {"observing", "draft", "dry_run_passed", "approved", "activated", "rejected", "all"}
+    normalized = status.strip().lower()
+    if normalized not in allowed:
+        raise HTTPException(status_code=400, detail="Unsupported candidate status")
+    return {"items": await run_in_thread(list_candidates, status=normalized, limit=limit)}
+
+
+@router.get("/pipeline-candidates/{candidate_id}")
+async def get_pipeline_candidate(candidate_id: str):
+    from remy.core.pipeline_evolution import get_candidate
+
+    item = await run_in_thread(get_candidate, candidate_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Pipeline candidate not found")
+    return item
+
+
+def _safe_dry_run_steps(steps: list[dict]) -> list[dict]:
+    """Replace mutating workflow steps with explicit simulations."""
+    safe: list[dict] = []
+    for step in steps:
+        step_type = step.get("type", "")
+        config = step.get("config") or {}
+        mutating = step_type in {"memory_save", "file_write", "notification"}
+        mutating = mutating or (step_type == "http_request" and str(config.get("method", "GET")).upper() != "GET")
+        if mutating:
+            safe.append({
+                "id": step.get("id"),
+                "type": "template",
+                "label": f"Simulate: {step.get('label') or step_type}",
+                "config": {"text": f"[DRY RUN] Would execute {step_type} with the previous result."},
+            })
+        else:
+            safe.append(step)
+    return safe
+
+
+@router.post("/pipeline-candidates/{candidate_id}/dry-run")
+async def dry_run_pipeline_candidate(candidate_id: str, body: PipelineCandidateDryRunRequest):
+    from remy.core.pipeline_evolution import get_candidate, record_dry_run
+    from remy.core.pipeline_runner import run_pipeline_steps
+
+    item = await run_in_thread(get_candidate, candidate_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Pipeline candidate not found")
+    if item["status"] not in {"draft", "dry_run_passed"}:
+        raise HTTPException(status_code=409, detail="Candidate is not available for dry-run")
+    pipeline = item["pipeline"]
+    _raise_validation_errors(_validate_pipeline_payload(name=pipeline.get("name", ""), steps=pipeline.get("steps", [])))
+    trace: list[dict] = []
+    final_output = ""
+    errors: list[str] = []
+    async for event in run_pipeline_steps(_safe_dry_run_steps(pipeline["steps"]), body.input_text or item["source_request"]):
+        if event.get("type") in {"step_done", "step_error"}:
+            trace.append(event)
+        if event.get("type") == "step_error":
+            errors.append(str(event.get("error") or "Step failed"))
+        if event.get("type") == "done":
+            final_output = str(event.get("output") or "")
+    result = {
+        "passed": not errors and bool(final_output.strip()),
+        "output_preview": final_output[:2000],
+        "errors": errors,
+        "trace": trace,
+        "side_effects_simulated": True,
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    updated = await run_in_thread(record_dry_run, candidate_id, result, passed=result["passed"])
+    return {"candidate": updated, "dry_run": result}
+
+
+@router.post("/pipeline-candidates/{candidate_id}/decision")
+async def decide_pipeline_candidate(candidate_id: str, body: PipelineCandidateDecisionRequest):
+    from remy.core.pipeline_evolution import decide_candidate, get_candidate
+
+    decision = body.decision.strip().lower()
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="decision must be approve or reject")
+    item = await run_in_thread(get_candidate, candidate_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Pipeline candidate not found")
+    if item["status"] not in {"draft", "dry_run_passed"}:
+        raise HTTPException(status_code=409, detail="Candidate has already been decided")
+    if decision == "reject":
+        return await run_in_thread(decide_candidate, candidate_id, status="rejected")
+    if item["status"] != "dry_run_passed":
+        raise HTTPException(status_code=409, detail="A successful dry-run is required before approval")
+    pipeline = item["pipeline"]
+    saved = await save_pipeline(PipelineSaveRequest(
+        name=pipeline["name"], description=pipeline.get("description", ""), steps=pipeline["steps"],
+        generated_from_candidate=candidate_id, success_criteria=item["success_criteria"],
+        risk=item["risk"], estimate=item["estimate"],
+    ))
+    automation_id = ""
+    if item["trigger"].get("type") == "schedule":
+        from remy.web.routes.automation_routes import AutomationSave, create_automation
+
+        created = await create_automation(AutomationSave(
+            name=pipeline["name"], description=pipeline.get("description", ""), enabled=True,
+            trigger=item["trigger"], steps=pipeline["steps"], output_destination={"type": "chat"},
+            generated_from_candidate=candidate_id, success_criteria=item["success_criteria"],
+            risk=item["risk"], estimate=item["estimate"],
+        ))
+        automation_id = created.get("automation_id", "")
+    return await run_in_thread(
+        decide_candidate, candidate_id, status="activated",
+        pipeline_id=saved["id"], automation_id=automation_id,
+    )
 
 
 # ── Delete ────────────────────────────────────────────────────────────────────
@@ -206,13 +352,39 @@ async def delete_pipeline(pipeline_id: str):
 class PipelineRunRequest(BaseModel):
     pipeline_id: str
     input_text: str = ""
+    conversation_id: str = ""
+
+
+def _pipeline_definition_hash(pipeline: dict[str, Any]) -> str:
+    definition = {
+        "steps": pipeline.get("steps") or [],
+        "drawflow_data": pipeline.get("drawflow_data"),
+    }
+    encoded = json.dumps(
+        definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 @router.post("/pipelines/run")
 async def run_pipeline(body: PipelineRunRequest):
     """Execute a pipeline. Returns SSE stream of step results."""
+    from remy.core.microbrain import bind_project, current_project_id
+
+    owner_project_id = current_project_id()
     _guard_id(body.pipeline_id)
     pipeline = _load_pipeline(body.pipeline_id)
+    conversation_id = str(body.conversation_id or "").strip()
+    conversation_record = None
+    if conversation_id:
+        from remy.core.conversation_store import get_conversation_store
+
+        try:
+            conversation_record = get_conversation_store(owner_project_id).require(
+                conversation_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Conversation not found") from exc
     _raise_validation_errors(_validate_pipeline_payload(
         name=pipeline.get("name", ""),
         steps=pipeline.get("steps", []),
@@ -221,7 +393,11 @@ async def run_pipeline(body: PipelineRunRequest):
 
     async def _stream():
         from remy.core.pipeline_runner import run_pipeline_steps
-        from remy.core.workflow_runs import finish_workflow_run, start_workflow_run
+        from remy.core.workflow_runs import (
+            finish_workflow_run,
+            start_workflow_run,
+            update_workflow_run_progress,
+        )
 
         run_record = start_workflow_run(
             kind="pipeline",
@@ -229,41 +405,235 @@ async def run_pipeline(body: PipelineRunRequest):
             workflow_name=pipeline.get("name", ""),
             input_text=body.input_text,
             trigger="manual",
+            session_id=conversation_id,
+            channel="chat" if conversation_id else "pipeline",
         )
         trace: list[dict] = []
         steps_run = 0
         final_output = ""
-        yield f"data: {json.dumps({'type': 'run_started', 'run_id': run_record['run_id']}, ensure_ascii=False)}\n\n"
+        trajectory_store = None
+        trajectory_turn_started = False
+        trajectory_run_event_id = ""
+        trajectory_step_events: dict[int, str] = {}
+
+        def _trajectory_call(method_name: str, **kwargs):
+            if trajectory_store is None:
+                return ""
+            try:
+                return getattr(trajectory_store, method_name)(**kwargs)
+            except Exception:
+                logger.exception(
+                    "Pipeline trajectory telemetry failed: %s (%s)",
+                    method_name,
+                    run_record.get("run_id", ""),
+                )
+                return ""
+
+        def _append_pipeline_transcript(role: str, content: str) -> None:
+            if not conversation_record or not content:
+                return
+            try:
+                from remy.core.transcript_store import get_transcript_store
+
+                get_transcript_store().append(
+                    session_id=conversation_id,
+                    owner_project_id=owner_project_id,
+                    brain_id=conversation_record.brain_id,
+                    role=role,
+                    content=str(content),
+                    metadata={
+                        "project_id": owner_project_id,
+                        "source": "pipeline-chat",
+                        "pipeline_id": body.pipeline_id,
+                        "pipeline_name": pipeline.get("name", ""),
+                        "run_id": run_record.get("run_id", ""),
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Could not append pipeline transcript (%s)",
+                    run_record.get("run_id", ""),
+                )
+
+        if conversation_id:
+            from remy.core.conversation_store import get_conversation_store
+            from remy.core.trajectory_store import get_trajectory_store
+
+            try:
+                conversations = get_conversation_store(owner_project_id)
+                conversations.touch_from_user_message(conversation_id, body.input_text)
+                trajectory_store = get_trajectory_store()
+                trajectory_store.begin_turn(
+                    session_id=conversation_id,
+                    project_id=owner_project_id,
+                    content=body.input_text,
+                    source={
+                        "kind": "user",
+                        "channel": "pipeline-chat",
+                        "trust_tier": "user",
+                    },
+                    metadata={
+                        "pipeline_id": body.pipeline_id,
+                        "pipeline_name": pipeline.get("name", ""),
+                    },
+                )
+                trajectory_turn_started = True
+                trajectory_run_event_id = _trajectory_call(
+                    "begin_pipeline_run",
+                    project_id=owner_project_id,
+                    session_id=conversation_id,
+                    pipeline_id=body.pipeline_id,
+                    pipeline_name=pipeline.get("name", ""),
+                    run_id=run_record["run_id"],
+                    attempt_id=run_record.get("execution_attempt_id", ""),
+                    input_value=body.input_text,
+                    definition_hash=_pipeline_definition_hash(pipeline),
+                    steps=pipeline.get("steps") or [],
+                    trigger="manual-chat",
+                )
+            except Exception:
+                logger.exception(
+                    "Could not initialize pipeline trajectory (%s)",
+                    run_record.get("run_id", ""),
+                )
+                trajectory_store = None
+                trajectory_turn_started = False
+
+            _append_pipeline_transcript("user", body.input_text)
+
+        yield f"data: {json.dumps({'type': 'run_started', 'run_id': run_record['run_id'], 'run': run_record.get('run_envelope', {}), 'conversation_id': conversation_id, 'trajectory_event_id': trajectory_run_event_id}, ensure_ascii=False)}\n\n"
         try:
             async for event in run_pipeline_steps(pipeline["steps"], body.input_text):
-                if event.get("type") == "step_done":
+                event_type = str(event.get("type") or "")
+                event_index = int(event.get("index") or 0)
+                if event_type == "step_start" and trajectory_run_event_id:
+                    trajectory_step_events[event_index] = _trajectory_call(
+                        "begin_pipeline_step",
+                        parent_event_id=trajectory_run_event_id,
+                        step_id=str(event.get("id") or ""),
+                        step_type=str(event.get("step_type") or "step"),
+                        label=str(event.get("label") or ""),
+                        index=event_index,
+                        input_value=event.get("input"),
+                    )
+                elif event_type == "step_done":
                     steps_run += 1
                     trace.append(_pipeline_trace_item(event, "ok"))
-                elif event.get("type") == "step_error":
+                    step_event_id = trajectory_step_events.get(event_index, "")
+                    _trajectory_call(
+                        "complete_pipeline_step",
+                        event_id=step_event_id,
+                        output=event.get("output"),
+                        route_outputs=event.get("route_outputs") or [],
+                    )
+                    route_outputs = list(event.get("route_outputs") or [])
+                    if step_event_id and (
+                        str(event.get("step_type") or "") == "router"
+                        or route_outputs != ["output_1"]
+                    ):
+                        _trajectory_call(
+                            "record_pipeline_route",
+                            step_event_id=step_event_id,
+                            selected_outputs=route_outputs,
+                        )
+                    envelope = update_workflow_run_progress(
+                        run_record,
+                        step=str(event.get("label") or event.get("step") or f"Step {steps_run}"),
+                        signature=str(event.get("id") or event.get("step_id") or event.get("label") or ""),
+                    )
+                    yield f"data: {json.dumps({'type': 'run_state', 'run': envelope}, ensure_ascii=False)}\n\n"
+                elif event_type == "step_error":
                     trace.append(_pipeline_trace_item(event, "error"))
-                elif event.get("type") == "done":
+                    step_event_id = trajectory_step_events.get(event_index, "")
+                    _trajectory_call(
+                        "complete_pipeline_step",
+                        event_id=step_event_id,
+                        error=str(event.get("error") or "Pipeline step failed"),
+                        route_outputs=event.get("route_outputs") or [],
+                    )
+                    route_outputs = list(event.get("route_outputs") or [])
+                    if step_event_id and route_outputs:
+                        _trajectory_call(
+                            "record_pipeline_route",
+                            step_event_id=step_event_id,
+                            selected_outputs=route_outputs,
+                        )
+                elif event_type == "done":
                     final_output = event.get("output", "") or ""
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            finish_workflow_run(
+            finished_record = finish_workflow_run(
                 run_record,
                 status="ok",
                 output=final_output,
                 trace=trace,
                 steps_run=steps_run,
             )
+            trajectory_result_event_id = _trajectory_call(
+                "complete_pipeline_run",
+                event_id=trajectory_run_event_id,
+                status="completed",
+                output=final_output,
+                steps_run=len(trace),
+            )
+            if trajectory_store is not None and trajectory_turn_started:
+                _trajectory_call("finish_turn", session_id=conversation_id)
+            _append_pipeline_transcript("assistant", final_output)
+            yield f"data: {json.dumps({'type': 'run_state', 'run': finished_record.get('run_envelope', {})}, ensure_ascii=False)}\n\n"
+            if trajectory_run_event_id:
+                yield f"data: {json.dumps({'type': 'trajectory_link', 'conversation_id': conversation_id, 'event_id': trajectory_result_event_id or trajectory_run_event_id, 'run_event_id': trajectory_run_event_id}, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            finish_workflow_run(
+                run_record,
+                status="cancelled",
+                error="Pipeline execution was cancelled",
+                trace=trace,
+                steps_run=steps_run,
+            )
+            _trajectory_call(
+                "complete_pipeline_run",
+                event_id=trajectory_run_event_id,
+                status="cancelled",
+                error="Pipeline execution was cancelled",
+                steps_run=len(trace),
+            )
+            if trajectory_store is not None and trajectory_turn_started:
+                _trajectory_call(
+                    "finish_turn",
+                    session_id=conversation_id,
+                    error="Pipeline execution was cancelled",
+                )
+            raise
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
-            finish_workflow_run(
+            failed_record = finish_workflow_run(
                 run_record,
                 status="error",
                 error=error,
                 trace=trace,
                 steps_run=steps_run,
             )
+            trajectory_result_event_id = _trajectory_call(
+                "complete_pipeline_run",
+                event_id=trajectory_run_event_id,
+                status="failed",
+                error=error,
+                steps_run=len(trace),
+            )
+            if trajectory_store is not None and trajectory_turn_started:
+                _trajectory_call("finish_turn", session_id=conversation_id, error=error)
+            _append_pipeline_transcript("assistant", f"[Pipeline error: {error}]")
+            yield f"data: {json.dumps({'type': 'run_state', 'run': failed_record.get('run_envelope', {})}, ensure_ascii=False)}\n\n"
+            if trajectory_run_event_id:
+                yield f"data: {json.dumps({'type': 'trajectory_link', 'conversation_id': conversation_id, 'event_id': trajectory_result_event_id or trajectory_run_event_id, 'run_event_id': trajectory_run_event_id}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'error', 'error': error}, ensure_ascii=False)}\n\n"
 
+    async def _project_stream():
+        with bind_project(owner_project_id):
+            async for event in _stream():
+                yield event
+
     return StreamingResponse(
-        _stream(),
+        _project_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

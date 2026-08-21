@@ -57,6 +57,7 @@ class IntegrationGateway:
         plugin = self.registry.get(plugin_id)
         if plugin is None:
             return GatewayOutcome(IntegrationDecision.BLOCKED, reason=f"Unknown plugin: {plugin_id}")
+        ctx = self.registry.bind_execution_context(plugin_id, ctx)
         if not plugin.supports(request.action):
             return GatewayOutcome(IntegrationDecision.BLOCKED, reason=f"{plugin_id} does not support {request.action}")
 

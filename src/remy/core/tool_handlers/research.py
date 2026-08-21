@@ -156,6 +156,13 @@ def get_active_research_projects() -> list[dict]:
                 "queries_total": len(meta.get("query_plan", [])),
                 "queries_done": meta.get("queries_done", 0),
                 "findings_count": meta.get("findings_count", 0),
+                "job_state": meta.get("job_state", "queued"),
+                "current_query": meta.get("current_query", ""),
+                "last_error": meta.get("last_error", ""),
+                "worker_heartbeat": meta.get("worker_heartbeat", ""),
+                "pause_requested": bool(meta.get("pause_requested")),
+                "durable_checkpoint": meta.get("durable_checkpoint", {}),
+                "checkpoint_history": meta.get("checkpoint_history", []),
             }
         )
     return projects
@@ -227,7 +234,10 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
         result = call_llm(plan_prompt, purpose="research_plan")
         raw = result.content
         if isinstance(raw, list):
-            raw = " ".join(str(c) for c in raw)
+            raw = " ".join(
+                str(c.get("text") or "") if isinstance(c, dict) else str(getattr(c, "text", c))
+                for c in raw
+            )
         raw = str(raw).strip()
 
         if raw.startswith("```"):
@@ -303,8 +313,30 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
                     "source_domains": source_domains,
                     "citation_required": citation_required,
                     "status": "researching",
+                    "job_version": 1,
+                    "job_state": "queued",
+                    "pause_requested": False,
+                    "durable_checkpoint": {
+                        "node": "query_queue",
+                        "status": "queued",
+                        "detail": "Research plan committed and waiting for the worker.",
+                        "query_index": 0,
+                        "queries_done": 0,
+                        "findings_count": 0,
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    "checkpoint_history": [],
+                    "session_id": session_id or f"research:{project_id}",
+                    "channel": channel or "desktop",
+                    "delivery_target": channel or "web",
+                    "context": context,
                     "query_plan": query_plan,
                     "queries_done": 0,
+                    "next_query_index": 0,
+                    "queries_succeeded": 0,
+                    "queries_failed": 0,
+                    "query_attempts": {},
+                    "receipts": [{"at": datetime.now().isoformat(), "event": "queued"}],
                     "findings_count": 0,
                     "finding_ids": [],
                     "started_at": datetime.now().isoformat(),
@@ -315,6 +347,13 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
                 tags=[_RESEARCH_PROJECT_TAG, topic_slug],
             ),
         )
+
+    try:
+        from remy.core.research_supervisor import wake_research_supervisor
+
+        worker_registered = wake_research_supervisor()
+    except Exception:
+        worker_registered = False
 
     return json.dumps(
         {
@@ -329,6 +368,9 @@ def _start_research(args: dict, session_id: str | None = None, channel: str | No
             "citation_required": citation_required,
             "query_plan": query_plan,
             "queries_total": len(query_plan),
+            "job_state": "queued",
+            "worker_registered": worker_registered,
+            "delivery_target": channel or "web",
         },
         ensure_ascii=False,
     )
@@ -564,7 +606,10 @@ def _complete_research(
         result = call_llm(synth_prompt, purpose="research_synthesis")
         raw = result.content
         if isinstance(raw, list):
-            raw = " ".join(str(c) for c in raw)
+            raw = " ".join(
+                str(c.get("text") or "") if isinstance(c, dict) else str(getattr(c, "text", c))
+                for c in raw
+            )
         report = str(raw).strip()
     except Exception as e:
         logger.warning("Research synthesis failed: %s", e)

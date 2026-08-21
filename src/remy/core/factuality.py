@@ -58,7 +58,13 @@ _CURRENT_RE = re.compile(
     re.IGNORECASE,
 )
 _OBSERVED_RE = re.compile(
-    r"\b(i\s+(?:just\s+)?(?:checked|reviewed|looked at|verified|confirmed|inspected|found))\b",
+    r"(?:"
+    r"\b(i\s+(?:just\s+)?(?:checked|reviewed|looked at|verified|confirmed|inspected|found|opened|read))\b"
+    r"|\b(я\s+(?:щойно\s+)?(?:переглянув(?:ла)?|перевірив(?:ла)?|відкрив(?:ла)?|"
+    r"прочитав(?:ла)?|побачив(?:ла)?|бачу|знайшов(?:ла)?|проаналізував(?:ла)?))\b"
+    r"|\b(я\s+(?:только\s+)?(?:посмотрел(?:а)?|проверил(?:а)?|открыл(?:а)?|"
+    r"прочитал(?:а)?|увидел(?:а)?|вижу|наш[её]л|проанализировал(?:а)?))\b"
+    r")",
     re.IGNORECASE,
 )
 _MEMORY_RE = re.compile(
@@ -113,7 +119,7 @@ _UNGROUNDED_ANSWER_NOTE = (
     "Treat it as an unverified draft, not as fact, until I attach source, tool, memory, or calculation evidence."
 )
 _RECALL_ID_RE = re.compile(r"\[id:([^\]]+)\]")
-_TOKEN_RE = re.compile(r"[a-zA-Zа-яА-ЯіїєґІЇЄҐ0-9]{3,}")
+_TOKEN_RE = re.compile(r"[^\W_]{3,}", re.UNICODE)
 
 
 @dataclass
@@ -165,6 +171,45 @@ class ActionClaimViolation:
     zero_action_tools: bool
 
 
+def _parse_tool_result(entry: dict) -> dict | None:
+    raw = entry.get("result_full") or entry.get("result")
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_grounded_external_tool_result(entry: dict) -> bool:
+    """Require observed content, not merely a non-error tool result string."""
+    tool = str(entry.get("tool") or "")
+    payload = _parse_tool_result(entry)
+    if not payload or payload.get("error"):
+        return False
+
+    if tool in {"browse_page", "browser_act"}:
+        if payload.get("verified") is not True:
+            return False
+        evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+        page_text = str(payload.get("page_text") or evidence.get("page_text_snippet") or "")
+        return len(page_text.strip()) >= 40
+    if tool == "extract_content":
+        return len(str(payload.get("content") or "").strip()) >= 10
+    if tool == "http_get":
+        try:
+            status = int(payload.get("status") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        return 200 <= status < 400 and len(str(payload.get("body") or "").strip()) >= 20
+    if tool == "fetch_url":
+        return len(str(payload.get("content") or payload.get("body") or "").strip()) >= 10
+    return False
+
+
 def _has_external_evidence(session_log: list) -> bool:
     for entry in session_log or []:
         if not isinstance(entry, dict):
@@ -172,8 +217,7 @@ def _has_external_evidence(session_log: list) -> bool:
         if entry.get("type") != "tool_call":
             continue
         if entry.get("tool") in _EXTERNAL_EVIDENCE_TOOLS:
-            result = str(entry.get("result_full") or entry.get("result", "") or "")
-            if result and "error" not in result[:120].lower():
+            if _is_grounded_external_tool_result(entry):
                 return True
     return False
 
@@ -416,10 +460,16 @@ def _dedupe_source_notes(response_text: str) -> str:
     return cleaned + "\n\n" + _SOURCE_NOTE_TEXT
 
 
-def _rewrite_unsupported_observed_claims(response_text: str) -> str:
+def _rewrite_unsupported_observed_claims(response_text: str, *, locale: str = "en") -> str:
     stripped = response_text.strip()
     if _MEMORY_DOWNGRADE_TEXT in stripped:
         return stripped
+    if str(locale).lower().startswith("uk"):
+        return (
+            "Я не маю підтвердження, що сторінку було успішно прочитано в цьому ході. "
+            "Не буду описувати її вміст навмання; потрібно повторити читання через "
+            "browse_page або extract_content і отримати фактичний текст сторінки."
+        )
     return _MEMORY_DOWNGRADE_TEXT
 
 
@@ -579,7 +629,7 @@ def enforce_factuality(
     )
 
     if report.unsupported_observed_claims > 0:
-        corrected = _rewrite_unsupported_observed_claims(corrected)
+        corrected = _rewrite_unsupported_observed_claims(corrected, locale=locale)
 
     if report.unverified_current_claims > 0 and not report.had_external_evidence:
         corrected = _rewrite_unverified_current_claims(corrected)
