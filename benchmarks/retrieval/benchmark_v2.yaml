@@ -1,0 +1,348 @@
+# Remy Search Quality Benchmark v2
+#
+# Snapshot cases are deliberately synthetic but realistic. They exercise the
+# production SearchGateway with fixed provider responses, so ranking changes
+# are reproducible in CI. `run_quality_benchmark.py --live` reuses the queries
+# for a non-gating internet health report.
+
+version: 2
+runner_schema: 2
+
+defaults:
+  max_results: 10
+  thresholds:
+    min_recall_at_10: 0.80
+    min_ndcg_at_10: 0.75
+    min_mrr: 0.50
+    min_independent_domains: 2
+    require_target_domain: true
+    max_duplicate_rate: 0.0
+
+regression_tolerances:
+  recall_at_10: 0.03
+  ndcg_at_10: 0.03
+  mrr: 0.05
+  target_domain_hit_rate: 0.03
+  independent_domain_rate: 0.05
+  duplicate_rate: 0.02
+
+cases:
+  - id: q01_python_taskgroup
+    category: official_docs
+    language: en
+    query: "python asyncio TaskGroup exception handling"
+    expected_domains: [docs.python.org]
+    providers:
+      - name: snapshot:duckduckgo
+        results:
+          - {title: "Coroutines and Tasks — Task Groups", href: "https://docs.python.org/3/library/asyncio-task.html#task-groups", body: "TaskGroup exception handling and cancellation semantics."}
+          - {title: "Asyncio TaskGroup discussion", href: "https://discuss.python.org/t/asyncio-taskgroup/", body: "Community discussion of exception handling."}
+          - {title: "10 Best Python Asyncio Tricks 2026", href: "https://content-farm.test/top-10-python-asyncio", body: "A list of tricks."}
+      - name: snapshot:brave
+        results:
+          - {title: "Python TaskGroup official documentation", url: "https://docs.python.org/3/library/asyncio-task.html?utm_source=search#task-groups", description: "Official reference for TaskGroup exceptions."}
+          - {title: "Structured concurrency with asyncio", url: "https://stackoverflow.com/questions/75250788/python-asyncio-taskgroup", description: "TaskGroup error handling example."}
+    judgments:
+      "https://docs.python.org/3/library/asyncio-task.html": 3
+      "https://discuss.python.org/t/asyncio-taskgroup": 2
+      "https://stackoverflow.com/questions/75250788/python-asyncio-taskgroup": 1
+
+  - id: q02_rust_result
+    category: official_docs
+    language: en
+    query: "rust Result error handling question mark operator"
+    expected_domains: [doc.rust-lang.org]
+    providers:
+      - name: snapshot:metasearch
+        results:
+          - {title: "Recoverable Errors with Result", href: "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html", body: "Result and the question mark operator for propagating errors."}
+          - {title: "std::result::Result", href: "https://doc.rust-lang.org/std/result/", body: "Result is a type that represents success or failure."}
+          - {title: "How do I use the question mark operator?", href: "https://stackoverflow.com/questions/42917566/what-is-this-question-mark-operator-about", body: "Rust error propagation."}
+    judgments:
+      "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html": 3
+      "https://doc.rust-lang.org/std/result": 3
+      "https://stackoverflow.com/questions/42917566/what-is-this-question-mark-operator-about": 1
+
+  - id: q03_ukrainian_python_venv
+    category: multilingual
+    language: uk
+    query: "як створити віртуальне середовище Python venv"
+    expected_domains: [docs.python.org]
+    providers:
+      - name: snapshot:engine-a
+        results:
+          - {title: "venv — створення віртуальних середовищ", href: "https://docs.python.org/uk/3/library/venv.html", body: "Офіційна документація Python про створення віртуального середовища."}
+          - {title: "Віртуальне середовище Python", href: "https://uk.wikibooks.org/wiki/Python/Віртуальне_середовище", body: "Приклади використання venv."}
+          - {title: "Кращі середовища Python", href: "https://seo.test/best-python-environments-2026", body: "Рейтинг інструментів."}
+      - name: snapshot:engine-b
+        results:
+          - {title: "Python virtual environments guide", href: "https://realpython.com/python-virtual-environments-a-primer/", body: "How to create and activate a venv."}
+    judgments:
+      "https://docs.python.org/uk/3/library/venv.html": 3
+      "https://uk.wikibooks.org/wiki/Python/Віртуальне_середовище": 2
+      "https://realpython.com/python-virtual-environments-a-primer": 1
+
+  - id: q04_site_constraint
+    category: operators
+    language: en
+    query: "site:docs.python.org pathlib Path read_text"
+    expected_domains: [docs.python.org]
+    thresholds:
+      min_independent_domains: 1
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "pathlib — Object-oriented filesystem paths", href: "https://docs.python.org/3/library/pathlib.html", body: "Path.read_text opens the pointed-to file and returns text."}
+          - {title: "Reading files with pathlib", href: "https://example.test/pathlib-read-text", body: "Path read_text example."}
+          - {title: "Python pathlib source", href: "https://github.com/python/cpython/blob/main/Lib/pathlib/__init__.py", body: "CPython source."}
+    judgments:
+      "https://docs.python.org/3/library/pathlib.html": 3
+
+  - id: q05_rag_survey
+    category: research
+    language: en
+    query: "retrieval augmented generation survey arxiv"
+    expected_domains: [arxiv.org]
+    providers:
+      - name: snapshot:scholar-a
+        results:
+          - {title: "Retrieval-Augmented Generation for Large Language Models: A Survey", href: "https://arxiv.org/abs/2312.10997", body: "A survey of retrieval augmented generation approaches."}
+          - {title: "RAG survey paper mirror", href: "https://alphaxiv.org/abs/2312.10997", body: "Mirror of the retrieval augmented generation survey."}
+          - {title: "Retrieval-Augmented Generation overview", href: "https://huggingface.co/papers/2312.10997", body: "Paper discussion and links."}
+      - name: snapshot:scholar-b
+        results:
+          - {title: "RAG Survey 2312.10997", href: "https://arxiv.org/abs/2312.10997?utm_campaign=paper", body: "Retrieval augmented generation survey."}
+          - {title: "RAG systems overview", href: "https://aclanthology.org/2024.rag-overview/", body: "Overview of retrieval augmented systems."}
+    judgments:
+      "https://arxiv.org/abs/2312.10997": 3
+      "https://huggingface.co/papers/2312.10997": 2
+      "https://aclanthology.org/2024.rag-overview": 2
+
+  - id: q06_duplicate_fusion
+    category: deduplication
+    language: en
+    query: "FastAPI dependency injection documentation"
+    expected_domains: [fastapi.tiangolo.com]
+    providers:
+      - name: snapshot:engine-a
+        results:
+          - {title: "Dependencies", href: "https://fastapi.tiangolo.com/tutorial/dependencies/?utm_source=a", body: "FastAPI dependency injection tutorial."}
+          - {title: "FastAPI dependencies discussion", href: "https://stackoverflow.com/questions/68621741/fastapi-dependency-injection", body: "Dependency injection examples."}
+      - name: snapshot:engine-b
+        results:
+          - {title: "Dependencies - FastAPI", href: "https://fastapi.tiangolo.com/tutorial/dependencies/#simple-usage", body: "Official dependency injection documentation."}
+          - {title: "FastAPI source", href: "https://github.com/fastapi/fastapi", body: "Framework source repository."}
+    judgments:
+      "https://fastapi.tiangolo.com/tutorial/dependencies": 3
+      "https://stackoverflow.com/questions/68621741/fastapi-dependency-injection": 1
+      "https://github.com/fastapi/fastapi": 2
+
+  - id: q07_seo_noise
+    category: noise_filtering
+    language: en
+    query: "kubernetes deployment rolling update strategy"
+    expected_domains: [kubernetes.io]
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "Deployments", href: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/", body: "RollingUpdate deployment strategy and rollout behavior."}
+          - {title: "Performing a Rolling Update", href: "https://kubernetes.io/docs/tutorials/kubernetes-basics/update/update-intro/", body: "Official rolling update tutorial."}
+          - {title: "10 Best Kubernetes Deployment Tools 2026", href: "https://medium.com/@spam/top-10-kubernetes-deployment-tools", body: "Top tools list."}
+          - {title: "Rolling update troubleshooting", href: "https://stackoverflow.com/questions/51624444/kubernetes-deployment-rolling-update", body: "Operational troubleshooting."}
+    judgments:
+      "https://kubernetes.io/docs/concepts/workloads/controllers/deployment": 3
+      "https://kubernetes.io/docs/tutorials/kubernetes-basics/update/update-intro": 3
+      "https://stackoverflow.com/questions/51624444/kubernetes-deployment-rolling-update": 1
+
+  - id: q08_live_freshness_forces_web
+    category: freshness
+    language: uk
+    query: "останні новини PostgreSQL сьогодні"
+    expected_domains: [postgresql.org]
+    thresholds:
+      external_search_used: true
+    local_results:
+      - {title: "PostgreSQL минулі новини", href: "https://cache-one.test/postgresql", body: "Архів новин PostgreSQL.", local_index: true, local_fresh: true, local_quality_score: 0.9}
+      - {title: "PostgreSQL release archive", href: "https://cache-two.test/postgresql", body: "Минулі релізи PostgreSQL.", local_index: true, local_fresh: true, local_quality_score: 0.9}
+      - {title: "PostgreSQL community archive", href: "https://cache-three.test/postgresql", body: "Архів спільноти PostgreSQL.", local_index: true, local_fresh: true, local_quality_score: 0.9}
+    providers:
+      - name: snapshot:live
+        results:
+          - {title: "PostgreSQL News", href: "https://www.postgresql.org/about/news/", body: "Latest PostgreSQL project news today."}
+          - {title: "PostgreSQL releases", href: "https://www.postgresql.org/support/versioning/", body: "Current supported versions and releases."}
+    judgments:
+      "https://www.postgresql.org/about/news": 3
+      "https://www.postgresql.org/support/versioning": 2
+      "https://cache-one.test/postgresql": 1
+      "https://cache-two.test/postgresql": 1
+      "https://cache-three.test/postgresql": 1
+
+  - id: q09_local_cache_closes_search
+    category: local_first
+    language: en
+    query: "sqlite write ahead log concurrency"
+    expected_domains: [sqlite.org]
+    thresholds:
+      external_search_used: false
+      min_independent_domains: 3
+    local_results:
+      - {title: "SQLite Write-Ahead Logging", href: "https://sqlite.org/wal.html", body: "Write ahead logging concurrency readers and writers.", local_index: true, local_fresh: true, local_quality_score: 1.0}
+      - {title: "SQLite WAL concurrency notes", href: "https://simonwillison.net/2024/Mar/31/optimizing-sqlite-for-servers/", body: "SQLite write ahead log concurrency guidance.", local_index: true, local_fresh: true, local_quality_score: 0.8}
+      - {title: "Write-Ahead Logging in SQLite", href: "https://fly.io/blog/sqlite-internals-wal/", body: "How SQLite WAL supports concurrency.", local_index: true, local_fresh: true, local_quality_score: 0.8}
+    providers:
+      - name: snapshot:must-not-run
+        results:
+          - {title: "Irrelevant remote", href: "https://remote.test/sqlite", body: "Should not be requested."}
+    judgments:
+      "https://sqlite.org/wal.html": 3
+      "https://simonwillison.net/2024/Mar/31/optimizing-sqlite-for-servers": 2
+      "https://fly.io/blog/sqlite-internals-wal": 2
+
+  - id: q10_typo_recovery
+    category: query_correction
+    language: en
+    query: "databse replication consistency"
+    expected_domains: [postgresql.org]
+    thresholds:
+      external_search_used: false
+      min_independent_domains: 3
+    local_results:
+      - {title: "PostgreSQL database replication", href: "https://postgresql.org/docs/current/warm-standby.html", body: "Database replication and consistency.", local_index: true, local_fresh: true, local_quality_score: 0.9, local_query_corrections: {databse: database}}
+      - {title: "Database replication consistency", href: "https://jepsen.io/consistency", body: "Database consistency models for replicated systems.", local_index: true, local_fresh: true, local_quality_score: 0.9, local_query_corrections: {databse: database}}
+      - {title: "Replication consistency reference", href: "https://martin.kleppmann.com/2015/05/27/logs-for-data-infrastructure.html", body: "Database logs replication consistency.", local_index: true, local_fresh: true, local_quality_score: 0.8, local_query_corrections: {databse: database}}
+    providers: []
+    judgments:
+      "https://postgresql.org/docs/current/warm-standby.html": 3
+      "https://jepsen.io/consistency": 2
+      "https://martin.kleppmann.com/2015/05/27/logs-for-data-infrastructure.html": 2
+
+  - id: q11_source_diversity
+    category: corroboration
+    language: en
+    query: "WebAuthn passkey authentication security"
+    expected_domains: [w3.org]
+    thresholds:
+      min_independent_domains: 3
+    providers:
+      - name: snapshot:engine-a
+        results:
+          - {title: "Web Authentication specification", href: "https://www.w3.org/TR/webauthn-3/", body: "WebAuthn passkey authentication security requirements."}
+          - {title: "Passkeys", href: "https://developer.mozilla.org/en-US/docs/Web/Security/Authentication/Passkeys", body: "Passkey authentication and WebAuthn security."}
+          - {title: "Passkeys developer guide", href: "https://developers.google.com/identity/passkeys", body: "Implement passkey authentication."}
+          - {title: "WebAuthn source", href: "https://github.com/w3c/webauthn", body: "Specification source repository."}
+    judgments:
+      "https://www.w3.org/TR/webauthn-3": 3
+      "https://developer.mozilla.org/en-US/docs/Web/Security/Authentication/Passkeys": 3
+      "https://developers.google.com/identity/passkeys": 2
+      "https://github.com/w3c/webauthn": 2
+
+  - id: q12_adversarial_title
+    category: adversarial_relevance
+    language: en
+    query: "python packaging dependency groups specification"
+    expected_domains: [packaging.python.org]
+    providers:
+      - name: snapshot:engine-a
+        results:
+          - {title: "Dependency Groups", href: "https://packaging.python.org/en/latest/specifications/dependency-groups/", body: "Python packaging dependency groups specification."}
+          - {title: "Python Packaging User Guide", href: "https://packaging.python.org/en/latest/", body: "Official Python packaging guide."}
+          - {title: "The Best Python Packages and Dependency Groups", href: "https://spam.test/best-python-packages-2026", body: "A keyword-stuffed unrelated list."}
+          - {title: "PEP 735 – Dependency Groups in pyproject.toml", href: "https://peps.python.org/pep-0735/", body: "Specification proposal for dependency groups."}
+    judgments:
+      "https://packaging.python.org/en/latest/specifications/dependency-groups": 3
+      "https://packaging.python.org/en/latest": 2
+      "https://peps.python.org/pep-0735": 3
+
+  - id: q13_ukrainian_gdpr
+    category: multilingual
+    language: uk
+    query: "офіційний текст GDPR право на видалення стаття 17"
+    expected_domains: [eur-lex.europa.eu]
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "Regulation (EU) 2016/679", href: "https://eur-lex.europa.eu/eli/reg/2016/679/oj", body: "Article 17 right to erasure official GDPR text."}
+          - {title: "Right to erasure", href: "https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/right-to-erasure/", body: "Guidance on GDPR right to erasure."}
+          - {title: "GDPR Article 17", href: "https://gdpr-info.eu/art-17-gdpr/", body: "Right to erasure text and references."}
+    judgments:
+      "https://eur-lex.europa.eu/eli/reg/2016/679/oj": 3
+      "https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/right-to-erasure": 2
+      "https://gdpr-info.eu/art-17-gdpr": 2
+
+  - id: q14_node_fetch_abort
+    category: implementation
+    language: en
+    query: "Node.js fetch AbortSignal timeout documentation"
+    expected_domains: [nodejs.org]
+    providers:
+      - name: snapshot:engine-a
+        results:
+          - {title: "Global objects: fetch and AbortSignal", href: "https://nodejs.org/api/globals.html#fetch", body: "Node.js fetch and AbortSignal.timeout documentation."}
+          - {title: "AbortSignal timeout", href: "https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static", body: "AbortSignal timeout static method."}
+          - {title: "Using fetch with timeout", href: "https://stackoverflow.com/questions/46946380/fetch-api-request-timeout", body: "Fetch request timeout examples."}
+    judgments:
+      "https://nodejs.org/api/globals.html": 3
+      "https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static": 2
+      "https://stackoverflow.com/questions/46946380/fetch-api-request-timeout": 1
+
+  - id: q15_no_result_noise
+    category: no_result
+    language: en
+    query: "xhwgqz flumpernickel snarfblatt reference"
+    expected_domains: []
+    thresholds:
+      min_recall_at_10: 1.0
+      min_ndcg_at_10: 1.0
+      min_mrr: 0.0
+      min_independent_domains: 1
+      require_target_domain: false
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "Unrelated shopping result", href: "https://shop.test/flumpernickel", body: "Buy products online."}
+    judgments:
+      "https://shop.test/flumpernickel": 0
+
+  - id: q16_provider_failure_recovery
+    category: resilience
+    language: en
+    query: "pytest fixture scope documentation"
+    expected_domains: [docs.pytest.org]
+    providers:
+      - name: snapshot:healthy
+        results:
+          - {title: "Fixture scopes", href: "https://docs.pytest.org/en/stable/how-to/fixtures.html#scope-sharing-fixtures-across-classes-modules-packages-or-session", body: "Pytest fixture scope documentation."}
+          - {title: "Pytest fixtures reference", href: "https://docs.pytest.org/en/stable/reference/fixtures.html", body: "Built-in fixtures and scope."}
+          - {title: "Fixture scope examples", href: "https://stackoverflow.com/questions/64643362/pytest-fixture-scope", body: "Examples of pytest fixture scope."}
+    judgments:
+      "https://docs.pytest.org/en/stable/how-to/fixtures.html": 3
+      "https://docs.pytest.org/en/stable/reference/fixtures.html": 3
+      "https://stackoverflow.com/questions/64643362/pytest-fixture-scope": 1
+
+  - id: q17_english_early_typo_rerank
+    category: multilingual_reranking
+    language: en
+    query: "daatbase transaction isolation levels"
+    expected_domains: [postgresql.org]
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "Transaction isolation levels", href: "https://generic-blog.test/transaction-isolation", body: "A general overview of transaction isolation levels."}
+          - {title: "Database transaction isolation levels", href: "https://www.postgresql.org/about/transaction-isolation", body: "Official database transaction isolation documentation."}
+    judgments:
+      "https://generic-blog.test/transaction-isolation": 1
+      "https://www.postgresql.org/about/transaction-isolation": 3
+
+  - id: q18_ukrainian_transposition_rerank
+    category: multilingual_reranking
+    language: uk
+    query: "резревне копіювання postgresql відновлення"
+    expected_domains: [postgresql.org]
+    providers:
+      - name: snapshot:engine
+        results:
+          - {title: "Копіювання PostgreSQL та відновлення", href: "https://generic-blog.test/postgresql-copy", body: "Загальний матеріал про копіювання та відновлення."}
+          - {title: "Резервне копіювання PostgreSQL і відновлення", href: "https://www.postgresql.org/about/backup", body: "Офіційна документація про резервне копіювання та відновлення PostgreSQL."}
+    judgments:
+      "https://generic-blog.test/postgresql-copy": 1
+      "https://www.postgresql.org/about/backup": 3

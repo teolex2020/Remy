@@ -41,10 +41,12 @@ logger = logging.getLogger("DesktopGUI")
 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
+    from remy.core.agent_lab import recover_interrupted_agent_labs
     from remy.core.experiment_lab import recover_interrupted_experiments
 
     await start_scheduler()
     recover_interrupted_experiments()
+    recover_interrupted_agent_labs()
     await load_push_subscription()
     try:
         yield
@@ -91,6 +93,7 @@ ROUTE_MODULES = (
     "remy.web.routes.scheduled_pipeline_routes",
     "remy.web.routes.automation_routes",
     "remy.web.routes.experiment_routes",
+    "remy.web.routes.agent_lab_routes",
     "remy.web.routes.run_routes",
     "remy.web.routes.websocket",
 )

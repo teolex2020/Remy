@@ -15,6 +15,9 @@ from remy.core.research_sessions import (
     mark_session_completed,
     reconcile_session_sources,
     record_contradictions,
+    record_contradiction_resolutions,
+    record_claim_lifecycle_summary,
+    record_claim_source_matrix,
     record_finding,
     record_source_decision,
     record_source_fetch,
@@ -58,6 +61,8 @@ class TestResearchSession:
         assert s.resumed_runs == 0
         assert s.findings == []
         assert s.contradictions == []
+        assert s.claim_source_matrix == {}
+        assert s.claim_lifecycle == {}
 
     def test_summary_empty(self):
         s = _session()
@@ -81,6 +86,105 @@ class TestResearchSession:
         assert summary["contradictions_count"] == 1
         # coverage = accepted / findings = 2/3
         assert summary["citation_coverage_rate"] == round(2 / 3, 3)
+
+    def test_claim_matrix_replaces_url_count_coverage(self):
+        s = _session()
+        s.accepted_sources = [{"url": "a"}, {"url": "b"}, {"url": "c"}]
+        s.findings = [{"text": "f1"}, {"text": "f2"}, {"text": "f3"}]
+        s.claim_source_matrix = {
+            "claim_count": 3,
+            "supported_claims": 1,
+            "partial_claims": 1,
+            "unsupported_claims": 1,
+            "conflicting_claims": 0,
+            "claim_coverage_rate": 1 / 3,
+            "corroboration_rate": 0.0,
+            "time_sensitive_claims": 2,
+            "temporally_ready_claims": 1,
+            "stale_claims": 1,
+            "undated_temporal_claims": 0,
+            "temporal_coverage_rate": 0.5,
+            "temporal_ready": False,
+            "publication_ready": False,
+        }
+
+        summary = s.summary()
+
+        assert summary["accepted_sources_count"] == 3
+        assert summary["citation_coverage_rate"] == round(1 / 3, 3)
+        assert summary["unsupported_claims_count"] == 1
+        assert summary["time_sensitive_claims_count"] == 2
+        assert summary["stale_claims_count"] == 1
+        assert summary["temporal_coverage_rate"] == 0.5
+        assert summary["temporal_ready"] is False
+        assert summary["publication_ready"] is False
+
+    def test_summary_separates_resolved_temporal_conflicts_from_active_ones(self):
+        s = _session()
+        s.contradictions = [
+            {
+                "id": "resolved-price",
+                "status": "resolved",
+                "resolution_status": "resolved_by_temporal_supersession",
+            },
+            {"id": "active-science", "status": "unresolved"},
+        ]
+        s.claim_source_matrix = {
+            "claim_count": 2,
+            "superseded_claims": 1,
+            "resolved_temporal_conflicts": 1,
+            "unresolved_contradictions": 1,
+        }
+
+        summary = s.summary()
+
+        assert summary["contradictions_count"] == 2
+        assert summary["resolved_temporal_conflicts_count"] == 1
+        assert summary["unresolved_contradictions_count"] == 1
+        assert summary["superseded_claims_count"] == 1
+
+    def test_summary_exposes_claim_lifecycle_counts(self):
+        s = _session()
+        s.claim_lifecycle = {
+            "scope_key": "scope-1",
+            "summary": {
+                "tracked_subjects": 3,
+                "confirmed_transitions": 2,
+                "pending_changes": 1,
+            },
+        }
+
+        summary = s.summary()
+
+        assert summary["claim_lifecycle_available"] is True
+        assert summary["tracked_claim_subjects_count"] == 3
+        assert summary["claim_transitions_count"] == 2
+        assert summary["pending_claim_changes_count"] == 1
+
+    def test_resolved_temporal_conflict_is_not_reported_as_knowledge_gap(
+        self, sessions_dir
+    ):
+        s = _session()
+        s.contradictions = [
+            {
+                "id": "resolved-price",
+                "status": "resolved",
+                "resolution_status": "resolved_by_temporal_supersession",
+            }
+        ]
+        s.claim_source_matrix = {
+            "claim_count": 2,
+            "supported_claims": 1,
+            "superseded_claims": 1,
+            "resolved_temporal_conflicts": 1,
+            "unresolved_contradictions": 0,
+            "publication_ready": True,
+        }
+        save_research_session(s)
+
+        trace = get_research_session_trace(s.goal_id)
+
+        assert not any("contradictory" in gap for gap in trace["knowledge_gaps"])
 
 
 # ============== save / load ==============
@@ -308,6 +412,46 @@ class TestRecordFinding:
         assert any(item["url"] == "https://x.com/hwchase17" for item in session.accepted_sources)
 
 
+class TestRecordClaimSourceMatrix:
+    def test_records_matrix(self, sessions_dir):
+        save_research_session(_session())
+        result = record_claim_source_matrix(
+            "goal-1",
+            {"claim_count": 1, "supported_claims": 1, "claim_coverage_rate": 1.0},
+        )
+
+        assert result is not None
+        assert result.claim_source_matrix["supported_claims"] == 1
+
+    def test_returns_none_for_missing_session(self, sessions_dir):
+        assert record_claim_source_matrix("missing", {"claim_count": 1}) is None
+
+
+class TestRecordClaimLifecycleSummary:
+    def test_records_only_bounded_lifecycle_metadata(self, sessions_dir):
+        save_research_session(_session())
+        result = record_claim_lifecycle_summary(
+            "goal-1",
+            {
+                "version": 1,
+                "scope_key": "scope-1",
+                "project_id": "project-1",
+                "topic": "pricing",
+                "updated_at": "2026-08-22T12:00:00+00:00",
+                "summary": {"tracked_subjects": 2, "confirmed_transitions": 1},
+                "last_run": {"confirmed_transitions": 1},
+                "subjects": [{"private": "full history stays in ledger"}],
+            },
+        )
+
+        assert result.claim_lifecycle["scope_key"] == "scope-1"
+        assert result.claim_lifecycle["summary"]["tracked_subjects"] == 2
+        assert "subjects" not in result.claim_lifecycle
+
+    def test_returns_none_for_missing_session(self, sessions_dir):
+        assert record_claim_lifecycle_summary("missing", {}) is None
+
+
 # ============== record_contradictions ==============
 
 
@@ -325,6 +469,56 @@ class TestRecordContradictions:
 
     def test_returns_none_for_missing(self, sessions_dir):
         assert record_contradictions("x", [{"id": "c1"}]) is None
+
+    def test_temporal_resolution_preserves_conflict_history(self, sessions_dir):
+        save_research_session(_session())
+        record_contradictions(
+            "goal-1",
+            [
+                {
+                    "id": "price-change",
+                    "status": "unresolved",
+                    "claim_a": "Price is $20",
+                    "claim_b": "Price is $25",
+                    "source_a": "https://old.test",
+                    "source_b": "https://new.test",
+                }
+            ],
+        )
+        resolution = {
+            "id": "price-change",
+            "resolution_status": "resolved_by_temporal_supersession",
+            "resolution_reason": "newer_independent_authoritative_evidence",
+            "resolved_at": "2026-08-22T12:00:00+00:00",
+            "supersession": {
+                "old_claim": "Price is $20",
+                "new_claim": "Price is $25",
+                "new_source_url": "https://new.test",
+                "effective_at": "2026-08-21T00:00:00+00:00",
+                "history_preserved": True,
+            },
+        }
+
+        result = record_contradiction_resolutions("goal-1", [resolution])
+        repeated = record_contradiction_resolutions("goal-1", [resolution])
+
+        assert result is not None
+        stored = repeated.contradictions[0]
+        assert stored["status"] == "resolved"
+        assert stored["supersession"]["new_claim"] == "Price is $25"
+        assert stored["resolution_history"][0]["supersession"][
+            "history_preserved"
+        ] is True
+        assert len(stored["resolution_history"]) == 1
+
+    def test_temporal_resolution_ignores_unsafe_or_missing_session(self, sessions_dir):
+        save_research_session(_session())
+        unresolved = record_contradiction_resolutions(
+            "goal-1", [{"id": "x", "resolution_status": "unresolved"}]
+        )
+
+        assert unresolved.contradictions == []
+        assert record_contradiction_resolutions("missing", []) is None
 
 
 # ============== mark_session_completed ==============

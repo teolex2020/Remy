@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remy"
-version = "0.9.1"
+version = "0.9.2"
 description = "Remy - local-first AI workflow automation with governed memory, run history, and human-approved execution"
 authors = [{ name = "AuroraSeed" }]
 license = {text = "MIT"}

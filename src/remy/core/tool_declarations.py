@@ -799,6 +799,13 @@ BRAIN_TOOLS = [
                 "include_tables": types.Schema(
                     type="BOOLEAN", description="Include tables in output (default true)"
                 ),
+                "force_refresh": types.Schema(
+                    type="BOOLEAN",
+                    description=(
+                        "Bypass Remy's local web cache for time-sensitive content "
+                        "(default false)"
+                    ),
+                ),
             },
             required=["url"],
         ),
@@ -1826,6 +1833,11 @@ BRAIN_TOOLS = [
         ),
     ),
 ]
+
+
+from remy.core.tool_contracts import apply_tool_contracts
+
+BRAIN_TOOLS = apply_tool_contracts(BRAIN_TOOLS)
 
 
 # ============== TOOL CATEGORIES ==============

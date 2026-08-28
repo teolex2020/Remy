@@ -44,6 +44,8 @@ function _showViewSkeleton(viewName) {
         _setHtml("pipelines-content", `<div class="pl-loading">${skeletonCards(3)}</div>`);
     } else if (viewName === "experiments") {
         _setHtml("experiments-content", skeletonCards(3));
+    } else if (viewName === "agent-lab") {
+        _setHtml("agent-lab-content", skeletonCards(3));
     } else if (viewName === "automations") {
         _setHtml("automations-content", `<div class="pf-loading">${skeletonCards(3)}</div>`);
     } else if (viewName === "glass-brain") {
@@ -123,6 +125,11 @@ async function loadPipelines() {
 async function _loadExperimentsView() {
     const mod = await _loadModule("experiments", () => import("./experiments.js?v=1.15"));
     await mod.loadExperiments?.();
+}
+
+async function _loadAgentLabView() {
+    const mod = await _loadModule("agent-lab", () => import("./agent-lab.js?v=3.4"));
+    await mod.loadAgentLab?.();
 }
 
 async function _loadAutomationsView() {
@@ -1282,6 +1289,7 @@ async function switchView(viewName) {
     if (viewName === "calendar") await loadCalendar();
     if (viewName === "pipelines")    await loadPipelines();
     if (viewName === "experiments")  await _loadExperimentsView();
+    if (viewName === "agent-lab") await _loadAgentLabView();
     if (viewName === "automations")  await _loadAutomationsView();
     if (viewName === "glass-brain") await _loadGlassBrainView();
 

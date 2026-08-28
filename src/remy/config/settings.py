@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     AURA_MEMORY_PATH: Path = Field(default_factory=lambda: _app_root() / "data" / "knowledge")
     AURA_MEMORY_ENABLED: bool = Field(default=True)
 
+    # ============== LOCAL WEB SEARCH MEMORY ==============
+    LOCAL_WEB_INDEX_ENABLED: bool = Field(default=True)
+    LOCAL_WEB_INDEX_MAX_DOCUMENTS: int = Field(default=5_000, ge=100, le=100_000)
+    LOCAL_WEB_INDEX_FRESH_HOURS: int = Field(default=168, ge=1, le=8_760)
+    LOCAL_SEARCH_RERANKER_ENABLED: bool = Field(default=True)
+
     # ============== SANDBOX ==============
     SANDBOX_DIR: Path = Field(default_factory=lambda: _app_root() / "data" / "sandbox")
     SANDBOX_TOOLS_DIR: Path = Field(default_factory=lambda: _src_root() / "sandbox" / "tools")

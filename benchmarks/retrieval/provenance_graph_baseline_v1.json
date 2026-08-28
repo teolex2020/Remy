@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "metrics": {
+    "root_accuracy": 1.0,
+    "role_accuracy": 1.0,
+    "consensus_gate_accuracy": 1.0,
+    "false_consensus_rate": 0.0
+  }
+}

@@ -174,6 +174,55 @@ class TestGetFallbackChain:
 
 class TestCallLlm:
 
+    def test_explicit_model_assignment_bypasses_adaptive_rerouting(self):
+        from remy.core.llm import call_llm
+
+        response = MagicMock()
+        response.content = "assigned model result"
+        response.response_metadata = {}
+        assigned_llm = MagicMock()
+        assigned_llm.invoke.return_value = response
+
+        with patch("remy.core.llm.get_llm", return_value=assigned_llm) as mock_get, \
+             patch("remy.core.llm._apply_model_routing") as mock_router, \
+             patch("remy.core.llm.settings") as settings_mock:
+            settings_mock.SUMMARY_MODEL = "default-model"
+            settings_mock.FALLBACK_MODELS = ["fallback-model"]
+            result = call_llm(
+                "task",
+                preferred_model="assigned-model",
+                allow_fallback=False,
+            )
+
+        mock_get.assert_called_once_with("assigned-model")
+        mock_router.assert_not_called()
+        assert result.response_metadata["_served_by"] == "assigned-model"
+
+    def test_strict_model_assignment_never_silently_falls_back(self):
+        from remy.core.llm import call_llm
+
+        assigned_llm = MagicMock()
+        assigned_llm.invoke.side_effect = ConnectionError("assigned endpoint unavailable")
+        requested = []
+
+        def get_model(name):
+            requested.append(name)
+            return assigned_llm
+
+        with patch("remy.core.llm.get_llm", side_effect=get_model), \
+             patch("remy.core.llm.time.sleep"), \
+             patch("remy.core.llm.settings") as settings_mock:
+            settings_mock.SUMMARY_MODEL = "default-model"
+            settings_mock.FALLBACK_MODELS = ["fallback-model"]
+            with pytest.raises(ConnectionError, match="assigned endpoint unavailable"):
+                call_llm(
+                    "task",
+                    preferred_model="assigned-model",
+                    allow_fallback=False,
+                )
+
+        assert requested == ["assigned-model", "assigned-model", "assigned-model"]
+
     def test_primary_model_success(self):
         """Primary model works → return result, no fallback."""
         from remy.core.llm import call_llm

@@ -793,7 +793,7 @@ def _check_ssrf(url: str) -> str | None:
 
 _SEARCH_CACHE_TAG = "web-search-cache"
 _SEARCH_CACHE_TTL_HOURS = 24
-_SEARCH_CACHE_BACKEND = "ddgs-v3-pinned"
+_SEARCH_CACHE_BACKEND = "ddgs-v4-local-first"
 
 # Same-intent retry cap: stop agents from spinning on an unanswerable query.
 # Intent = normalized query (lowercase, stripped punctuation, sorted tokens).
@@ -855,6 +855,10 @@ def _get_last_candidates(session_id: str | None) -> list[dict]:
 def _get_cached_search(query: str) -> dict | None:
     """Check if a similar web search was run recently. Returns canonicalized cached result or None."""
     try:
+        from remy.core.search_gateway import requires_live_discovery
+
+        if requires_live_discovery(query):
+            return None
         with brain_lock:
             cached = brain.search(query="", tags=[_SEARCH_CACHE_TAG], limit=20)
         if not cached:
@@ -1215,6 +1219,13 @@ BRAIN_TOOLS = [
                 "include_tables": types.Schema(
                     type="BOOLEAN", description="Include tables in output (default true)"
                 ),
+                "force_refresh": types.Schema(
+                    type="BOOLEAN",
+                    description=(
+                        "Bypass Remy's local web cache for time-sensitive content "
+                        "(default false)"
+                    ),
+                ),
                 "expected_title": types.Schema(
                     type="STRING",
                     description=(
@@ -1541,7 +1552,7 @@ BRAIN_TOOLS = [
                 "query": types.Schema(type="STRING", description="Alias for topic."),
                 "prompt": types.Schema(type="STRING", description="Alias for topic."),
                 "description": types.Schema(type="STRING", description="Alias for topic."),
-                "depth": types.Schema(type="STRING", description="Research depth: 'quick' (2 queries), 'standard' (4 queries), or 'deep' (7 queries). Default: standard"),
+                "depth": types.Schema(type="STRING", description="Research depth: 'quick' (3 queries), 'standard' (4 queries), or 'deep' (7 queries). Default: standard"),
                 "context": types.Schema(type="STRING", description="Optional additional context to guide the research plan"),
             },
         ),
@@ -2660,6 +2671,11 @@ BRAIN_TOOLS = [
 ]
 
 
+from remy.core.tool_contracts import apply_tool_contracts
+
+BRAIN_TOOLS = apply_tool_contracts(BRAIN_TOOLS)
+
+
 # ============== TOOL CATEGORIES ==============
 
 CORE_TOOL_NAMES = frozenset({
@@ -3023,7 +3039,7 @@ def _build_user_identity() -> str | None:
 
 _RESEARCH_PROJECT_TAG = "research-project"
 _RESEARCH_FINDING_TAG = "research-finding"
-_DEPTH_QUERY_COUNT = {"quick": 2, "standard": 4, "deep": 7}
+_DEPTH_QUERY_COUNT = {"quick": 3, "standard": 4, "deep": 7}
 
 
 def _get_research_project(project_id: str):
@@ -3402,9 +3418,15 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
         return json.dumps({
             "error": "complete_research requires accepted source URLs on findings. Fetch evidence first, then attach source_url on each finding."
         }, ensure_ascii=False)
-    evidence_note = (
-        "" if citation_complete else "Evidence is weak: no accepted source URLs were attached."
-    )
+    minimum_source_target = 3
+    source_target_met = len(unique_sources) >= minimum_source_target
+    evidence_note = ""
+    if not source_target_met:
+        evidence_note = (
+            "Evidence limitation: only "
+            f"{len(unique_sources)} distinct source(s) were available; "
+            f"the analysis target is at least {minimum_source_target}."
+        )
 
     # Synthesize via LLM
     findings_text = "\n".join(
@@ -3475,6 +3497,8 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
             "confidence_avg": avg_confidence,
             "citation_complete": citation_complete,
             "citation_count": len(unique_sources),
+            "minimum_source_target": minimum_source_target,
+            "source_target_met": source_target_met,
             "evidence_note": evidence_note,
             "learning_channel": "internet_evidence",
             # D-04: LLM-synthesized report over grounded findings - not itself a
@@ -3508,6 +3532,8 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
                     "metadata": {
                         "topic": topic,
                         "source_count": len(unique_sources),
+                        "minimum_source_target": minimum_source_target,
+                        "source_target_met": source_target_met,
                         "citation_complete": citation_complete,
                     },
                 },
@@ -3561,6 +3587,9 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
     project_meta["completed_at"] = datetime.now().isoformat()
     project_meta["report_id"] = report_record_id
     project_meta["verification"] = verification.to_dict()
+    project_meta["source_count"] = len(unique_sources)
+    project_meta["minimum_source_target"] = minimum_source_target
+    project_meta["source_target_met"] = source_target_met
     if pdf_artifact:
         project_meta.update(pdf_artifact)
     brain.update(project_rec.id, metadata=project_meta)
@@ -3601,6 +3630,8 @@ def _complete_research(args: dict, session_id: str | None = None, channel: str |
         **pdf_artifact,
         "verification": verification.to_dict(),
         "source_count": len(unique_sources),
+        "minimum_source_target": minimum_source_target,
+        "source_target_met": source_target_met,
         "findings_count": len(findings),
         "confidence_avg": avg_confidence,
         "citation_complete": citation_complete,
@@ -6749,51 +6780,19 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
             last_error = None
             for attempt in range(_MAX_RETRIES + 1):
                 try:
-                    from ddgs import DDGS
+                    from remy.core.search_gateway import SearchRequest, get_search_gateway
 
-                    # v9 multi-backend metasearch - skips yandex (429s from UA
-                    # IPs), bing (disabled), and startpage (removed from ddgs).
-                    # Longer timeout since the default 5s lets a single slow
-                    # backend sink the whole call.
-                    raw = DDGS(timeout=15).text(
-                        query,
-                        max_results=10,
-                        backend="duckduckgo,brave,google,mojeek,yahoo",
+                    search_response = get_search_gateway().search(
+                        SearchRequest(query=query, max_results=10)
                     )
-                    grounding_chunks = [
-                        {
-                            "title": r.get("title") or "",
-                            "uri": r.get("href") or "",
-                            "snippet": r.get("body") or "",
-                        }
-                        for r in (raw or [])
-                        if r.get("href")
-                    ]
-
-                    # Phase 2: enforce site: constraint (ddgs/Yahoo often
-                    # ignore it), then classify + rerank. Drop SEO outright;
-                    # keep mirrors visible but demoted so they can't outrank
-                    # real sources.
-                    from remy.core.retrieval.source_filter import (
-                        annotate,
-                        enforce_site_constraint,
-                        extract_site_constraint,
-                        rerank,
-                    )
-                    site_domain = extract_site_constraint(query)
-                    if site_domain:
-                        before = len(grounding_chunks)
-                        grounding_chunks = enforce_site_constraint(
-                            grounding_chunks, site_domain
+                    grounding_chunks = search_response.candidates
+                    if not grounding_chunks and search_response.attempts and all(
+                        item.status == "error" for item in search_response.attempts
+                    ):
+                        errors = "; ".join(
+                            f"{item.provider}: {item.error}" for item in search_response.attempts
                         )
-                        dropped = before - len(grounding_chunks)
-                        if dropped:
-                            logger.info(
-                                "web_search: site:%s dropped %d off-domain candidate(s)",
-                                site_domain, dropped,
-                            )
-                    grounding_chunks = annotate(grounding_chunks)
-                    grounding_chunks = rerank(grounding_chunks, drop_classes={"seo"})
+                        raise RuntimeError(errors)
 
                     if grounding_chunks:
                         # Surface the top-3 URLs directly in the answer string.
@@ -6823,6 +6822,7 @@ def _execute_tool_inner(name: str, args: dict, session_id: str | None = None, ch
                         "mode": "candidate_discovery",
                         "query": query,
                         "candidate_count": len(grounding_chunks),
+                        "search_diagnostics": search_response.diagnostics(),
                     }
                     if grounding_chunks:
                         result["sources"] = grounding_chunks
@@ -8242,7 +8242,7 @@ def _build_system_instruction_locked(channel: str = "voice") -> str:
         "- **Research Mode**: When the user asks for deep investigation "
         "(e.g. '???????', 'research', '??????? ????????', '?????? ??????????', 'investigate', 'deep dive'), "
         "use the **Research Orchestrator** tools:\n"
-        "  1. **start_research**: Creates and queues a durable background project. Choose depth: 'quick' (2 queries), 'standard' (4), 'deep' (7).\n"
+        "  1. **start_research**: Creates and queues a durable background project. Choose depth: 'quick' (3 queries), 'standard' (4), 'deep' (7).\n"
         "     Claim that work started or will notify later ONLY if the returned worker_registered=true and job_state is queued/running. Otherwise say only that the plan was saved.\n"
         "  2. **web_search -> extract_content/http_get -> add_research_finding**: Execute each query, fetch the chosen source, then record findings with source URL and confidence.\n"
         "  3. **complete_research**: Synthesize all findings into a final report (LLM-generated).\n"

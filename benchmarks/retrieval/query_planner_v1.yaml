@@ -1,0 +1,74 @@
+version: 1
+thresholds:
+  min_intent_recall: 1.0
+  min_budget_compliance: 1.0
+  min_length_compliance: 1.0
+  min_priority_accuracy: 1.0
+  max_duplicate_rate: 0.0
+
+cases:
+  - id: p01_balanced_evidence_lanes
+    topic: AI agent memory architecture
+    mode: balanced
+    required_intents: [primary, corroboration, counterevidence]
+
+  - id: p02_speed_budget
+    topic: database replication consistency
+    mode: speed
+    required_intents: [primary, corroboration]
+    max_queries: 2
+
+  - id: p03_freshness_lane
+    topic: latest PostgreSQL release 2026
+    mode: deep
+    required_intents: [primary, freshness, corroboration, counterevidence]
+
+  - id: p04_paper_scope
+    topic: retrieval augmented generation benchmark study
+    mode: balanced
+    source_scope: papers
+    required_intents: [primary, corroboration, counterevidence]
+    required_text: systematic review replication
+
+  - id: p05_discussion_scope
+    topic: local LLM desktop agent experience
+    mode: balanced
+    source_scope: discussions
+    required_intents: [primary, corroboration, counterevidence]
+    required_text: forum discussion
+
+  - id: p06_domain_boundary
+    topic: Python pathlib read_text
+    mode: balanced
+    source_scope: domain
+    source_domains: [docs.python.org]
+    required_intents: [scoped_primary, primary, corroboration]
+    first_intent: scoped_primary
+    required_text: site:docs.python.org
+
+  - id: p07_gap_repair_priority
+    topic: SQLite concurrency
+    mode: balanced
+    repair_queries: [SQLite WAL checkpoint official primary source evidence]
+    required_intents: [gap_repair, primary, corroboration]
+    first_intent: gap_repair
+
+  - id: p08_conflict_repair_priority
+    topic: product pricing
+    mode: balanced
+    repair_queries: [product costs $20 independent primary source resolve conflicting evidence]
+    required_intents: [contradiction, primary, corroboration]
+    first_intent: contradiction
+
+  - id: p09_ukrainian_topic
+    topic: резервне копіювання PostgreSQL та відновлення
+    mode: balanced
+    required_intents: [primary, corroboration, counterevidence]
+
+  - id: p10_operator_seed
+    topic: WebAuthn security research
+    mode: deep
+    seed_queries: [site:w3.org WebAuthn Level 3]
+    required_intents: [user_seed, primary, corroboration, counterevidence]
+    first_intent: user_seed
+    required_text: site:w3.org WebAuthn Level 3

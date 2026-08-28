@@ -19,6 +19,8 @@ datas = collect_data_files("remy")
 datas += [
     (str(PROJECT_ROOT / ".env.example"), "."),
     (str(PROJECT_ROOT / "LICENSE"), "."),
+    (str(PROJECT_ROOT / "packaging" / "agent-lab-runtime" / "Dockerfile"), "agent-lab-runtime"),
+    (str(PROJECT_ROOT / "packaging" / "agent-lab-runtime" / ".dockerignore"), "agent-lab-runtime"),
 ]
 
 # PLAYWRIGHT_BROWSERS_PATH=0 stores Chromium below the Playwright package.

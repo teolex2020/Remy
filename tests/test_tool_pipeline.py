@@ -17,10 +17,12 @@ def test_tool_pipeline_has_stable_stage_order_and_receipt():
     pipeline = ToolPipeline(
         resolver=lambda ctx: observed.append("resolve-hook") or f"resolved_{ctx.name}",
         provenance=lambda ctx: {"source": "test", "trust_score": 1.0},
+        before_middleware=lambda ctx: observed.append("middleware-before") or None,
         pre_policy=lambda ctx: observed.append("pre-policy") or None,
         monotonic_guards=lambda ctx: observed.append("guards") or None,
         approval=lambda ctx: {"required": False, "mode": "not-required"},
         executor=lambda ctx: observed.append("execute") or json.dumps({"ok": True}),
+        after_middleware=lambda ctx: observed.append("middleware-after"),
         post_policy=lambda ctx: observed.append("post-policy"),
         artifact_spill=lambda ctx: observed.append("artifact-spill") or [],
         durable_observation=lambda ctx: observed.append("durable-observation"),
@@ -36,9 +38,11 @@ def test_tool_pipeline_has_stable_stage_order_and_receipt():
     assert [stage["stage"] for stage in receipt["stages"]] == list(STAGE_ORDER)
     assert observed == [
         "resolve-hook",
+        "middleware-before",
         "pre-policy",
         "guards",
         "execute",
+        "middleware-after",
         "post-policy",
         "artifact-spill",
         "durable-observation",
@@ -70,6 +74,28 @@ def test_tool_pipeline_guard_decision_cannot_be_weakened():
     assert execute_stage["status"] == "skipped"
 
 
+def test_later_equal_denial_cannot_replace_first_block_reason_or_result():
+    pipeline = ToolPipeline(
+        executor=lambda ctx: "should-not-run",
+        before_middleware=lambda ctx: {
+            "decision": "deny",
+            "reason": "first causal block",
+            "result": json.dumps({"error": "first"}),
+        },
+        pre_policy=lambda ctx: {
+            "decision": "deny",
+            "reason": "later duplicate block",
+            "result": json.dumps({"error": "later"}),
+        },
+    )
+
+    result = pipeline.run("demo", {})
+    receipt = get_last_tool_pipeline_snapshot(clear=True)
+
+    assert json.loads(result)["error"] == "first"
+    assert receipt["decision_reason"] == "first causal block"
+
+
 def test_tool_pipeline_validation_denies_non_mapping_arguments():
     pipeline = ToolPipeline(executor=lambda ctx: "should-not-run")
 
@@ -95,6 +121,103 @@ def test_required_approval_is_visible_without_weakening_prior_guards():
     assert receipt["decision"] == "require_approval"
     assert receipt["approval_required"] is True
     assert receipt["approval_mode"] == "handler-managed"
+
+
+def test_pipeline_managed_approval_wraps_exact_executor_once():
+    calls = []
+
+    def approval_executor(ctx, execute):
+        calls.append((ctx.resolved_name, dict(ctx.args)))
+        ctx.approval_outcome = "approved"
+        return execute(ctx)
+
+    pipeline = ToolPipeline(
+        executor=lambda ctx: calls.append("executed") or json.dumps({"ok": True}),
+        approval=lambda ctx: {
+            "required": True,
+            "mode": "pipeline-managed",
+            "target": "https://bank.example/action",
+            "description": "Sensitive action",
+        },
+        approval_executor=approval_executor,
+    )
+
+    result = pipeline.run("financial_action", {"amount": 10})
+    receipt = get_last_tool_pipeline_snapshot(clear=True)
+
+    assert json.loads(result)["ok"] is True
+    assert calls == [("financial_action", {"amount": 10}), "executed"]
+    assert receipt["decision"] == "require_approval"
+    assert receipt["approval_mode"] == "pipeline-managed"
+    assert receipt["approval_outcome"] == "approved"
+    assert len(receipt["approval_target_sha256"]) == 64
+    assert "bank.example" not in json.dumps(receipt)
+    assert "Sensitive action" not in json.dumps(receipt)
+
+
+def test_pipeline_managed_approval_without_executor_fails_closed():
+    executed = []
+    pipeline = ToolPipeline(
+        executor=lambda ctx: executed.append(True) or "unsafe",
+        approval=lambda ctx: {"required": True, "mode": "pipeline-managed"},
+    )
+
+    result = pipeline.run("financial_action", {"amount": 10})
+    receipt = get_last_tool_pipeline_snapshot(clear=True)
+
+    assert executed == []
+    assert "approval executor is unavailable" in json.loads(result)["error"]
+    assert receipt["decision"] == "deny"
+    assert receipt["approval_outcome"] == "denied"
+
+
+def test_pipeline_approval_grant_is_exact_and_context_local(monkeypatch):
+    from remy.core import approval_queue as approvals
+
+    monkeypatch.setattr(approvals.approval_queue, "_enabled", True)
+    args = {"amount": 10, "recipient": "wallet-a"}
+    assert approvals.needs_approval("send_usdt", args) is True
+    with approvals.pipeline_approval_grant("send_usdt", args):
+        assert approvals.needs_approval("send_usdt", args) is False
+        assert approvals.needs_approval("send_usdt", {**args, "amount": 11}) is True
+        assert approvals.needs_approval("send_trx", args) is True
+    assert approvals.needs_approval("send_usdt", args) is True
+
+
+def test_dispatch_pipeline_owns_sensitive_approval_once(monkeypatch):
+    from remy.core import approval_queue as approvals
+    from remy.core import brain_tools, tool_dispatch
+
+    calls = []
+    monkeypatch.setattr(approvals.approval_queue, "_enabled", True)
+    monkeypatch.setattr(brain_tools.tool_health, "is_available", lambda name: True)
+    monkeypatch.setattr(tool_dispatch, "_pipeline_pre_policy_receipt", lambda ctx: None)
+    monkeypatch.setattr(tool_dispatch, "_pipeline_durable_observation", lambda ctx: None)
+    monkeypatch.setattr(
+        approvals.approval_queue,
+        "request_approval_sync",
+        lambda description, action_fn, **kwargs: calls.append(kwargs["tool_name"]) or action_fn(),
+    )
+    monkeypatch.setattr(
+        tool_dispatch,
+        "_execute_tool_backend",
+        lambda name, args, session_id, channel: (
+            calls.append("handler")
+            or json.dumps({"grant": approvals.has_pipeline_approval_grant(name, args)})
+        ),
+    )
+
+    result = tool_dispatch.execute_tool(
+        "send_usdt",
+        {"amount": 10, "recipient": "wallet-a"},
+        channel="desktop",
+    )
+    receipt = get_last_tool_pipeline_snapshot(clear=True)
+
+    assert json.loads(result)["grant"] is True
+    assert calls == ["send_usdt", "handler"]
+    assert receipt["approval_mode"] == "pipeline-managed"
+    assert receipt["approval_outcome"] == "approved"
 
 
 def test_dispatch_pipeline_appends_privacy_safe_durable_receipt(tmp_path, monkeypatch):

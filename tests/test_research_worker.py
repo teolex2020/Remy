@@ -8,6 +8,11 @@ from remy.core.workers.contracts import WorkerExecutionResult
 from remy.core.workers.reporter import format_worker_report
 from remy.core.workers.research_worker import (
     RESEARCH_TOOL_WHITELIST,
+    _apply_marginal_evidence_controls,
+    _claim_matrix_allows_completion,
+    _contradiction_blocks_completion,
+    _resolve_lifecycle_project_id,
+    _build_research_query_plan,
     _derive_research_status,
     _extract_completion_threshold,
     _extract_research_evidence,
@@ -21,6 +26,17 @@ from remy.core.workers.research_worker import (
 
 
 class TestBuildResearchWorkerPrompt:
+    def test_lifecycle_scope_prefers_workspace_project_over_research_project(self):
+        with patch("remy.core.microbrain.current_project_id", return_value="workspace-1"):
+            assert _resolve_lifecycle_project_id(
+                {"project_id": "transient-research-42"}
+            ) == "workspace-1"
+
+    def test_lifecycle_scope_accepts_explicit_owner_boundary(self):
+        assert _resolve_lifecycle_project_id(
+            {"owner_project_id": "workspace-2", "project_id": "research-7"}
+        ) == "workspace-2"
+
     def test_includes_task_description(self):
         prompt = build_research_worker_prompt({"description": "Analyze competitor pricing"})
         assert "Analyze competitor pricing" in prompt
@@ -76,6 +92,17 @@ class TestBuildResearchWorkerPrompt:
 
 
 class TestResearchQueryPlanning:
+    def test_balanced_plan_has_primary_corroboration_and_counterevidence(self):
+        plan = _build_research_query_plan(
+            {"description": "Research AI agent memory architecture"},
+            {"research_mode": "balanced", "source_scope": "web"},
+        )
+        assert [query["intent"] for query in plan["queries"]] == [
+            "primary",
+            "corroboration",
+            "counterevidence",
+        ]
+
     def test_prefers_seed_queries_for_influencer_goals(self):
         queries = _plan_research_queries(
             {
@@ -103,6 +130,38 @@ class TestResearchQueryPlanning:
         assert all(len(q) < 120 for q in queries)
 
 
+class TestResearchProvenanceIntegration:
+    def test_shared_origin_reopens_superficially_complete_schedule(self):
+        origin = "https://origin.example/database-study"
+        distinct_commentary = [
+            "quorum majority node failure replicated state machine safety proof",
+            "serializable transactions write skew snapshot isolation anomaly audit",
+            "leader election network partition replicated log production metrics",
+        ]
+        source_records = [
+            {
+                "url": f"https://publisher{index}.example/report",
+                "original_url": origin,
+                "content": (
+                    f"Database consistency {distinct_commentary[index - 1]}. " * 18
+                ),
+            }
+            for index in range(1, 4)
+        ]
+        schedule, _, marginal, graph = _apply_marginal_evidence_controls(
+            "database consistency",
+            {"source_records": source_records},
+            {"sufficient": True, "repair_queries": [], "next_actions": []},
+        )
+
+        assert graph["independent_root_count"] == 1
+        assert marginal["decision"] == "continue_provenance_diversify"
+        assert schedule["sufficient"] is False
+        assert (
+            "marginal:not_enough_independent_evidence_roots" in schedule["reasons"]
+        )
+
+
 class TestCompletionThreshold:
     def test_extracts_top_count_threshold(self):
         goal = {"description": "Find top 10 Twitter/X influencers who talk about AI agent memory"}
@@ -111,6 +170,26 @@ class TestCompletionThreshold:
     def test_extracts_minimum_threshold(self):
         goal = {"task_done_when": "Store at least 5 validated competitors with URLs"}
         assert _extract_completion_threshold(goal) == 5
+
+    def test_claim_matrix_blocks_citation_bound_completion(self):
+        matrix = {"publication_ready": False, "unsupported_claims": 1}
+        assert not _claim_matrix_allows_completion(matrix, citation_required=True)
+
+    def test_claim_matrix_allows_verified_completion(self):
+        matrix = {"publication_ready": True, "unsupported_claims": 0}
+        assert _claim_matrix_allows_completion(matrix, citation_required=True)
+
+    def test_non_citation_research_does_not_require_matrix(self):
+        assert _claim_matrix_allows_completion({}, citation_required=False)
+
+    def test_resolved_temporal_conflict_does_not_block_completion(self):
+        assert not _contradiction_blocks_completion(
+            {
+                "status": "resolved",
+                "resolution_status": "resolved_by_temporal_supersession",
+            }
+        )
+        assert _contradiction_blocks_completion({"status": "unresolved"})
 
 
 # ============== Evidence extraction ==============
@@ -157,6 +236,29 @@ class TestExtractResearchEvidence:
         ]
         evidence = _extract_research_evidence(log, "")
         assert evidence["sources"].count("https://example.com/same") == 1
+
+    def test_extract_content_preserves_temporal_and_origin_metadata(self):
+        log = [
+            {
+                "type": "tool_call",
+                "tool": "extract_content",
+                "args": {"url": "https://example.com/article"},
+                "result": {
+                    "url": "https://example.com/article",
+                    "content": "Current price evidence with enough readable material. " * 4,
+                    "published_at": "2026-08-21T09:00:00Z",
+                    "original_url": "https://origin.example/report",
+                    "metadata": {"dateModified": "2026-08-22"},
+                },
+            }
+        ]
+
+        evidence = _extract_research_evidence(log, "")
+
+        record = evidence["source_records"][0]
+        assert record["published_at"] == "2026-08-21T09:00:00Z"
+        assert record["original_url"] == "https://origin.example/report"
+        assert record["metadata"]["dateModified"] == "2026-08-22"
 
     def test_counts_findings(self):
         log = [
@@ -329,6 +431,112 @@ class TestReporterResearchFormat:
         text = format_worker_report(result)
         assert "review the research report" in text
 
+    def test_formats_execution_scheduler_coverage(self):
+        result = WorkerExecutionResult(
+            worker="research_worker",
+            status="partial_progress",
+            response_text="",
+            evidence={
+                "execution_schedule": {
+                    "required_lanes": 3,
+                    "executed_lanes": 2,
+                    "fetched_lanes": 1,
+                    "distinct_domains": 1,
+                    "domain_target": 3,
+                },
+                "same_run_recovery": {
+                    "should_retry": True,
+                    "resolved": False,
+                    "tool_calls": 2,
+                },
+            },
+        )
+        text = format_worker_report(result)
+        assert "2/3 lanes searched" in text
+        assert "1/3 independent domains" in text
+        assert "Same-run recovery: still incomplete" in text
+
+    def test_formats_claim_level_provenance_warning(self):
+        result = WorkerExecutionResult(
+            worker="research_worker",
+            status="partial_progress",
+            response_text="",
+            evidence={
+                "claim_source_matrix": {
+                    "claim_count": 2,
+                    "supported_claims": 2,
+                    "partial_claims": 0,
+                    "unsupported_claims": 0,
+                    "conflicting_claims": 0,
+                    "corroborated_claims": 1,
+                    "false_corroborated_claims": 1,
+                    "provenance_coverage_rate": 1.0,
+                    "time_sensitive_claims": 2,
+                    "temporally_ready_claims": 1,
+                    "stale_claims": 1,
+                    "undated_temporal_claims": 0,
+                }
+            },
+        )
+
+        text = format_worker_report(result)
+
+        assert "Claim provenance" in text
+        assert "1 false corroboration" in text
+        assert "coverage=100%" in text
+        assert "Temporal evidence: 1/2 current, 1 stale, 0 undated" in text
+
+    def test_formats_temporal_supersession_audit_summary(self):
+        result = WorkerExecutionResult(
+            worker="research_worker",
+            status="completed",
+            response_text="",
+            evidence={
+                "claim_source_matrix": {
+                    "claim_count": 3,
+                    "supported_claims": 2,
+                    "partial_claims": 0,
+                    "unsupported_claims": 0,
+                    "conflicting_claims": 0,
+                    "corroborated_claims": 1,
+                    "false_corroborated_claims": 0,
+                    "provenance_coverage_rate": 1.0,
+                    "resolved_temporal_conflicts": 1,
+                    "unresolved_contradictions": 0,
+                    "superseded_claims": 1,
+                }
+            },
+        )
+
+        text = format_worker_report(result)
+
+        assert "Temporal supersession: 1 resolved" in text
+        assert "0 active conflicts" in text
+        assert "1 historical claims retained" in text
+
+    def test_formats_cross_run_claim_lifecycle(self):
+        result = WorkerExecutionResult(
+            worker="research_worker",
+            status="completed",
+            response_text="",
+            evidence={
+                "claim_lifecycle": {
+                    "scope_key": "scope-1",
+                    "summary": {
+                        "tracked_subjects": 4,
+                        "confirmed_transitions": 2,
+                        "pending_changes": 1,
+                    },
+                }
+            },
+        )
+
+        text = format_worker_report(result)
+
+        assert "Claim lifecycle: 4 tracked subjects" in text
+        assert "2 confirmed transitions" in text
+        assert "1 pending changes" in text
+
     def test_searching_next_step(self):
         result = WorkerExecutionResult(
             worker="research_worker",
@@ -381,6 +589,106 @@ class TestResearchToolWhitelist:
 
 class TestResearchWorkerSessionLog:
     @pytest.mark.asyncio
+    async def test_same_run_recovery_executes_only_missing_evidence_actions(self):
+        from remy.core.worker import WorkerResult
+        from remy.core.workers.research_worker import run_research_worker
+
+        goal = {
+            "goal_id": "goal-same-run-recovery",
+            "description": "Research AI agent memory architecture",
+            "goal_template": "market_research",
+        }
+        config = {"research_mode": "balanced", "source_scope": "web"}
+        plan = _build_research_query_plan(goal, config)
+
+        def search_event(query, url):
+            return {
+                "type": "tool_call",
+                "tool": "web_search",
+                "args": {"query": query},
+                "result": {"results": [{"url": url, "title": "Evidence"}]},
+            }
+
+        def fetch_event(url):
+            return {
+                "type": "tool_call",
+                "tool": "extract_content",
+                "args": {"url": url},
+                "result": {
+                    "url": url,
+                    "content": (
+                        f"AI agent memory architecture research evidence from {url}. " * 20
+                    ),
+                },
+            }
+
+        first_url = "https://primary.example/evidence"
+        first_log = [
+            search_event(plan["queries"][0]["text"], first_url),
+            fetch_event(first_url),
+        ]
+        recovery_log = []
+        for index, query in enumerate(plan["queries"][1:], start=2):
+            url = f"https://source{index}.example/evidence"
+            recovery_log.extend((search_event(query["text"], url), fetch_event(url)))
+
+        with (
+            patch("remy.core.worker.execute_single_worker", new_callable=AsyncMock) as mock_exec,
+            patch("remy.core.research_sessions.load_research_session", return_value=None),
+            patch("remy.core.research_sessions.save_research_session", side_effect=lambda s: s),
+            patch("remy.core.research_sessions.append_queries"),
+            patch("remy.core.research_sessions.record_source_fetch"),
+            patch("remy.core.research_sessions.record_source_decision"),
+            patch("remy.core.research_sessions.record_finding"),
+            patch("remy.core.research_sessions.record_contradictions"),
+            patch("remy.core.research_sessions.mark_session_completed"),
+        ):
+            mock_exec.side_effect = [
+                WorkerResult(
+                    role="osint",
+                    status="success",
+                    output="Initial evidence.",
+                    tool_calls=2,
+                    session_log=first_log,
+                ),
+                WorkerResult(
+                    role="osint",
+                    status="success",
+                    output="Recovered evidence.",
+                    tool_calls=4,
+                    session_log=recovery_log,
+                ),
+            ]
+            result = await run_research_worker(
+                goal=goal,
+                session_id="sess-same-run-recovery",
+                session_log=[],
+                history=[],
+            )
+
+        assert mock_exec.await_count == 2
+        recovery_call = mock_exec.await_args_list[1]
+        assert "SAME-RUN EVIDENCE RECOVERY" in recovery_call.kwargs["task"].instruction
+        assert recovery_call.kwargs["step_budget"] <= 4
+        assert recovery_call.kwargs["timeout_override"] == 30
+        assert result.evidence["execution_schedule"]["sufficient"] is True
+        assert result.evidence["same_run_recovery"]["resolved"] is True
+        assert result.evidence["source_provenance_graph"]["independent_root_count"] == 3
+        assert any(
+            event.get("type") == "source_provenance_graph"
+            for event in result.session_log
+        )
+        assert any(
+            event.get("type") == "claim_source_matrix"
+            and "resolved_temporal_conflicts" in event
+            for event in result.session_log
+        )
+        assert any(
+            event.get("type") == "research_same_run_recovery"
+            for event in result.session_log
+        )
+
+    @pytest.mark.asyncio
     async def test_uses_worker_session_log_for_evidence(self):
         from remy.core.worker import WorkerResult
         from remy.core.workers.research_worker import run_research_worker
@@ -432,7 +740,8 @@ class TestResearchWorkerSessionLog:
                 history=[],
             )
 
-            assert result.session_log == fake_log
+            assert result.session_log[: len(fake_log)] == fake_log
+            assert result.session_log[-1]["type"] == "research_execution_schedule"
             assert result.evidence["findings_count"] == 1
             assert result.evidence["sources"] == ["https://mem0.ai"]
         assert "add_research_finding" in RESEARCH_TOOL_WHITELIST
@@ -472,10 +781,13 @@ class TestResearchWorkerSessionLog:
                 history=[],
             )
 
-        delegated_task = mock_exec.await_args.kwargs["task"]
+        delegated_task = mock_exec.await_args_list[0].kwargs["task"]
         assert delegated_task.role == "osint"
+        assert "EXECUTION QUERY PLAN" in delegated_task.instruction
+        assert "[primary]" in delegated_task.instruction
         assert result.worker == "research_worker"
         assert result.status != "error"
+        assert result.evidence["query_plan"]["strategy"] == "evidence_lanes"
         assert "Unknown role: osint" not in result.response_text
 
     def test_has_memory_tools(self):

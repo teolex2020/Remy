@@ -1,7 +1,7 @@
 # DeepSeek Harness Adaptation Plan
 
 Status: active
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 This is the canonical backlog for adapting the useful DeepSeek Harness runtime
 contracts to Remy. Trajectory observability is part of the work, but it does not
@@ -31,15 +31,19 @@ replace the runtime foundation below.
    - Parity tests cover projection-first reads after legacy drift, receipt replay,
      secret redaction, checkpoint recovery metadata, and both JSONL/event-log integrity.
 
-2. **Formal ToolPipeline over the current dispatcher — foundation complete**
+2. **Formal ToolPipeline over the current dispatcher — complete**
    - `resolve -> validate -> provenance -> pre-policy -> monotonic guards ->`
      `approval -> execute -> post-policy -> artifact spill -> durable observation`
    - Both legacy `brain_tools` and direct dispatcher calls now use the same
      ordered entrypoint while preserving handler lock boundaries.
    - Every run produces a privacy-safe receipt, persists large raw results as
      project artifacts, and appends its stages to the session event stream.
-   - Interactive approval execution remains handler-owned; the pipeline records
-     `require_approval` and cannot weaken an earlier hard denial.
+   - Interactive approval is classified and paused once by the pipeline before
+     handler execution. An approved invocation receives a context-local grant bound
+     to the exact tool and argument hash, so compatibility handlers cannot prompt
+     twice or reuse approval after any argument change. Missing approval execution,
+     denial, timeout, and classifier failure all fail closed; receipts expose only
+     outcome and target/description hashes.
 
 3. **Provenance-aware monotonic guards — complete**
    - A deny from permissions, security, or consequence memory can never be
@@ -211,6 +215,71 @@ replace the runtime foundation below.
      run outside the event loop, and expose a bounded browser deadline instead of
      leaving the conversation surface in an infinite loading state.
 
+16. **Agent-owned LabWorkflowPlan v2 and cognitive ledgers — foundation complete**
+   - Every prepared Agent Lab run now receives a validated JSON DAG with explicit
+     dependencies, role and model slots, workspace authority, artifact inputs,
+     output schemas, deterministic success gates, retry ownership, and policy-bounded
+     parallel/total-agent caps. Cycles, unknown fields, unavailable models, disallowed
+     tools, path escapes, and permission expansion fail before execution.
+   - The original list-shaped plan remains a synchronized compatibility projection;
+     existing prepared checkpoints are upgraded lazily without losing node status.
+   - A durable Task Ledger owns node states, success criteria, blockers, facts,
+     assumptions, and artifact hashes. The bounded Progress Ledger records phase
+     snapshots, completed/active/blocked/next nodes, explicit replan reasons, and
+     deterministic state fingerprints for future loop detection.
+   - Manual and autonomous execution update the same ledgers, while Agent Lab exposes
+     both ledgers and v2 node contracts in its observer UI.
+   - Private builder snapshots and the conflict/merge gate are now connected:
+     autonomous proposals stage only under run-owned `src/` and `tests/` copies,
+     and enter the canonical workspace only after baseline-hash, current-hash,
+     candidate-hash, source-policy, path, file-count, and disk-budget checks pass.
+     Stale snapshots fail closed with a durable blocker and merge receipt.
+   - Verification is now authored in a separate model call with a clean prompt that
+     contains observable source/artifact evidence but no Builder reasoning or tests.
+     Automatic routing prefers a different connected model and records `cross_model`;
+     a one-model installation remains explicit as `isolated_context_same_model`.
+     Verifier files pass through their own private snapshot and merge receipt, then run
+     with filesystem mutation blocked at both `open` and `os` boundaries.
+   - Accepted, rejected, and inconclusive outcomes export `proof-pack.json` and
+     `proof-pack.md`: plan/model assignments, merge diffs and tree hashes, bounded
+     stdout/stderr receipts, read-only verification evidence, artifact hashes, and the
+     final decision. Prompts, hidden reasoning, and verifier rationale are excluded.
+   - Complex specialist-backed runs can now activate strict Builder fan-out. The
+     central scheduler assigns two or three connected models exact, non-overlapping
+     `src/*.py` claims before any Builder call. All builders work concurrently from
+     the same canonical baseline in separate snapshots; invalid, missing, extra, or
+     overlapping files fail closed and preserve every snapshot for inspection.
+   - Fan-in is deterministic by Builder id and each claim moves through an explicit
+     `active` to `merged`, `conflict`, `failed`, or `cancelled` lifecycle. Local imports
+     are allowed only for claimed and independently source-validated workspace modules.
+     Trajectory, Agent Lab, and Proof Pack expose assignments, snapshots, exact claims,
+     served models, merge order, and receipts without source content or hidden reasoning.
+   - Snapshot retention is now operator-visible and policy-bounded: Agent Lab reports
+     per-snapshot and aggregate disk use, protected/open/merged/conflict counts, and the
+     configured aggregate budget without reading source content into the UI. Closed
+     merged snapshots can be cleaned in one action; conflict snapshots require a
+     separate explicit confirmation, while running runs, open workspaces, active claims,
+     malformed metadata, and boundary-invalid targets always fail closed.
+   - Cleanup never removes canonical files, claims, merge receipts, or branch history.
+     Every attempt records recovered bytes and exact workspace ids in the run ledger and
+     Trajectory; subsequent Proof Packs include the bounded cleanup receipts.
+   - Agent Lab now offers an explicit `container_required` runtime alongside the
+     compatible bounded-process mode. Container-required runs preflight before any
+     model call or workspace mutation and never silently downgrade when Docker/Podman,
+     a local engine, or the configured local image is unavailable.
+   - The container command denies network access and image pulls, uses an immutable
+     preflighted `sha256:` image ID, rejects remote Docker contexts, drops every Linux
+     capability, enables no-new-privileges, runs as a non-root UID, limits PID/RAM/CPU,
+     provides a bounded no-exec tmpfs, exposes a read-only root filesystem, and mounts
+     only the run-owned workspace. Independent verification mounts even that workspace
+     read-only. Timeout and cancellation perform a separate idempotent container teardown.
+   - Isolation mode, engine, image tag and immutable image ID, plus the enforced
+     security contract are recorded in execution receipts, Trajectory, Agent Lab, and
+     Proof Pack. The runtime image recipe is local and dependency-free; Remy never
+     downloads it or contacts a registry without an explicit operator action.
+   - LabWorkflowPlan v2 implementation phases are complete. Future hardening should be
+     driven by measured escape tests and platform-specific container availability.
+
 ## Safety constraints carried through every phase
 
 - Preserve provenance and trust tier for every external result.
@@ -223,8 +292,21 @@ replace the runtime foundation below.
 
 ## Current implementation slice
 
+- `src/remy/core/tool_contracts.py` compiles the five-section Tool Contract v2
+  selection contract into both runtime declaration catalogs. Its synthetic
+  routing suite measures exact-tool accuracy and forbidden-tool gravity; the
+  optional live adapter permits model selection calls but never executes tools.
+- `src/remy/core/tool_middleware.py` owns the ordered synchronous control chain
+  around tool calls. Trusted handlers may pass, patch arguments before policy,
+  block monotonically before execution, or transform results after execution.
+  Before-handler failures default to fail-closed; after-handler failures preserve
+  the real result so an already-completed side effect is not retried. Receipts
+  contain handler decisions and modified key names, never argument/result values.
+- `src/remy/core/event_bus.py` remains a lossy, fire-and-forget UI observation
+  surface and is deliberately excluded from control-flow and authorization.
 - `src/remy/core/tool_pipeline.py` owns the ordered execution contract and
-  monotonic decision primitive.
+  monotonic decision primitive, including middleware-before and middleware-after
+  stages around policy, approval, execution, and durable observation.
 - `src/remy/core/tool_dispatch.py` adapts existing handlers to the pipeline and
   appends privacy-safe policy observations.
 - `src/remy/core/brain_tools.py` now delegates its compatibility entrypoint to
@@ -272,3 +354,29 @@ replace the runtime foundation below.
 - `src/remy/web/routes/experiment_routes.py` exposes the project-scoped Lab lifecycle
   inside Experiments; `src/remy/core/agent.py` resolves only approved canary/active
   overlays and labels their cohort in model telemetry.
+- `src/remy/core/agent_lab_workflow.py` owns the non-executable DAG compiler plus
+  Task/Progress Ledger contracts; `src/remy/core/agent_lab.py` persists their synchronized
+  run projection and migration, and the coordinator/routes advance shared node state.
+- `src/remy/core/agent_lab_workspace.py` owns run-local builder snapshots, aggregate
+  retention bounds, three-way hash conflict detection, rollback-safe promotion, and
+  durable merge receipts consumed by Agent Lab and Trajectory.
+- `src/remy/core/agent_lab_builders.py` validates central Builder fan-out, connected
+  model assignments, exact non-overlapping source claims, and claim-complete shard
+  responses before parallel execution or deterministic fan-in can proceed.
+- `src/remy/core/agent_lab_proof.py` creates the privacy-bounded JSON/Markdown evidence
+  packet and stable hashes used to audit an acceptance or non-acceptance decision.
+- `src/remy/core/agent_lab_container.py` owns local-only runtime discovery, remote-context
+  rejection, immutable image identity, the hardened Docker/Podman argument contract, and
+  idempotent teardown. `packaging/agent-lab-runtime/` contains the minimal local image recipe.
+- `src/remy/core/agent_lab_backends.py` defines the shared launch/teardown protocol and
+  provenance handle used by bounded-process and container-required execution. The executor
+  now owns one validation, monitoring, cancellation, receipt, and artifact lifecycle while
+  isolation-specific command construction remains replaceable and fail-closed.
+- `src/remy/core/agent_lab_backend_registry.py` is the single backend catalog for execution,
+  coordinator preflight, preparation, API discovery, and the dynamic UI selector. New modes
+  register a descriptor, factory, probe, and optional explicit preparation action; host paths
+  and environments are removed from public status receipts.
+  Each descriptor now declares language, artifact, network, GPU, read-only verification, and
+  isolation capabilities. Automatic selection consumes a strictly validated requirement set,
+  chooses the least-privileged available match deterministically, and records every rejected
+  candidate; an explicitly requested backend never falls back.

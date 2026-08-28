@@ -208,6 +208,40 @@ class TestWorkerSystemInstruction:
 
 class TestSingleWorkerExecution:
 
+    def test_worker_model_call_honors_exact_assignment(self, patch_get_all_tools):
+        from langchain_core.messages import HumanMessage, AIMessage
+        from remy.core.worker import _worker_call_model
+
+        response = AIMessage(content="specialist result")
+        response.response_metadata = {"_served_by": "model-specialist"}
+        middleware = MagicMock(
+            messages=[HumanMessage(content="task")],
+            state_updates=[],
+            artifacts=[],
+        )
+        state = {
+            "messages": [HumanMessage(content="task")],
+            "session_id": "session-model",
+            "channel": "worker-researcher",
+            "tool_call_count": 0,
+            "_live_tool_log": [],
+            "_max_iterations": 2,
+            "_allowed_tools": ("recall",),
+            "_assigned_model": "model-specialist",
+            "_allow_model_fallback": False,
+            "_served_by": "",
+        }
+
+        with patch(
+            "remy.core.turn_middleware.run_before_model_middleware",
+            return_value=middleware,
+        ), patch("remy.core.llm.call_llm", return_value=response) as mock_call:
+            result = _worker_call_model(state)
+
+        assert mock_call.call_args.kwargs["preferred_model"] == "model-specialist"
+        assert mock_call.call_args.kwargs["allow_fallback"] is False
+        assert result["_served_by"] == "model-specialist"
+
     @pytest.mark.asyncio
     async def test_worker_returns_result(self, mock_settings, patch_get_all_tools):
         from remy.core.worker import execute_single_worker, WorkerTask

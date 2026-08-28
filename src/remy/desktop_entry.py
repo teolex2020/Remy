@@ -20,7 +20,7 @@ def _run_internal_aura_probe(argv: list[str]) -> bool:
     """Handle the isolated Aura health check used by packaged builds.
 
     In a PyInstaller build ``sys.executable`` points at ``Remy.exe`` rather
-    than at a Python interpreter. The regular ``python -c`` probe therefore
+    than at a Python interpreter.  The regular ``python -c`` probe therefore
     has to re-enter this executable through a private command-line argument.
     """
     if not argv or argv[0] != _INTERNAL_AURA_PROBE_ARG:
@@ -59,7 +59,6 @@ def _acquire_single_instance() -> bool:
         kernel32.CloseHandle(handle)
         return False
 
-    # Holding the handle for the process lifetime holds the named mutex.
     _single_instance_mutex = (kernel32, handle)
     return True
 

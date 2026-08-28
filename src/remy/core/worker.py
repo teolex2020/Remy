@@ -34,6 +34,8 @@ class WorkerTask:
     approval_mode: str = "none"  # "none" | "publish" | "financial" | "all_clicks"
     delegation_depth: int = 0    # 0 = top-level worker; 1 = sub-worker (max)
     allowed_tools: tuple[str, ...] = ()  # Optional hard ceiling; empty preserves legacy role scope
+    model: str = ""           # Explicit orchestrator assignment; blank uses normal routing
+    allow_model_fallback: bool = True
 
 
 @dataclass
@@ -45,6 +47,8 @@ class WorkerResult:
     tool_calls: int = 0
     elapsed_sec: float = 0.0
     session_log: list = field(default_factory=list)  # tool call log (survives timeout)
+    assigned_model: str = ""
+    served_by: str = ""
 
 
 # ============== TOOL SCOPING ==============
@@ -140,6 +144,9 @@ class WorkerState(TypedDict):
     _live_tool_log: list  # shared mutable list for cross-thread tool tracking
     _max_iterations: int  # per-worker iteration cap (from step_budget or settings)
     _allowed_tools: tuple[str, ...]
+    _assigned_model: str
+    _allow_model_fallback: bool
+    _served_by: str
 
 
 def _worker_call_model(state: WorkerState) -> dict:
@@ -164,7 +171,14 @@ def _worker_call_model(state: WorkerState) -> dict:
     from remy.core.model_trace import model_call_event
 
     llm_start = time.time()
-    response = call_llm(messages, tools=tools, purpose=f"worker-{role_name}")
+    assigned_model = str(state.get("_assigned_model") or "")
+    response = call_llm(
+        messages,
+        tools=tools,
+        purpose=f"worker-{role_name}",
+        preferred_model=assigned_model or None,
+        allow_fallback=bool(state.get("_allow_model_fallback", True)),
+    )
     llm_duration_ms = int((time.time() - llm_start) * 1000)
     raw_response = response
 
@@ -189,7 +203,12 @@ def _worker_call_model(state: WorkerState) -> dict:
         for artifact in middleware_result.artifacts:
             live_log.append({"type": "artifact", **artifact})
 
-    return {"messages": [*middleware_result.state_updates, response]}
+    metadata = getattr(raw_response, "response_metadata", {}) or {}
+    served_by = str(metadata.get("_served_by") or assigned_model or "")
+    return {
+        "messages": [*middleware_result.state_updates, response],
+        "_served_by": served_by,
+    }
 
 
 def _worker_call_tools(state: WorkerState) -> dict:
@@ -393,6 +412,7 @@ async def _execute_single_worker_impl(
             role=task.role, status="error",
             output=f"Unknown role: {task.role}", tool_calls=0, elapsed_sec=0,
             session_log=session_log,
+            assigned_model=str(task.model or ""),
         )
 
     worker_channel = f"worker-{task.role}"
@@ -475,6 +495,9 @@ async def _execute_single_worker_impl(
             "_approval_mode": task.approval_mode,
             "_delegation_depth": task.delegation_depth,
             "_allowed_tools": tuple(task.allowed_tools),
+            "_assigned_model": str(task.model or ""),
+            "_allow_model_fallback": bool(task.allow_model_fallback),
+            "_served_by": "",
         }
 
         config = {"recursion_limit": effective_iterations * 2 + 5}
@@ -525,6 +548,8 @@ async def _execute_single_worker_impl(
             output=output or "Worker completed without output.",
             tool_calls=tool_calls, elapsed_sec=round(elapsed, 1),
             session_log=session_log,
+            assigned_model=str(task.model or ""),
+            served_by=str(result_state.get("_served_by") or task.model or ""),
         )
 
     except asyncio.TimeoutError:
@@ -557,6 +582,7 @@ async def _execute_single_worker_impl(
             tool_calls=recovered_tool_count,
             elapsed_sec=round(elapsed, 1),
             session_log=recovered_log,
+            assigned_model=str(task.model or ""),
         )
 
     except Exception as e:
@@ -577,6 +603,7 @@ async def _execute_single_worker_impl(
             role=task.role, status="error",
             output=str(e), elapsed_sec=round(elapsed, 1),
             session_log=list(live_tool_log),
+            assigned_model=str(task.model or ""),
         )
 
 
@@ -604,7 +631,12 @@ async def execute_single_worker(
         brain_id=owner.brain_id,
         session_id=session_id,
         channel=channel,
-        metadata={"role": task.role, "instruction": task.instruction[:500]},
+        metadata={
+            "role": task.role,
+            "instruction": task.instruction[:500],
+            "assigned_model": str(task.model or ""),
+            "allow_model_fallback": bool(task.allow_model_fallback),
+        },
     )
     attempt_id = attempt["attempt_id"]
     ledger.mark_running(attempt_id)
@@ -625,7 +657,12 @@ async def execute_single_worker(
             attempt_id,
             terminal,
             error=result.output if terminal == "failed" else "",
-            metadata={"tool_calls": result.tool_calls, "elapsed_sec": result.elapsed_sec},
+            metadata={
+                "tool_calls": result.tool_calls,
+                "elapsed_sec": result.elapsed_sec,
+                "assigned_model": result.assigned_model,
+                "served_by": result.served_by,
+            },
         )
         return result
     except asyncio.CancelledError:
@@ -656,6 +693,7 @@ async def execute_workers(
     event_bus.emit("workers_started", {
         "count": len(tasks),
         "roles": [t.role for t in tasks],
+        "models": [str(t.model or "automatic") for t in tasks],
     })
 
     results = await asyncio.gather(
@@ -678,12 +716,21 @@ async def execute_workers(
             final.append(WorkerResult(
                 role=tasks[i].role, status="error",
                 output=str(r), tool_calls=0, elapsed_sec=0,
+                assigned_model=str(tasks[i].model or ""),
             ))
         else:
             final.append(r)
 
     event_bus.emit("workers_completed", {
-        "results": [{"role": r.role, "status": r.status} for r in final],
+        "results": [
+            {
+                "role": r.role,
+                "status": r.status,
+                "assigned_model": r.assigned_model,
+                "served_by": r.served_by,
+            }
+            for r in final
+        ],
     })
 
     return final

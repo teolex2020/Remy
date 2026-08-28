@@ -702,10 +702,12 @@ def workspace_shell(args: dict[str, Any], *, tool: str = "shell_exec") -> str:
                                "truncated_stdout": len(completed.stdout or "") > 50000,
                                "truncated_stderr": len(completed.stderr or "") > 10000})
 
-        from remy.core.approval_queue import approval_queue
+        from remy.core.approval_queue import approval_queue, has_pipeline_approval_grant
         description = (f"Run a local command in workspace '{grant['name']}'?\n\n"
                        f"Directory: {working_dir}\nCommand: {command}\n\n"
                        "Execute runs with the current Windows user privileges and is not an OS sandbox.")
+        if has_pipeline_approval_grant(tool, args):
+            return run()
         return approval_queue.request_approval_sync(description, run, tool_name=tool, tool_args=args)
     except subprocess.TimeoutExpired:
         return json.dumps({"error": f"Command timed out after {timeout}s", "command": command})

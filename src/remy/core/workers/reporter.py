@@ -98,6 +98,89 @@ def _format_research_report(result: WorkerExecutionResult, fallback_text: str = 
     if sources:
         lines.append(f"Sources: {', '.join(sources[:5])}")
 
+    matrix = evidence.get("claim_source_matrix") or {}
+    if isinstance(matrix, dict) and matrix.get("claim_count"):
+        lines.append(
+            "Claim coverage: "
+            f"{matrix.get('supported_claims', 0)}/{matrix.get('claim_count', 0)} supported, "
+            f"{matrix.get('partial_claims', 0)} partial, "
+            f"{matrix.get('unsupported_claims', 0)} unsupported, "
+            f"{matrix.get('conflicting_claims', 0)} conflict"
+        )
+        lines.append(
+            "Claim provenance: "
+            f"{matrix.get('corroborated_claims', 0)} independently corroborated, "
+            f"{matrix.get('false_corroborated_claims', 0)} false corroboration, "
+            f"coverage={float(matrix.get('provenance_coverage_rate', 0.0)):.0%}"
+        )
+        if matrix.get("time_sensitive_claims"):
+            lines.append(
+                "Temporal evidence: "
+                f"{matrix.get('temporally_ready_claims', 0)}/"
+                f"{matrix.get('time_sensitive_claims', 0)} current, "
+                f"{matrix.get('stale_claims', 0)} stale, "
+                f"{matrix.get('undated_temporal_claims', 0)} undated"
+            )
+        if (
+            matrix.get("resolved_temporal_conflicts")
+            or matrix.get("superseded_claims")
+            or matrix.get("unresolved_contradictions")
+        ):
+            lines.append(
+                "Temporal supersession: "
+                f"{matrix.get('resolved_temporal_conflicts', 0)} resolved, "
+                f"{matrix.get('unresolved_contradictions', 0)} active conflicts, "
+                f"{matrix.get('superseded_claims', 0)} historical claims retained"
+            )
+
+    lifecycle = evidence.get("claim_lifecycle") or {}
+    lifecycle_summary = (
+        lifecycle.get("summary") if isinstance(lifecycle, dict) else {}
+    ) or {}
+    if lifecycle_summary.get("tracked_subjects"):
+        lines.append(
+            "Claim lifecycle: "
+            f"{lifecycle_summary.get('tracked_subjects', 0)} tracked subjects, "
+            f"{lifecycle_summary.get('confirmed_transitions', 0)} confirmed transitions, "
+            f"{lifecycle_summary.get('pending_changes', 0)} pending changes"
+        )
+
+    schedule = evidence.get("execution_schedule") or {}
+    if isinstance(schedule, dict) and schedule.get("required_lanes"):
+        lines.append(
+            "Execution coverage: "
+            f"{schedule.get('executed_lanes', 0)}/{schedule.get('required_lanes', 0)} lanes searched, "
+            f"{schedule.get('fetched_lanes', 0)} fetched, "
+            f"{schedule.get('distinct_domains', 0)}/{schedule.get('domain_target', 3)} independent domains"
+        )
+
+    recovery = evidence.get("same_run_recovery") or {}
+    if isinstance(recovery, dict) and recovery.get("should_retry"):
+        recovery_state = "resolved" if recovery.get("resolved") else "still incomplete"
+        lines.append(
+            "Same-run recovery: "
+            f"{recovery_state}, {recovery.get('tool_calls', 0)} additional tool calls"
+        )
+
+    marginal = evidence.get("marginal_evidence") or {}
+    if isinstance(marginal, dict) and marginal.get("rows"):
+        lines.append(
+            "Marginal evidence: "
+            f"{marginal.get('accepted_source_count', 0)} high-gain sources, "
+            f"{marginal.get('duplicate_rejected', 0)} duplicates rejected, "
+            f"decision={marginal.get('decision', 'continue_fetch')}"
+        )
+
+    provenance = evidence.get("source_provenance_graph") or {}
+    if isinstance(provenance, dict) and provenance.get("node_count"):
+        lines.append(
+            "Provenance: "
+            f"{provenance.get('independent_root_count', 0)} independent roots, "
+            f"{provenance.get('primary_root_count', 0)} primary, "
+            f"{provenance.get('syndicated_source_count', 0)} syndicated, "
+            f"{provenance.get('derived_source_count', 0)} derived"
+        )
+
     project_id = evidence.get("project_id", "")
     if project_id:
         lines.append(f"Project: {project_id}")

@@ -1,0 +1,53 @@
+version: 1
+thresholds:
+  min_decision_accuracy: 1.0
+  min_sufficiency_accuracy: 1.0
+  min_duplicate_accuracy: 1.0
+  min_prefetch_accuracy: 1.0
+
+cases:
+  - id: g01_three_independent_high_gain
+    scenario: diverse
+    expected_decision: stop_sufficient
+    expected_sufficient: true
+    expected_accepted: 3
+
+  - id: g02_cross_domain_content_copies
+    scenario: duplicates
+    expected_decision: stop_saturated_incomplete
+    expected_sufficient: false
+    expected_accepted: 1
+    expected_duplicates: 2
+
+  - id: g03_subdomains_one_publisher
+    scenario: subdomains
+    expected_decision: continue_diversify
+    expected_sufficient: false
+    expected_accepted: 3
+
+  - id: g04_irrelevant_long_pages
+    scenario: irrelevant
+    expected_decision: continue_fetch
+    expected_sufficient: false
+    expected_accepted: 0
+
+  - id: g05_two_good_sources
+    scenario: two_sources
+    expected_decision: continue_diversify
+    expected_sufficient: false
+    expected_accepted: 2
+
+  - id: f01_prefetch_duplicate_url
+    scenario: prefetch_duplicate
+    expected_selected: 2
+    expected_duplicate_suppressed: 1
+
+  - id: f02_prefetch_publisher_cap
+    scenario: prefetch_publisher
+    expected_selected: 1
+    expected_publisher_suppressed: 2
+
+  - id: f03_prefetch_irrelevant_noise
+    scenario: prefetch_noise
+    expected_selected: 1
+    expected_irrelevant_rejected: 1

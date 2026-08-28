@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "metrics": {
+    "status_accuracy": 1.0,
+    "next_action_accuracy": 1.0,
+    "repair_accuracy": 1.0,
+    "recovery_decision_accuracy": 1.0,
+    "recovery_bound_compliance": 1.0,
+    "false_completion_rate": 0.0
+  }
+}

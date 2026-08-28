@@ -1,0 +1,243 @@
+version: 2
+runner_schema: 1
+
+thresholds:
+  min_status_accuracy: 0.95
+  min_support_url_precision: 0.95
+  min_support_url_recall: 0.95
+  min_unsupported_recall: 0.95
+  min_conflict_recall: 0.95
+  min_corroboration_accuracy: 1.0
+  min_false_corroboration_recall: 1.0
+  min_temporal_status_accuracy: 1.0
+  min_stale_claim_recall: 1.0
+  min_supersession_accuracy: 1.0
+  max_false_support_rate: 0.02
+  max_unsafe_supersession_rate: 0.0
+  min_publication_ready_accuracy: 1.0
+
+regression_tolerances:
+  status_accuracy: 0.02
+  support_url_precision: 0.02
+  support_url_recall: 0.02
+  unsupported_recall: 0.02
+  conflict_recall: 0.02
+  corroboration_accuracy: 0.0
+  false_corroboration_recall: 0.0
+  temporal_status_accuracy: 0.0
+  stale_claim_recall: 0.0
+  supersession_accuracy: 0.0
+  false_support_rate: 0.01
+  unsafe_supersession_rate: 0.0
+  publication_ready_accuracy: 0.0
+
+cases:
+  - id: m01_explicit_primary_support
+    claims:
+      - summary: "SQLite WAL allows concurrent readers."
+        source_url: "https://sqlite.org/wal"
+    sources:
+      - url: "https://sqlite.org/wal"
+        title: "Write-Ahead Logging"
+        content: "SQLite WAL allows concurrent readers while a writer appends to the log."
+    expected:
+      - status: supported
+        supporting_urls: ["https://sqlite.org/wal"]
+
+  - id: m02_missing_source
+    claims:
+      - summary: "Quantum batteries dominate the consumer market."
+    sources:
+      - url: "https://example.test/pasta"
+        content: "A recipe for tomato pasta and boiling water."
+    expected:
+      - status: unsupported
+        supporting_urls: []
+
+  - id: m03_url_without_body
+    claims:
+      - summary: "The service costs $20 per month."
+        source_url: "https://vendor.test/pricing"
+    sources:
+      - url: "https://vendor.test/pricing"
+        title: "Pricing"
+        content: ""
+    expected:
+      - status: partial
+        supporting_urls: []
+
+  - id: m04_identity_mismatch
+    claims:
+      - summary: "The cited paper reports a 20 percent improvement."
+        source_url: "https://arxiv.org/abs/2412.15803"
+    sources:
+      - url: "https://arxiv.org/abs/2412.15803"
+        title: "A different paper"
+        content: "The cited paper reports a 20 percent improvement."
+        evidence_packet: {ok: false, has_mismatch: true}
+    expected:
+      - status: partial
+        supporting_urls: []
+
+  - id: m05_implicit_content_binding
+    claims:
+      - summary: "WebAuthn passkeys use public-key cryptography for authentication."
+    sources:
+      - url: "https://w3.org/webauthn"
+        content: "WebAuthn passkeys use public-key cryptography for authentication."
+    expected:
+      - status: supported
+        supporting_urls: ["https://w3.org/webauthn"]
+
+  - id: m06_explicit_conflict
+    claims:
+      - summary: "The supported release is version 17."
+        source_url: "https://vendor.test/releases"
+    sources:
+      - url: "https://vendor.test/releases"
+        content: "The supported release is version 17."
+      - url: "https://mirror.test/releases"
+        content: "The supported release is version 16."
+    contradictions:
+      - id: c1
+        source_a: "https://vendor.test/releases"
+        source_b: "https://mirror.test/releases"
+        claim_a: "The supported release is version 17."
+        claim_b: "The supported release is version 16."
+    expected:
+      - status: conflict
+        supporting_urls: ["https://vendor.test/releases"]
+
+  - id: m07_mixed_claims
+    claims:
+      - summary: "Python TaskGroup provides structured concurrency."
+        source_url: "https://docs.python.org/3/library/asyncio-task.html"
+      - summary: "TaskGroup automatically retries failed network requests."
+    sources:
+      - url: "https://docs.python.org/3/library/asyncio-task.html"
+        content: "Python TaskGroup provides structured concurrency for related asyncio tasks."
+    expected:
+      - status: supported
+        supporting_urls: ["https://docs.python.org/3/library/asyncio-task.html"]
+      - status: unsupported
+        supporting_urls: []
+
+  - id: m08_two_domain_corroboration
+    claims:
+      - summary: "WebAuthn passkeys use public-key cryptography for authentication."
+    sources:
+      - url: "https://w3.org/webauthn"
+        content: "WebAuthn passkeys use public-key cryptography for authentication. The specification defines relying parties, authenticators, credential creation, challenge verification, and signature counters."
+      - url: "https://developer.mozilla.org/passkeys"
+        content: "WebAuthn passkeys use public-key cryptography for authentication. The browser guide explains conditional mediation, user activation, credential discovery, account recovery, and interface compatibility."
+    expected:
+      - status: supported
+        corroborated: true
+        supporting_urls:
+          - "https://w3.org/webauthn"
+          - "https://developer.mozilla.org/passkeys"
+
+  - id: m09_cross_domain_false_corroboration
+    claims:
+      - summary: "The database protocol tolerates one replica failure."
+    sources:
+      - url: "https://publisher-one.test/report"
+        original_url: "https://origin.test/protocol-study"
+        content: "The database protocol tolerates one replica failure. Quorum intersection safety proof and replicated state machine analysis cover the formal model and node assumptions."
+      - url: "https://publisher-two.test/article"
+        original_source_url: "https://origin.test/protocol-study"
+        content: "The database protocol tolerates one replica failure. Production telemetry, network partition experiments, recovery timelines, and operational measurements summarize the result."
+    expected:
+      - status: supported
+        corroborated: false
+        false_corroboration: true
+        publication_ready: false
+        supporting_urls:
+          - "https://publisher-one.test/report"
+          - "https://publisher-two.test/article"
+
+  - id: m10_stale_current_price
+    reference_time: "2026-08-22T12:00:00+00:00"
+    claims:
+      - summary: "The current service price is $20 per month."
+        source_url: "https://vendor.test/pricing"
+    sources:
+      - url: "https://vendor.test/pricing"
+        published_at: "2026-06-01T09:00:00Z"
+        content: "The current service price is $20 per month."
+    expected:
+      - status: supported
+        temporal_status: stale
+        publication_ready: false
+        supporting_urls: ["https://vendor.test/pricing"]
+
+  - id: m11_fresh_current_price
+    reference_time: "2026-08-22T12:00:00+00:00"
+    claims:
+      - summary: "The current service price is $20 per month."
+        source_url: "https://vendor.test/pricing"
+    sources:
+      - url: "https://vendor.test/pricing"
+        published_at: "2026-08-21T09:00:00Z"
+        content: "The current service price is $20 per month."
+    expected:
+      - status: supported
+        temporal_status: fresh
+        publication_ready: true
+        supporting_urls: ["https://vendor.test/pricing"]
+
+  - id: m12_safe_price_supersession
+    reference_time: "2026-08-22T12:00:00+00:00"
+    claims:
+      - summary: "The current service price is $20 per month."
+        source_url: "https://archive.vendor.test/pricing"
+      - summary: "The current service price is $25 per month."
+        source_url: "https://vendor.test/pricing"
+    sources:
+      - url: "https://archive.vendor.test/pricing"
+        published_at: "2026-06-01T09:00:00Z"
+        content: "The current service price is $20 per month. Archived billing tiers describe the former quotas and monthly subscription."
+      - url: "https://vendor.test/pricing"
+        published_at: "2026-08-21T09:00:00Z"
+        content: "The current service price is $25 per month. Updated checkout terms describe active quotas, annual discounts, and billing conditions."
+    contradictions:
+      - id: price-change
+        source_a: "https://archive.vendor.test/pricing"
+        source_b: "https://vendor.test/pricing"
+        claim_a: "The current service price is $20 per month."
+        claim_b: "The current service price is $25 per month."
+    expected:
+      - status: superseded
+        resolved_temporal_conflicts: 1
+        publication_ready: true
+        supporting_urls: ["https://archive.vendor.test/pricing"]
+      - status: supported
+        supporting_urls: ["https://vendor.test/pricing"]
+
+  - id: m13_immutable_science_disagreement
+    reference_time: "2026-08-22T12:00:00+00:00"
+    claims:
+      - summary: "The experiment reports accuracy of 71 percent."
+        source_url: "https://paper-one.test/result"
+      - summary: "The experiment reports accuracy of 82 percent."
+        source_url: "https://paper-two.test/result"
+    sources:
+      - url: "https://paper-one.test/result"
+        published_at: "2026-05-01T09:00:00Z"
+        content: "The experiment reports accuracy of 71 percent. Dataset alpha and its evaluation protocol define the published result."
+      - url: "https://paper-two.test/result"
+        published_at: "2026-08-20T09:00:00Z"
+        content: "The experiment reports accuracy of 82 percent. Dataset beta and an alternative evaluation protocol define the result."
+    contradictions:
+      - id: science-disagreement
+        source_a: "https://paper-one.test/result"
+        source_b: "https://paper-two.test/result"
+        claim_a: "The experiment reports accuracy of 71 percent."
+        claim_b: "The experiment reports accuracy of 82 percent."
+    expected:
+      - status: conflict
+        resolved_temporal_conflicts: 0
+        publication_ready: false
+        supporting_urls: ["https://paper-one.test/result"]
+      - status: conflict
+        supporting_urls: ["https://paper-two.test/result"]

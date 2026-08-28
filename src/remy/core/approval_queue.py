@@ -27,14 +27,46 @@ Reply handling (from telegram_bot.py):
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+_active_pipeline_grant: ContextVar[tuple[str, str] | None] = ContextVar(
+    "remy_pipeline_approval_grant",
+    default=None,
+)
+
+
+def _approval_fingerprint(tool_name: str, args: dict | None) -> tuple[str, str]:
+    payload = json.dumps(dict(args or {}), ensure_ascii=False, sort_keys=True, default=str)
+    return (
+        str(tool_name or "").strip(),
+        hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    )
+
+
+@contextmanager
+def pipeline_approval_grant(tool_name: str, args: dict | None):
+    """Grant one context-local execution of the exact approved invocation."""
+    token = _active_pipeline_grant.set(_approval_fingerprint(tool_name, args))
+    try:
+        yield
+    finally:
+        _active_pipeline_grant.reset(token)
+
+
+def has_pipeline_approval_grant(tool_name: str, args: dict | None) -> bool:
+    return _active_pipeline_grant.get() == _approval_fingerprint(tool_name, args)
 
 # ============================================================
 # URL patterns that trigger approval
@@ -638,6 +670,8 @@ def needs_approval(tool_name: str, args: dict, url: str | None = None, channel: 
     (desktop, telegram, voice) because the user explicitly asked for the action.
     Financial URLs and wallet tools always require approval regardless of channel.
     """
+    if has_pipeline_approval_grant(tool_name, args):
+        return False
     if not approval_queue.enabled:
         return False
 

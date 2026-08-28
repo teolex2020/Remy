@@ -410,6 +410,124 @@ def test_healthy_diagnostics_reports_completed_work():
     assert result["successes"]["completed_verifications"] == 1
 
 
+def test_diagnostics_exposes_claim_level_false_corroboration():
+    records = [
+        _record(
+            "verification-1",
+            "VERIFICATION",
+            output={
+                "type": "claim_source_matrix",
+                "false_corroborated_claims": 2,
+            },
+        )
+    ]
+
+    result = analyze_trajectory(records)
+
+    assert result["health"] == "degraded"
+    assert result["warning_count"] == 1
+    assert result["findings"][0]["category"] == "false-corroboration"
+    assert "same evidence root" in result["findings"][0]["title"]
+
+
+def test_diagnostics_exposes_stale_and_undated_temporal_evidence():
+    records = [
+        _record(
+            "verification-1",
+            "VERIFICATION",
+            output={
+                "type": "claim_source_matrix",
+                "stale_claims": 2,
+                "undated_temporal_claims": 1,
+            },
+        )
+    ]
+
+    result = analyze_trajectory(records)
+
+    assert result["health"] == "degraded"
+    assert result["warning_count"] == 1
+    assert result["findings"][0]["category"] == "temporal-evidence"
+    assert "2 stale, 1 undated" in result["findings"][0]["title"]
+
+
+def test_diagnostics_exposes_safe_temporal_supersession_as_information():
+    records = [
+        _record(
+            "verification-1",
+            "VERIFICATION",
+            output={
+                "type": "claim_source_matrix",
+                "resolved_temporal_conflicts": 1,
+                "superseded_claims": 1,
+                "unresolved_contradictions": 0,
+            },
+        )
+    ]
+
+    result = analyze_trajectory(records)
+
+    assert result["health"] == "healthy"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["severity"] == "info"
+    assert result["findings"][0]["category"] == "temporal-supersession"
+    assert "history" in result["findings"][0]["explanation"]
+
+
+def test_diagnostics_warns_when_contradiction_remains_active():
+    records = [
+        _record(
+            "verification-1",
+            "VERIFICATION",
+            output={
+                "type": "claim_source_matrix",
+                "unresolved_contradictions": 2,
+            },
+        )
+    ]
+
+    result = analyze_trajectory(records)
+
+    assert result["health"] == "degraded"
+    assert result["warning_count"] == 1
+    assert result["findings"][0]["category"] == "unresolved-contradictions"
+
+
+def test_diagnostics_exposes_confirmed_claim_lifecycle_transition():
+    result = analyze_trajectory([
+        _record(
+            "verification-lifecycle",
+            "VERIFICATION",
+            output={
+                "type": "claim_lifecycle",
+                "summary": {"tracked_subjects": 1},
+                "last_run": {"confirmed_transitions": 1, "pending_changes": 0},
+            },
+        )
+    ])
+
+    assert result["health"] == "healthy"
+    assert result["findings"][0]["severity"] == "info"
+    assert result["findings"][0]["category"] == "claim-lifecycle-transition"
+
+
+def test_diagnostics_warns_about_pending_claim_lifecycle_change():
+    result = analyze_trajectory([
+        _record(
+            "verification-lifecycle",
+            "VERIFICATION",
+            output={
+                "type": "claim_lifecycle",
+                "summary": {"tracked_subjects": 1},
+                "last_run": {"confirmed_transitions": 0, "pending_changes": 1},
+            },
+        )
+    ])
+
+    assert result["health"] == "degraded"
+    assert result["findings"][0]["category"] == "claim-lifecycle-pending"
+
+
 def test_failed_provider_attempt_is_informational_when_request_recovers():
     records = [
         _record("request-1", "REQUEST", request_id="request-1"),

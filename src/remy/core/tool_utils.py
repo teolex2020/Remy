@@ -207,12 +207,16 @@ def clear_recall_cache(new_content: str = "") -> None:
 
 _SEARCH_CACHE_TAG = "web-search-cache"
 _SEARCH_CACHE_TTL_HOURS = 24
-_SEARCH_CACHE_BACKEND = "ddgs-v3-pinned"
+_SEARCH_CACHE_BACKEND = "ddgs-v4-local-first"
 
 
 def _get_cached_search(query: str) -> dict | None:
     """Check if a similar web search was run recently. Returns cached result or None."""
     try:
+        from remy.core.search_gateway import requires_live_discovery
+
+        if requires_live_discovery(query):
+            return None
         with _get_brain_lock():
             cached = _get_brain().search(query=query, tags=[_SEARCH_CACHE_TAG], limit=3)
         if not cached:

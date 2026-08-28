@@ -236,7 +236,9 @@ class TestStoreResearch:
 # ── INV-8–10: research_worker summary artifact ────────────────────────────────
 
 class TestResearchWorkerArtifact:
-    def _run_summary_artifact(self, brain_mock):
+    def _run_summary_artifact(
+        self, brain_mock, claim_source_matrix=None, claim_lifecycle=None
+    ):
         with patch("remy.core.agent_tools.brain", brain_mock):
             from remy.core.workers.research_worker import _store_research_summary_artifact
             _store_research_summary_artifact(
@@ -244,6 +246,8 @@ class TestResearchWorkerArtifact:
                 session_summary={"findings_count": 2, "accepted_sources_count": 2,
                                  "research_mode": "web", "source_scope": "public"},
                 findings=[{"summary": "Finding 1", "source_url": "https://example.com/1"}],
+                claim_source_matrix=claim_source_matrix,
+                claim_lifecycle=claim_lifecycle,
             )
 
     def test_stored_at_working_not_domain(self):
@@ -281,3 +285,48 @@ class TestResearchWorkerArtifact:
         call = brain_mock.store.call_args
         meta = call.args[2] if len(call.args) > 2 else call.kwargs.get("metadata", {})
         assert meta.get("requires_promotion") is True
+
+    def test_temporal_supersession_audit_counts_are_stored(self):
+        brain_mock = MagicMock()
+        brain_mock.store.return_value = MagicMock(id="sa-1")
+        self._run_summary_artifact(
+            brain_mock,
+            {
+                "claim_count": 2,
+                "supported_claims": 1,
+                "superseded_claims": 1,
+                "resolved_temporal_conflicts": 1,
+                "unresolved_contradictions": 0,
+                "publication_ready": True,
+            },
+        )
+
+        meta = _meta_from_call(brain_mock.store.call_args)
+
+        assert meta["resolved_temporal_conflicts"] == 1
+        assert meta["unresolved_contradictions"] == 0
+        assert meta["superseded_claims"] == 1
+
+    def test_claim_lifecycle_summary_is_stored_without_full_timeline(self):
+        brain_mock = MagicMock()
+        brain_mock.store.return_value = MagicMock(id="sa-1")
+        self._run_summary_artifact(
+            brain_mock,
+            claim_lifecycle={
+                "scope_key": "scope-1",
+                "summary": {
+                    "tracked_subjects": 2,
+                    "confirmed_transitions": 1,
+                    "pending_changes": 1,
+                },
+                "subjects": [{"full": "timeline"}],
+            },
+        )
+
+        meta = _meta_from_call(brain_mock.store.call_args)
+
+        assert meta["claim_lifecycle_scope"] == "scope-1"
+        assert meta["tracked_claim_subjects"] == 2
+        assert meta["claim_transitions"] == 1
+        assert meta["pending_claim_changes"] == 1
+        assert "subjects" not in meta

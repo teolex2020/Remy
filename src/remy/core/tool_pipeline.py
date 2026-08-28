@@ -30,10 +30,12 @@ STAGE_ORDER = (
     "resolve",
     "validate",
     "provenance",
+    "middleware_before",
     "pre_policy",
     "monotonic_guards",
     "approval",
     "execute",
+    "middleware_after",
     "post_policy",
     "artifact_spill",
     "durable_observation",
@@ -52,6 +54,9 @@ class ToolPipelineContext:
     decision_reason: str = ""
     approval_required: bool = False
     approval_mode: str = "not-required"
+    approval_outcome: str = "not-required"
+    approval_target: str = ""
+    approval_description: str = ""
     provenance: dict[str, Any] = field(default_factory=dict)
     policy: dict[str, Any] = field(default_factory=dict)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
@@ -84,6 +89,15 @@ class ToolPipelineContext:
             "decision_reason": self.decision_reason,
             "approval_required": self.approval_required,
             "approval_mode": self.approval_mode,
+            "approval_outcome": self.approval_outcome,
+            "approval_target_sha256": (
+                hashlib.sha256(self.approval_target.encode("utf-8")).hexdigest()
+                if self.approval_target else ""
+            ),
+            "approval_description_sha256": (
+                hashlib.sha256(self.approval_description.encode("utf-8")).hexdigest()
+                if self.approval_description else ""
+            ),
             "provenance": dict(self.provenance),
             "policy": dict(self.policy),
             "artifacts": list(self.artifacts),
@@ -121,6 +135,7 @@ def get_last_tool_pipeline_snapshot(*, clear: bool = False) -> dict[str, Any] | 
 ResolveHook = Callable[[ToolPipelineContext], str]
 ContextHook = Callable[[ToolPipelineContext], Any]
 ExecuteHook = Callable[[ToolPipelineContext], str]
+ApprovalExecuteHook = Callable[[ToolPipelineContext, ExecuteHook], str]
 
 
 class ToolPipeline:
@@ -132,9 +147,12 @@ class ToolPipeline:
         executor: ExecuteHook,
         resolver: ResolveHook | None = None,
         provenance: ContextHook | None = None,
+        before_middleware: ContextHook | None = None,
         pre_policy: ContextHook | None = None,
         monotonic_guards: ContextHook | None = None,
         approval: ContextHook | None = None,
+        approval_executor: ApprovalExecuteHook | None = None,
+        after_middleware: ContextHook | None = None,
         post_policy: ContextHook | None = None,
         artifact_spill: ContextHook | None = None,
         durable_observation: ContextHook | None = None,
@@ -142,9 +160,12 @@ class ToolPipeline:
         self.executor = executor
         self.resolver = resolver
         self.provenance_hook = provenance
+        self.before_middleware_hook = before_middleware
         self.pre_policy_hook = pre_policy
         self.monotonic_guards_hook = monotonic_guards
         self.approval_hook = approval
+        self.approval_executor_hook = approval_executor
+        self.after_middleware_hook = after_middleware
         self.post_policy_hook = post_policy
         self.artifact_spill_hook = artifact_spill
         self.durable_observation_hook = durable_observation
@@ -162,10 +183,16 @@ class ToolPipeline:
                 decision = ToolDecision[raw_decision]
             except KeyError:
                 continue
-            ctx.tighten(decision, str(item.get("reason") or ""))
+            previous_decision = ctx.decision
+            accepted = ctx.tighten(decision, str(item.get("reason") or ""))
             if item.get("policy") and isinstance(item["policy"], Mapping):
                 ctx.policy.update(dict(item["policy"]))
-            if item.get("result") and decision == ToolDecision.DENY:
+            if (
+                accepted
+                and item.get("result")
+                and decision == ToolDecision.DENY
+                and (previous_decision < ToolDecision.DENY or not ctx.result)
+            ):
                 ctx.result = str(item["result"])
 
     @staticmethod
@@ -216,6 +243,8 @@ class ToolPipeline:
                     value = self.provenance_hook(ctx)
                     if isinstance(value, Mapping):
                         ctx.provenance.update(dict(value))
+                elif stage == "middleware_before" and self.before_middleware_hook:
+                    self._apply_guard(ctx, self.before_middleware_hook(ctx))
                 elif stage == "pre_policy" and self.pre_policy_hook:
                     self._apply_guard(ctx, self.pre_policy_hook(ctx))
                 elif stage == "monotonic_guards" and self.monotonic_guards_hook:
@@ -234,12 +263,16 @@ class ToolPipeline:
                             ctx.approval_mode = str(
                                 value.get("mode") or ("required" if required else "not-required")
                             )
+                            ctx.approval_target = str(value.get("target") or "")
+                            ctx.approval_description = str(value.get("description") or "")
                             if required:
+                                ctx.approval_outcome = "pending"
                                 ctx.tighten(
                                     ToolDecision.REQUIRE_APPROVAL,
                                     str(value.get("reason") or "handler approval required"),
                                 )
                             if value.get("approved") is False:
+                                ctx.approval_outcome = "denied"
                                 ctx.tighten(
                                     ToolDecision.DENY,
                                     str(value.get("reason") or "Approval denied"),
@@ -254,8 +287,30 @@ class ToolPipeline:
                                 {"error": ctx.decision_reason or "Tool execution denied"},
                                 ensure_ascii=False,
                             )
+                    elif (
+                        ctx.decision == ToolDecision.REQUIRE_APPROVAL
+                        and ctx.approval_mode == "pipeline-managed"
+                    ):
+                        if self.approval_executor_hook is None:
+                            ctx.approval_outcome = "denied"
+                            ctx.tighten(
+                                ToolDecision.DENY,
+                                "Pipeline-managed approval executor is unavailable",
+                            )
+                            ctx.result = json.dumps(
+                                {"error": ctx.decision_reason},
+                                ensure_ascii=False,
+                            )
+                            status = "skipped"
+                        else:
+                            ctx.result = str(self.approval_executor_hook(ctx, self.executor))
                     else:
                         ctx.result = str(self.executor(ctx))
+                elif stage == "middleware_after" and self.after_middleware_hook:
+                    if ctx.decision == ToolDecision.DENY:
+                        status = "skipped"
+                    else:
+                        self.after_middleware_hook(ctx)
                 elif stage == "post_policy" and self.post_policy_hook:
                     self.post_policy_hook(ctx)
                 elif stage == "artifact_spill" and self.artifact_spill_hook:
@@ -273,7 +328,10 @@ class ToolPipeline:
                 if stage == "execute":
                     ctx.error = f"{type(exc).__name__}: {exc}"
                     ctx.result = f"Error: {exc}"
-                elif stage in {"resolve", "validate", "pre_policy", "monotonic_guards", "approval"}:
+                    if ctx.approval_mode == "pipeline-managed":
+                        ctx.approval_outcome = "error"
+                        ctx.tighten(ToolDecision.DENY, "pipeline approval execution failed")
+                elif stage in {"resolve", "validate", "middleware_before", "pre_policy", "monotonic_guards", "approval"}:
                     ctx.error = f"{stage}: {type(exc).__name__}: {exc}"
                     ctx.tighten(ToolDecision.DENY, ctx.error)
                 # Observation and artifact failures are intentionally fail-open.

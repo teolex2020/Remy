@@ -1,7 +1,7 @@
 """Tests for the installed desktop launcher entrypoint."""
 
-from unittest.mock import MagicMock, patch
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 def test_desktop_entry_opens_gui_without_setup_wizard():

@@ -1,4 +1,4 @@
-const CACHE_NAME = "remy-v1.77";
+const CACHE_NAME = "remy-v1.86";
 const ASSETS_TO_CACHE = [
   "/",
   "/index.html",

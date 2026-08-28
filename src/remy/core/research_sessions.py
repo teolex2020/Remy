@@ -31,6 +31,8 @@ class ResearchSession:
     rejected_sources: list[dict] = field(default_factory=list)
     findings: list[dict] = field(default_factory=list)
     contradictions: list[dict] = field(default_factory=list)
+    claim_source_matrix: dict = field(default_factory=dict)
+    claim_lifecycle: dict = field(default_factory=dict)
     final_artifact_id: str = ""
     status: str = "active"
     warnings: list[str] = field(default_factory=list)
@@ -45,7 +47,36 @@ class ResearchSession:
         rejected = len(self.rejected_sources)
         findings = len(self.findings)
         contradictions = len(self.contradictions)
-        coverage = accepted / findings if findings else 0.0
+        unresolved_contradictions = sum(
+            str(
+                item.get("resolution_status")
+                or item.get("status")
+                or "unresolved"
+            ).casefold()
+            not in {
+                "resolved",
+                "superseded",
+                "resolved_by_temporal_supersession",
+                "dismissed",
+            }
+            for item in self.contradictions
+            if isinstance(item, dict)
+        )
+        resolved_temporal_conflicts = sum(
+            str(item.get("resolution_status") or "").casefold()
+            == "resolved_by_temporal_supersession"
+            for item in self.contradictions
+            if isinstance(item, dict)
+        )
+        matrix = self.claim_source_matrix if isinstance(self.claim_source_matrix, dict) else {}
+        lifecycle = self.claim_lifecycle if isinstance(self.claim_lifecycle, dict) else {}
+        lifecycle_summary = dict(lifecycle.get("summary") or {})
+        matrix_claims = int(matrix.get("claim_count") or 0)
+        coverage = (
+            float(matrix.get("claim_coverage_rate") or 0.0)
+            if matrix_claims
+            else accepted / findings if findings else 0.0
+        )
         return {
             "session_id": self.session_id,
             "status": self.status,
@@ -61,7 +92,59 @@ class ResearchSession:
             "rejected_sources_count": rejected,
             "findings_count": findings,
             "contradictions_count": contradictions,
+            "unresolved_contradictions_count": int(
+                matrix.get("unresolved_contradictions", unresolved_contradictions)
+            ),
+            "resolved_temporal_conflicts_count": int(
+                matrix.get(
+                    "resolved_temporal_conflicts", resolved_temporal_conflicts
+                )
+            ),
             "citation_coverage_rate": round(coverage, 3),
+            "claim_matrix_available": bool(matrix_claims),
+            "supported_claims_count": int(matrix.get("supported_claims") or 0),
+            "partial_claims_count": int(matrix.get("partial_claims") or 0),
+            "unsupported_claims_count": int(matrix.get("unsupported_claims") or 0),
+            "conflicting_claims_count": int(matrix.get("conflicting_claims") or 0),
+            "claim_corroboration_rate": float(matrix.get("corroboration_rate") or 0.0),
+            "claim_provenance_coverage_rate": float(
+                matrix.get("provenance_coverage_rate") or 0.0
+            ),
+            "false_corroborated_claims_count": int(
+                matrix.get("false_corroborated_claims") or 0
+            ),
+            "provenance_ready": bool(
+                matrix.get(
+                    "provenance_ready",
+                    int(matrix.get("false_corroborated_claims") or 0) == 0,
+                )
+            ),
+            "time_sensitive_claims_count": int(
+                matrix.get("time_sensitive_claims") or 0
+            ),
+            "temporally_ready_claims_count": int(
+                matrix.get("temporally_ready_claims") or 0
+            ),
+            "stale_claims_count": int(matrix.get("stale_claims") or 0),
+            "undated_temporal_claims_count": int(
+                matrix.get("undated_temporal_claims") or 0
+            ),
+            "superseded_claims_count": int(matrix.get("superseded_claims") or 0),
+            "temporal_coverage_rate": float(
+                matrix.get("temporal_coverage_rate") or 0.0
+            ),
+            "temporal_ready": bool(matrix.get("temporal_ready", False)),
+            "publication_ready": bool(matrix.get("publication_ready", False)),
+            "claim_lifecycle_available": bool(lifecycle.get("scope_key")),
+            "tracked_claim_subjects_count": int(
+                lifecycle_summary.get("tracked_subjects") or 0
+            ),
+            "claim_transitions_count": int(
+                lifecycle_summary.get("confirmed_transitions") or 0
+            ),
+            "pending_claim_changes_count": int(
+                lifecycle_summary.get("pending_changes") or 0
+            ),
             "final_artifact_id": self.final_artifact_id,
             "warnings": list(self.warnings),
             "resumed_runs": self.resumed_runs,
@@ -180,6 +263,34 @@ def record_finding(goal_id: str, finding: dict) -> ResearchSession | None:
     return save_research_session(session)
 
 
+def record_claim_source_matrix(goal_id: str, matrix: dict) -> ResearchSession | None:
+    session = load_research_session(goal_id)
+    if not session:
+        return None
+    session.claim_source_matrix = dict(matrix or {})
+    return save_research_session(session)
+
+
+def record_claim_lifecycle_summary(
+    goal_id: str, lifecycle: dict
+) -> ResearchSession | None:
+    """Persist a bounded pointer/summary; the full ledger stays in its own store."""
+    session = load_research_session(goal_id)
+    if not session:
+        return None
+    payload = dict(lifecycle or {})
+    session.claim_lifecycle = {
+        "version": payload.get("version", 1),
+        "scope_key": str(payload.get("scope_key") or ""),
+        "project_id": str(payload.get("project_id") or ""),
+        "topic": str(payload.get("topic") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "summary": dict(payload.get("summary") or {}),
+        "last_run": dict(payload.get("last_run") or {}),
+    }
+    return save_research_session(session)
+
+
 def _infer_urls_from_text(text: str) -> list[str]:
     raw = text or ""
     urls = re.findall(r"https?://[^\s)]+", raw)
@@ -212,6 +323,79 @@ def record_contradictions(goal_id: str, contradictions: list[dict]) -> ResearchS
         ):
             session.contradictions.append(contradiction)
     return save_research_session(session)
+
+
+def record_contradiction_resolutions(
+    goal_id: str, resolutions: list[dict]
+) -> ResearchSession | None:
+    """Persist safe resolution metadata while retaining the original conflict."""
+    session = load_research_session(goal_id)
+    if not session:
+        return None
+    changed = False
+    for resolution in resolutions or []:
+        if not isinstance(resolution, dict) or resolution.get(
+            "resolution_status"
+        ) != "resolved_by_temporal_supersession":
+            continue
+        resolution_id = str(resolution.get("id") or "")
+        source_pair = {
+            str(resolution.get("source_a") or resolution.get("url_a") or ""),
+            str(resolution.get("source_b") or resolution.get("url_b") or ""),
+        }
+        for contradiction in session.contradictions:
+            contradiction_id = str(contradiction.get("id") or "")
+            contradiction_pair = {
+                str(contradiction.get("source_a") or contradiction.get("url_a") or ""),
+                str(contradiction.get("source_b") or contradiction.get("url_b") or ""),
+            }
+            matches = bool(
+                (resolution_id and contradiction_id == resolution_id)
+                or (
+                    not resolution_id
+                    and source_pair == contradiction_pair
+                    and all(source_pair)
+                )
+            )
+            if not matches:
+                continue
+            supersession = dict(resolution.get("supersession") or {})
+            history = list(contradiction.get("resolution_history") or [])
+            history_entry = {
+                "resolution_status": "resolved_by_temporal_supersession",
+                "resolution_reason": str(resolution.get("resolution_reason") or ""),
+                "resolved_at": str(resolution.get("resolved_at") or ""),
+                "supersession": supersession,
+            }
+            signature = (
+                history_entry["resolution_status"],
+                str(supersession.get("new_source_url") or ""),
+                str(supersession.get("effective_at") or ""),
+            )
+            if not any(
+                (
+                    str(item.get("resolution_status") or ""),
+                    str((item.get("supersession") or {}).get("new_source_url") or ""),
+                    str((item.get("supersession") or {}).get("effective_at") or ""),
+                )
+                == signature
+                for item in history
+                if isinstance(item, dict)
+            ):
+                history.append(history_entry)
+            contradiction.update(
+                {
+                    "status": "resolved",
+                    "resolution_status": history_entry["resolution_status"],
+                    "resolution_reason": history_entry["resolution_reason"],
+                    "resolved_at": history_entry["resolved_at"],
+                    "supersession": supersession,
+                    "resolution_history": history,
+                }
+            )
+            changed = True
+            break
+    return save_research_session(session) if changed else session
 
 
 def mark_session_completed(goal_id: str, final_artifact_id: str = "") -> ResearchSession | None:
@@ -262,8 +446,23 @@ def _derive_research_gaps(session: ResearchSession) -> list[str]:
         gaps.append("Synthesize accepted sources into explicit findings.")
     if summary["citation_required"] and summary["findings_count"] and summary["citation_coverage_rate"] < 0.8:
         gaps.append("Improve citation coverage for current findings.")
-    if summary["contradictions_count"] > 0:
+    if summary["unresolved_contradictions_count"] > 0:
         gaps.append("Resolve contradictory findings before closing the session.")
+    matrix = session.claim_source_matrix if isinstance(session.claim_source_matrix, dict) else {}
+    if int(matrix.get("unsupported_claims") or 0) > 0:
+        gaps.append("Attach fetched primary evidence to unsupported claims.")
+    if int(matrix.get("partial_claims") or 0) > 0:
+        gaps.append("Strengthen partial claim-to-source bindings.")
+    if int(matrix.get("conflicting_claims") or 0) > 0:
+        gaps.append("Resolve claim-level source conflicts with an independent source.")
+    if int(matrix.get("false_corroborated_claims") or 0) > 0:
+        gaps.append(
+            "Replace cross-domain derivatives with independent claim-level evidence roots."
+        )
+    if int(matrix.get("stale_claims") or 0) > 0:
+        gaps.append("Refresh stale evidence for current or time-sensitive claims.")
+    if int(matrix.get("undated_temporal_claims") or 0) > 0:
+        gaps.append("Replace undated temporal evidence with dated official sources.")
     for warning in session.warnings:
         warning_text = str(warning or "").strip()
         if warning_text:
@@ -330,6 +529,8 @@ def get_research_session_trace(
         "recent_queries": list(session.generated_queries[-query_limit:]),
         "top_source_domains": top_domains[:source_limit],
         "accepted_source_preview": accepted_preview,
+        "claim_source_matrix": dict(session.claim_source_matrix or {}),
+        "claim_lifecycle": dict(session.claim_lifecycle or {}),
         "knowledge_gaps": _derive_research_gaps(session),
         "warnings": list(session.warnings[:warning_limit]),
     }

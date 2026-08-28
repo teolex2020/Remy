@@ -1442,7 +1442,7 @@ async def get_execution_trajectory(
 ):
     """Return a read-only Trajectory projection for a non-chat execution."""
     normalized_scope = str(scope or "").strip().lower()
-    if normalized_scope not in {"experiment", "automation"}:
+    if normalized_scope not in {"experiment", "automation", "agent_lab"}:
         raise HTTPException(status_code=404, detail="Execution trajectory scope not found")
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
     if any(not value or any(ch not in allowed for ch in value) for value in (source_id, run_id)):

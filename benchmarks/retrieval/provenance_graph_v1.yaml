@@ -1,0 +1,55 @@
+version: 1
+thresholds:
+  min_root_accuracy: 1.0
+  min_role_accuracy: 1.0
+  min_consensus_gate_accuracy: 1.0
+  max_false_consensus_rate: 0.0
+
+cases:
+  - id: p01_three_independent_roots
+    scenario: independent
+    expected_roots: 3
+    expected_gate_sufficient: true
+
+  - id: p02_explicit_syndication
+    scenario: syndicated
+    expected_roots: 1
+    expected_roles:
+      syndicated: 3
+    expected_gate_sufficient: false
+
+  - id: p03_shared_according_to_origin
+    scenario: according
+    expected_roots: 1
+    expected_roles:
+      derived: 3
+    expected_gate_sufficient: false
+
+  - id: p04_cross_domain_content_copies
+    scenario: duplicates
+    expected_roots: 1
+    expected_roles:
+      syndicated: 2
+    expected_gate_sufficient: false
+
+  - id: p05_official_document_is_primary
+    scenario: official
+    expected_roots: 1
+    expected_roles:
+      primary: 1
+
+  - id: p06_mirror_is_aggregator
+    scenario: aggregator
+    expected_roots: 1
+    expected_roles:
+      aggregator: 1
+
+  - id: p07_identity_mismatch_lowers_authority
+    scenario: mismatch
+    expected_roots: 2
+    expected_authority_order: true
+
+  - id: p08_independent_consensus_survives_gate
+    scenario: independent_distinct
+    expected_roots: 3
+    expected_gate_sufficient: true

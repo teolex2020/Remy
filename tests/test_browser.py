@@ -124,11 +124,18 @@ class TestBrowserManagerSingleton:
 
     def test_save_screenshot(self, tmp_path):
         from remy.core.browser import BrowserManager
+        from remy.core.project_store import LEGACY_PROJECT_ID
 
         mgr = BrowserManager()
         png_data = b"\x89PNG\r\n\x1a\nfakeimage"
 
-        with patch("remy.core.browser.settings") as mock_settings:
+        # Screenshot storage is project-scoped.  Pin this legacy-path contract
+        # explicitly so the test cannot inherit an active project from another
+        # test (or from the developer's running Remy instance).
+        with patch(
+            "remy.core.microbrain.current_project_id",
+            return_value=LEGACY_PROJECT_ID,
+        ), patch("remy.core.browser.settings") as mock_settings:
             mock_settings.DATA_DIR = tmp_path
             filename = mgr.save_screenshot(png_data)
 
@@ -516,6 +523,7 @@ class TestScreenshotEndpoint:
     def test_serve_screenshot(self):
         """Screenshot file served as PNG."""
         from remy.config.settings import settings
+        from remy.core.project_store import LEGACY_PROJECT_ID
         from pathlib import Path
 
         ss_dir = Path(settings.DATA_DIR) / "browser_screenshots"
@@ -523,8 +531,14 @@ class TestScreenshotEndpoint:
         test_file = ss_dir / "test_browser_ss.png"
         test_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
         try:
-            client = self._make_client()
-            resp = client.get("/api/browser_screenshots/test_browser_ss.png")
+            # The route resolves screenshots against the current project.
+            # Keep this legacy fixture independent of global project state.
+            with patch(
+                "remy.core.microbrain.current_project_id",
+                return_value=LEGACY_PROJECT_ID,
+            ):
+                client = self._make_client()
+                resp = client.get("/api/browser_screenshots/test_browser_ss.png")
             assert resp.status_code == 200
             assert "image/png" in resp.headers["content-type"]
         finally:
