@@ -83,8 +83,8 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install benchmark dependencies
-        run: python -m pip install "PyYAML~=6.0.3" "pytest~=8.4"
+      - name: Install Remy and test dependencies
+        run: python -m pip install -e . "pytest~=8.4" "pytest-timeout~=2.4"
 
       - name: Run snapshot search quality gate
         run: python benchmarks/retrieval/run_quality_benchmark.py
