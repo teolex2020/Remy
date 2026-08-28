@@ -631,6 +631,12 @@ def _get_effective_url(name: str, args: dict, run_async) -> str:
         return ""
 
 
+def resolve_browser_approval_url(name: str, args: dict) -> str:
+    """Resolve the exact browser target used by the central approval stage."""
+    bt = _get_bt()
+    return _get_effective_url(name, args, bt._run_async)
+
+
 def _extract_failed_selectors(errors: list[str]) -> list[str]:
     selectors = []
     for error in errors:

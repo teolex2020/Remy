@@ -158,8 +158,9 @@ Multi-cycle research pipeline that runs until the question is actually answered:
 3. Deterministic source ranking: official docs > research papers > news > forums > SEO spam
 4. Exact + semantic deduplication (cosine threshold 0.82)
 5. Outcome evaluation — an LLM judges whether the question is answered; unanswered sub-questions become next-cycle queries
-6. Contradiction resolution — conflicting sources trigger tie-breaker queries for a third authoritative source
+6. Contradiction resolution — mutable facts may be safely superseded by newer dated, independent, authoritative evidence while the old fact remains in audit history; unresolved or scientific conflicts trigger tie-breaker queries
 7. Saturation detection — stops when 3 consecutive cycles add nothing new
+8. Claim lifecycle — mutable facts are tracked across runs; safe changes advance the current value while old states and unresolved candidates remain auditable in Trajectory
 
 Research sessions persist across restarts: queries, sources fetched/accepted/rejected, findings with confidence scores, citation coverage.
 

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "metrics": {
+    "decision_accuracy": 1.0,
+    "sufficiency_accuracy": 1.0,
+    "duplicate_accuracy": 1.0,
+    "prefetch_accuracy": 1.0
+  }
+}

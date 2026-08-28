@@ -1,0 +1,111 @@
+name: Search quality
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/remy/core/search_gateway.py"
+      - "src/remy/core/search_relevance.py"
+      - "src/remy/core/search_evaluation.py"
+      - "src/remy/core/local_search_reranker.py"
+      - "src/remy/core/claim_source_matrix.py"
+      - "src/remy/core/research_query_planner.py"
+      - "src/remy/core/research_execution_scheduler.py"
+      - "src/remy/core/marginal_evidence_controller.py"
+      - "src/remy/core/source_provenance_graph.py"
+      - "src/remy/core/claim_temporal_evidence.py"
+      - "src/remy/core/temporal_supersession.py"
+      - "src/remy/core/claim_lifecycle.py"
+      - "src/remy/core/research_sessions.py"
+      - "src/remy/core/workers/research_worker.py"
+      - "src/remy/core/retrieval/**"
+      - "benchmarks/retrieval/**"
+      - "tests/test_search_evaluation.py"
+      - "tests/test_search_gateway.py"
+      - "tests/test_local_search_reranker.py"
+      - "tests/test_claim_source_matrix.py"
+      - "tests/test_research_query_planner.py"
+      - "tests/test_research_execution_scheduler.py"
+      - "tests/test_marginal_evidence_controller.py"
+      - "tests/test_source_provenance_graph.py"
+      - "tests/test_claim_temporal_evidence.py"
+      - "tests/test_temporal_supersession.py"
+      - "tests/test_claim_lifecycle.py"
+      - ".github/workflows/search-quality.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/remy/core/search_gateway.py"
+      - "src/remy/core/search_relevance.py"
+      - "src/remy/core/search_evaluation.py"
+      - "src/remy/core/local_search_reranker.py"
+      - "src/remy/core/claim_source_matrix.py"
+      - "src/remy/core/research_query_planner.py"
+      - "src/remy/core/research_execution_scheduler.py"
+      - "src/remy/core/marginal_evidence_controller.py"
+      - "src/remy/core/source_provenance_graph.py"
+      - "src/remy/core/claim_temporal_evidence.py"
+      - "src/remy/core/temporal_supersession.py"
+      - "src/remy/core/claim_lifecycle.py"
+      - "src/remy/core/research_sessions.py"
+      - "src/remy/core/workers/research_worker.py"
+      - "src/remy/core/retrieval/**"
+      - "benchmarks/retrieval/**"
+      - "tests/test_search_evaluation.py"
+      - "tests/test_search_gateway.py"
+      - "tests/test_local_search_reranker.py"
+      - "tests/test_claim_source_matrix.py"
+      - "tests/test_research_query_planner.py"
+      - "tests/test_research_execution_scheduler.py"
+      - "tests/test_marginal_evidence_controller.py"
+      - "tests/test_source_provenance_graph.py"
+      - "tests/test_claim_temporal_evidence.py"
+      - "tests/test_temporal_supersession.py"
+      - "tests/test_claim_lifecycle.py"
+      - ".github/workflows/search-quality.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  regression-gate:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Remy and test dependencies
+        run: python -m pip install -e . "pytest~=8.4" "pytest-timeout~=2.4"
+
+      - name: Run snapshot search quality gate
+        run: python benchmarks/retrieval/run_quality_benchmark.py
+
+      - name: Run claim-source matrix quality gate
+        run: python benchmarks/retrieval/run_claim_matrix_benchmark.py
+
+      - name: Run claim lifecycle quality gate
+        run: python benchmarks/retrieval/run_claim_lifecycle_benchmark.py
+
+      - name: Run research query planner quality gate
+        run: python benchmarks/retrieval/run_query_planner_benchmark.py
+
+      - name: Run research execution scheduler quality gate
+        run: python benchmarks/retrieval/run_execution_scheduler_benchmark.py
+
+      - name: Run marginal evidence quality gate
+        run: python benchmarks/retrieval/run_marginal_evidence_benchmark.py
+
+      - name: Run source provenance quality gate
+        run: python benchmarks/retrieval/run_provenance_graph_benchmark.py
+
+      - name: Run search quality contract tests
+        run: python -m pytest tests/test_search_evaluation.py tests/test_search_gateway.py tests/test_local_search_reranker.py tests/test_claim_source_matrix.py tests/test_claim_temporal_evidence.py tests/test_temporal_supersession.py tests/test_claim_lifecycle.py tests/test_research_query_planner.py tests/test_research_execution_scheduler.py tests/test_marginal_evidence_controller.py tests/test_source_provenance_graph.py -q -p no:cacheprovider

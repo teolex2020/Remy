@@ -109,6 +109,20 @@ def test_team_gate_rejects_executor_and_model_supplied_capabilities():
     assert result["team_required"] is False
 
 
+def test_team_plan_rejects_model_outside_allowed_catalog():
+    raw = _team_plan()
+    raw["members"][0]["model"] = "invented-model"
+    raw["members"][1]["model"] = "model-a"
+    result = validate_team_plan(
+        raw,
+        mode="adaptive",
+        available_models=[{"name": "model-a", "provider": "test"}],
+    )
+
+    assert result["valid"] is False
+    assert "not in the allowed model catalog" in " ".join(result["errors"])
+
+
 def test_team_role_ceilings_are_read_only_and_enforced_by_worker_runtime():
     from remy.core.autonomy import AGENT_ROLES
 
@@ -206,6 +220,120 @@ async def test_adaptive_single_agent_path_does_not_call_worker_runner():
     assert receipt["status"] == "single_agent"
     assert receipt["context"] == ""
     assert called == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_can_only_narrow_worker_tools(monkeypatch, tmp_path):
+    original = settings.DATA_DIR
+    settings.DATA_DIR = tmp_path
+    captured = []
+
+    async def fake_runner(tasks, *args, **kwargs):
+        captured.extend(tasks)
+        return [
+            WorkerResult(task.role, "success", f"local result {index}")
+            for index, task in enumerate(tasks)
+        ]
+
+    monkeypatch.setattr("remy.core.team_planner._record_team_event", lambda **kwargs: None)
+    try:
+        receipt = await run_agent_team(
+            "Analyze two local-only aspects",
+            mode="force",
+            project_id="project-lab",
+            brain_id="brain-lab",
+            session_id="lab-run",
+            planner=lambda *args: _team_plan(),
+            worker_runner=fake_runner,
+            role_tool_ceilings={role: ("recall",) for role in TEAM_ROLE_TOOL_CEILINGS},
+            capability_profile="agent_lab_local_read_only",
+        )
+    finally:
+        settings.DATA_DIR = original
+
+    assert all(task.allowed_tools == ("recall",) for task in captured)
+    assert all(member["allowed_tools"] == ["recall"] for member in receipt["plan"]["members"])
+    assert receipt["plan"]["capability_profile"] == "agent_lab_local_read_only"
+    assert receipt["plan"]["runtime_plan_hash"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_cannot_reintroduce_forbidden_tools(monkeypatch, tmp_path):
+    original = settings.DATA_DIR
+    settings.DATA_DIR = tmp_path
+    captured = []
+
+    async def fake_runner(tasks, *args, **kwargs):
+        captured.extend(tasks)
+        return [WorkerResult(task.role, "success", "no external access") for task in tasks]
+
+    monkeypatch.setattr("remy.core.team_planner._record_team_event", lambda **kwargs: None)
+    try:
+        receipt = await run_agent_team(
+            "Analyze two bounded aspects",
+            mode="force",
+            project_id="project-lab",
+            brain_id="brain-lab",
+            session_id="lab-run-no-tools",
+            planner=lambda *args: _team_plan(),
+            worker_runner=fake_runner,
+            role_tool_ceilings={
+                role: ("shell_exec", "write_file") for role in TEAM_ROLE_TOOL_CEILINGS
+            },
+            capability_profile="agent_lab_local_read_only",
+        )
+    finally:
+        settings.DATA_DIR = original
+
+    assert all(task.allowed_tools == ("__no_tools__",) for task in captured)
+    assert all(member["allowed_tools"] == [] for member in receipt["plan"]["members"])
+
+
+@pytest.mark.asyncio
+async def test_team_runtime_propagates_exact_worker_model_assignments(monkeypatch, tmp_path):
+    original = settings.DATA_DIR
+    settings.DATA_DIR = tmp_path
+    captured = []
+    raw = _team_plan()
+    raw["members"][0]["model"] = "model-research"
+    raw["members"][1]["model"] = "model-analysis"
+
+    async def fake_runner(tasks, *args, **kwargs):
+        captured.extend(tasks)
+        return [
+            WorkerResult(
+                task.role,
+                "success",
+                "assigned result",
+                assigned_model=task.model,
+                served_by=task.model,
+            )
+            for task in tasks
+        ]
+
+    monkeypatch.setattr("remy.core.team_planner._record_team_event", lambda **kwargs: None)
+    try:
+        receipt = await run_agent_team(
+            "Use specialist models",
+            mode="force",
+            project_id="project-models",
+            brain_id="brain-models",
+            session_id="team-models",
+            planner=lambda *args: raw,
+            worker_runner=fake_runner,
+            available_models=[
+                {"name": "model-research", "provider": "test"},
+                {"name": "model-analysis", "provider": "test"},
+            ],
+        )
+    finally:
+        settings.DATA_DIR = original
+
+    assert [task.model for task in captured] == ["model-research", "model-analysis"]
+    assert all(task.allow_model_fallback is False for task in captured)
+    assert [item["served_by"] for item in receipt["results"]] == [
+        "model-research", "model-analysis"
+    ]
 
 
 def test_team_events_are_directly_visible_in_trajectory(tmp_path):

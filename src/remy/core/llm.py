@@ -509,6 +509,8 @@ def call_llm(
     tools: Sequence | None = None,
     purpose: str = "general",
     channel: str | None = None,
+    preferred_model: str | None = None,
+    allow_fallback: bool = True,
 ) -> "AIMessage":
     """Invoke an LLM with automatic fallback on transient errors.
 
@@ -516,6 +518,8 @@ def call_llm(
         prompt: Text string or list of LangChain messages.
         tools: If provided, calls llm.bind_tools(tools) before invoke.
         purpose: Logging label (e.g., "agent", "research", "evaluation").
+        preferred_model: Exact first model for an explicit orchestrator assignment.
+        allow_fallback: Whether an explicitly assigned model may use the normal fallback chain.
 
     Returns:
         AIMessage from whichever model succeeds.
@@ -523,8 +527,9 @@ def call_llm(
     Raises:
         The original exception if ALL models fail.
     """
-    primary = settings.SUMMARY_MODEL
-    models_to_try = [primary] + _get_fallback_chain()
+    assigned = str(preferred_model or "").strip()
+    primary = assigned or settings.SUMMARY_MODEL
+    models_to_try = [primary] + (_get_fallback_chain() if (not assigned or allow_fallback) else [])
 
     # Deduplicate while preserving order
     seen: set[str] = set()
@@ -533,7 +538,10 @@ def call_llm(
         if m not in seen:
             seen.add(m)
             unique_models.append(m)
-    unique_models = _apply_model_routing(unique_models)
+    # Explicit assignments are already a routing decision. Do not let the
+    # adaptive router silently replace or reorder the selected worker model.
+    if not assigned:
+        unique_models = _apply_model_routing(unique_models)
 
     last_exception = None
     max_retries_per_model = 3
@@ -824,10 +832,18 @@ async def call_llm_async(
     tools: Sequence | None = None,
     purpose: str = "general",
     channel: str | None = None,
+    preferred_model: str | None = None,
+    allow_fallback: bool = True,
 ) -> "AIMessage":
     """Async wrapper: runs call_llm in a thread to preserve async semantics."""
     import asyncio
 
     return await asyncio.to_thread(
-        call_llm, prompt, tools=tools, purpose=purpose, channel=channel,
+        call_llm,
+        prompt,
+        tools=tools,
+        purpose=purpose,
+        channel=channel,
+        preferred_model=preferred_model,
+        allow_fallback=allow_fallback,
     )

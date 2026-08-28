@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remy</title>
-    <link rel="stylesheet" href="/css/main.css?v=1.60">
+    <link rel="stylesheet" href="/css/main.css?v=1.64">
     <script>
         // Apply theme immediately to prevent FOUC
         (function() {
@@ -135,6 +135,10 @@
                 <li class="nav-item" data-view="experiments">
                     <span class="nav-icon">&#129514;</span>
                     <span class="nav-label">Experiments</span>
+                </li>
+                <li class="nav-item" data-view="agent-lab">
+                    <span class="nav-icon">&#129302;</span>
+                    <span class="nav-label">Agent Lab</span>
                 </li>
                 <li class="nav-item" data-view="pipelines">
                     <span class="nav-icon">&#128260;</span>
@@ -928,6 +932,17 @@
                     </div>
                 </div>
                 <div id="experiments-content" style="padding:20px;position:relative"></div>
+            </div>
+
+            <!-- Agent-owned Autonomous Lab View -->
+            <div id="view-agent-lab" class="view">
+                <div class="view-header">
+                    <div>
+                        <h2>Agent Lab</h2>
+                        <p class="settings-hint">An autonomous, observable workspace owned by the agent.</p>
+                    </div>
+                </div>
+                <div id="agent-lab-content"></div>
             </div>
 
             <!-- Automations View -->

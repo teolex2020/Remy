@@ -32,7 +32,7 @@ def _get_brain_lock():
 
 _RESEARCH_PROJECT_TAG = "research-project"
 _RESEARCH_FINDING_TAG = "research-finding"
-_DEPTH_QUERY_COUNT = {"quick": 2, "standard": 4, "deep": 7}
+_DEPTH_QUERY_COUNT = {"quick": 3, "standard": 4, "deep": 7}
 
 
 def _build_cited_markdown_report(
@@ -576,7 +576,15 @@ def _complete_research(
         return json.dumps({
             "error": "complete_research requires accepted source URLs on findings. Fetch evidence first, then attach source_url on each finding."
         }, ensure_ascii=False)
+    minimum_source_target = 3
+    source_target_met = len(unique_sources) >= minimum_source_target
     evidence_note = ""
+    if not source_target_met:
+        evidence_note = (
+            "Evidence limitation: only "
+            f"{len(unique_sources)} distinct source(s) were available; "
+            f"the analysis target is at least {minimum_source_target}."
+        )
 
     # Synthesize via LLM
     findings_text = "\n".join(
@@ -647,6 +655,8 @@ def _complete_research(
                 "confidence_avg": avg_confidence,
                 "citation_complete": citation_complete,
                 "citation_count": len(unique_sources),
+                "minimum_source_target": minimum_source_target,
+                "source_target_met": source_target_met,
                 "evidence_note": evidence_note,
                 "research_mode": project_meta.get("research_mode", ""),
                 "source_scope": project_meta.get("source_scope", "web"),
@@ -690,6 +700,8 @@ def _complete_research(
                     "metadata": {
                         "topic": topic,
                         "source_count": len(unique_sources),
+                        "minimum_source_target": minimum_source_target,
+                        "source_target_met": source_target_met,
                         "citation_complete": citation_complete,
                     },
                 },
@@ -746,6 +758,9 @@ def _complete_research(
     project_meta["completed_at"] = datetime.now().isoformat()
     project_meta["report_id"] = report_record_id
     project_meta["verification"] = verification.to_dict()
+    project_meta["source_count"] = len(unique_sources)
+    project_meta["minimum_source_target"] = minimum_source_target
+    project_meta["source_target_met"] = source_target_met
     if pdf_artifact:
         project_meta.update(pdf_artifact)
     brain.update(project_rec.id, metadata=project_meta)
@@ -774,6 +789,8 @@ def _complete_research(
             **pdf_artifact,
             "verification": verification.to_dict(),
             "source_count": len(unique_sources),
+            "minimum_source_target": minimum_source_target,
+            "source_target_met": source_target_met,
             "findings_count": len(findings),
             "confidence_avg": avg_confidence,
             "citation_complete": citation_complete,

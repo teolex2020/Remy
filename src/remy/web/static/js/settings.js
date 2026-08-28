@@ -750,13 +750,20 @@ async function loadModelRegistry() {
                 const newKey = input?.value.trim();
                 if (!newKey) return;
                 try {
-                    await fetch("/api/model-registry", {
+                    const response = await fetch("/api/model-registry", {
                         method: "PUT",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ model_name: name, api_key: newKey, provider }),
                     });
+                    if (!response.ok) {
+                        const data = await response.json().catch(() => ({}));
+                        throw new Error(data.detail || `Could not update model (HTTP ${response.status}).`);
+                    }
                     input.value = "";
                     await loadModelRegistry();
+                    document.dispatchEvent(new CustomEvent("models-changed", {
+                        detail: { reason: "registry-updated", model: name },
+                    }));
                     showStatus(`Key updated: ${name}`);
                 } catch (e) {
                     showStatus(`Error: ${e.message}`, true);
@@ -770,8 +777,15 @@ async function loadModelRegistry() {
                 const confirmed = await showConfirm("Remove Model", `Remove "${name}" from registry?`);
                 if (!confirmed) return;
                 try {
-                    await fetch(`/api/model-registry/${encodeURIComponent(name)}`, { method: "DELETE" });
-                    loadModelRegistry();
+                    const response = await fetch(`/api/model-registry/${encodeURIComponent(name)}`, { method: "DELETE" });
+                    if (!response.ok) {
+                        const data = await response.json().catch(() => ({}));
+                        throw new Error(data.detail || `Could not remove model (HTTP ${response.status}).`);
+                    }
+                    await loadModelRegistry();
+                    document.dispatchEvent(new CustomEvent("models-changed", {
+                        detail: { reason: "registry-removed", model: name },
+                    }));
                     showStatus(`Removed: ${name}`);
                 } catch (e) {
                     showStatus(`Error: ${e.message}`, true);
@@ -902,7 +916,10 @@ async function addModel() {
         document.getElementById("add-model-output-price").value = "";
         const hint = document.getElementById("add-model-reuse-hint");
         if (hint) hint.style.display = "none";
-        loadModelRegistry();
+        await loadModelRegistry();
+        document.dispatchEvent(new CustomEvent("models-changed", {
+            detail: { reason: "registry-added", model: name },
+        }));
         showStatus(`Added: ${name}`);
     } catch (e) {
         showStatus(`Error: ${e.message}`, true);

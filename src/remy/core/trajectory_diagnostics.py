@@ -2072,6 +2072,38 @@ def analyze_trajectory(
 
         if kind == "VERIFICATION":
             output = record.get("output") if isinstance(record.get("output"), dict) else {}
+            if output.get("type") == "claim_lifecycle":
+                lifecycle_summary = dict(output.get("summary") or {})
+                run_summary = dict(output.get("last_run") or {})
+                confirmed = int(run_summary.get("confirmed_transitions") or 0)
+                pending = int(run_summary.get("pending_changes") or 0)
+                if confirmed:
+                    add(_finding(
+                        record,
+                        severity="info",
+                        category="claim-lifecycle-transition",
+                        title=f"{confirmed} claim lifecycle transition(s) confirmed",
+                        explanation=(
+                            "A newer independent, fresh, sufficiently authoritative value "
+                            "became current while the previous state remained in history."
+                        ),
+                        next_check="Open Claims to inspect the fact timeline and effective dates.",
+                    ))
+                if pending:
+                    add(_finding(
+                        record,
+                        severity="warning",
+                        category="claim-lifecycle-pending",
+                        title=f"{pending} claim change candidate(s) need confirmation",
+                        explanation=(
+                            "A changed value was observed but did not pass every lifecycle "
+                            "safety check, so it did not replace the current fact."
+                        ),
+                        next_check=(
+                            "Open Claims, inspect decision reasons, and fetch a dated "
+                            "independent authoritative source."
+                        ),
+                    ))
             unsupported = int(output.get("unsupported_claims_total") or 0)
             if unsupported:
                 add(_finding(
@@ -2081,6 +2113,81 @@ def analyze_trajectory(
                     title=f"{unsupported} unsupported claim(s)",
                     explanation="Verification found claims without sufficient recorded evidence.",
                     next_check="Open Claims and Evidence, then repair or qualify the response.",
+                ))
+            false_corroboration = int(
+                output.get("false_corroborated_claims") or 0
+            )
+            if false_corroboration:
+                add(_finding(
+                    record,
+                    severity="warning",
+                    category="false-corroboration",
+                    title=(
+                        f"{false_corroboration} claim(s) reuse the same evidence root"
+                    ),
+                    explanation=(
+                        "Multiple supporting domains trace back to one original source, "
+                        "so they do not form independent corroboration."
+                    ),
+                    next_check=(
+                        "Inspect claim support roots and fetch an independent primary source."
+                    ),
+                ))
+            stale_claims = int(output.get("stale_claims") or 0)
+            undated_claims = int(output.get("undated_temporal_claims") or 0)
+            if stale_claims or undated_claims:
+                add(_finding(
+                    record,
+                    severity="warning",
+                    category="temporal-evidence",
+                    title=(
+                        f"Temporal evidence incomplete: {stale_claims} stale, "
+                        f"{undated_claims} undated claim(s)"
+                    ),
+                    explanation=(
+                        "Time-sensitive claims lack a sufficiently recent, dated "
+                        "supporting source."
+                    ),
+                    next_check=(
+                        "Inspect source dates and fetch a current official source "
+                        "within the claim freshness window."
+                    ),
+                ))
+            resolved_temporal = int(
+                output.get("resolved_temporal_conflicts") or 0
+            )
+            superseded_claims = int(output.get("superseded_claims") or 0)
+            if resolved_temporal:
+                add(_finding(
+                    record,
+                    severity="info",
+                    category="temporal-supersession",
+                    title=(
+                        f"{resolved_temporal} temporal conflict(s) safely resolved"
+                    ),
+                    explanation=(
+                        f"Newer independent evidence superseded {superseded_claims} "
+                        "historical claim(s); the prior evidence remains in the audit history."
+                    ),
+                    next_check=(
+                        "Open Claims and compare the old/new source dates, evidence roots, "
+                        "and authority scores."
+                    ),
+                ))
+            unresolved_temporal = int(output.get("unresolved_contradictions") or 0)
+            if unresolved_temporal:
+                add(_finding(
+                    record,
+                    severity="warning",
+                    category="unresolved-contradictions",
+                    title=f"{unresolved_temporal} contradiction(s) remain active",
+                    explanation=(
+                        "The temporal safety gate could not justify choosing one claim."
+                    ),
+                    next_check=(
+                        "Inspect the failed supersession checks and fetch independent, "
+                        "dated, authoritative evidence."
+                    ),
                 ))
 
     severity_order = {"error": 0, "warning": 1, "info": 2}

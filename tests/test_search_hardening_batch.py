@@ -115,6 +115,61 @@ def test_call_tools_auto_follow_failure_does_not_break_turn():
     assert payload["auto_extract"]["error"] == "fetch failed"
 
 
+def test_call_tools_auto_fetches_three_distinct_relevant_sources():
+    query = "distributed database consistency"
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{"id": "call_search_three", "name": "web_search", "args": {"query": query}}],
+    )
+    state = AgentState(
+        messages=[ai_msg],
+        session_id="sess-auto-three",
+        channel="desktop",
+        session_log=[],
+    )
+    sources = [
+        {"title": "Distributed database consistency A", "uri": "https://a.example/paper"},
+        {"title": "Distributed database consistency B", "uri": "https://b.example/report"},
+        {"title": "Distributed database consistency C", "uri": "https://c.example/docs"},
+        {"title": "Duplicate domain", "uri": "https://a.example/second"},
+    ]
+    fetched_urls = []
+    web_search_tool = FakeTool(
+        "web_search",
+        lambda _args: json.dumps(
+            {"mode": "candidate_discovery", "answer": "Found candidates.", "sources": sources}
+        ),
+    )
+
+    def _extract(args):
+        fetched_urls.append(args["url"])
+        return json.dumps(
+            {
+                "url": args["url"],
+                "title": "Distributed database consistency evidence",
+                "content": "Distributed database consistency and replication guarantees. " * 20,
+            }
+        )
+
+    extract_tool = FakeTool("extract_content", _extract)
+    with patch("remy.core.agent.get_all_tools", return_value=[web_search_tool, extract_tool]):
+        result = call_tools(state)
+
+    payload = json.loads(result["messages"][0].content)
+    assert payload["analysis_source_count"] == 3
+    assert payload["analysis_source_target_met"] is True
+    assert payload["evidence_sufficiency"]["method"] == (
+        "local_statistical_marginal_gain"
+    )
+    assert payload["source_diversity"]["distinct_domains"] == 3
+    assert len(payload["auto_extracts"]) == 3
+    assert fetched_urls == [
+        "https://a.example/paper",
+        "https://b.example/report",
+        "https://c.example/docs",
+    ]
+
+
 def test_verify_external_claims_flags_reference_identity_mismatch():
     response_text = '"Epistemic Integrity in Large Language Models" (2024) arXiv:2411.02534'
     session_log = [{
@@ -185,6 +240,9 @@ def test_complete_research_succeeds_with_anchored_findings():
         result = json.loads(research_mod._complete_research({"project_id": "proj-1"}, session_id="sess-complete-ok"))
     assert result["completed"] is True
     assert result["source_count"] == 1
+    assert result["minimum_source_target"] == 3
+    assert result["source_target_met"] is False
+    assert "only 1 distinct source" in result["evidence_note"]
 
 
 def test_extract_content_is_present_in_langgraph_tools():
@@ -195,7 +253,7 @@ def test_extract_content_is_present_in_langgraph_tools():
 
 
 def test_get_cached_search_normalizes_legacy_summary_payload():
-    # The cache is backend-pinned (currently "ddgs-v3-pinned"). Records without
+    # The cache is backend-pinned. Records without
     # that pin are rejected wholesale by design so stale-backend answers don't
     # leak in. This test verifies legacy *payload shape* normalization on a
     # properly-pinned record: even with a summary-style "answer", the cache

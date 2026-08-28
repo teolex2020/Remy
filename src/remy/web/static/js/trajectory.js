@@ -92,6 +92,10 @@ const KIND_GROUPS = {
     AUTOMATION_RUN: "automation", AUTOMATION_TRIGGER: "automation",
     AUTOMATION_STEP: "automation", AUTOMATION_DELIVERY: "automation",
     AUTOMATION_RESULT: "automation",
+    AGENT_LAB_RUN: "agent_lab", AGENT_LAB_PHASE: "agent_lab",
+    AGENT_LAB_TEAM: "agent_lab", AGENT_LAB_DECISION: "agent_lab",
+    AGENT_LAB_ARTIFACT: "agent_lab", AGENT_LAB_VERIFICATION: "agent_lab",
+    AGENT_LAB_RESULT: "agent_lab",
 };
 
 function escapeHtml(value) {
@@ -1735,7 +1739,7 @@ function renderOverview() {
     const groups = [
         ["input", "Input"], ["model", "Model"],
         ["pipeline", "Pipeline"], ["experiment", "Experiment"],
-        ["automation", "Automation"], ["tools", "Tools"],
+        ["automation", "Automation"], ["agent_lab", "Agent Lab"], ["tools", "Tools"],
     ]
         .filter(([group]) => timed.some((item) => (KIND_GROUPS[item.kind] || "tools") === group));
     for (const [group, label] of groups) {
@@ -2123,6 +2127,106 @@ function field(label, value, className = "") {
     return `<div class="trajectory-field ${className}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(text)}</strong></div>`;
 }
 
+function claimMatrixSummaryFields(record) {
+    const output = record?.output;
+    if (!output || typeof output !== "object" || !Array.isArray(output.rows)
+        || output.claim_count == null) return "";
+    const falseCount = Number(output.false_corroborated_claims || 0);
+    const staleCount = Number(output.stale_claims || 0);
+    const undatedCount = Number(output.undated_temporal_claims || 0);
+    const resolvedTemporal = Number(output.resolved_temporal_conflicts || 0);
+    const unresolvedContradictions = Number(output.unresolved_contradictions || 0);
+    const supersededClaims = Number(output.superseded_claims || 0);
+    const provenance = output.source_provenance || {};
+    return `
+        ${field("Claims supported", `${output.supported_claims || 0}/${output.claim_count || 0}`)}
+        ${field("Corroborated claims", output.corroborated_claims || 0)}
+        ${field("False corroboration", falseCount, falseCount ? "danger" : "")}
+        ${field("Time-sensitive claims", output.time_sensitive_claims || 0)}
+        ${field("Stale evidence", staleCount, staleCount ? "danger" : "")}
+        ${field("Undated temporal evidence", undatedCount, undatedCount ? "danger" : "")}
+        ${field("Resolved temporal conflicts", resolvedTemporal)}
+        ${field("Active contradictions", unresolvedContradictions, unresolvedContradictions ? "danger" : "")}
+        ${field("Historical claims retained", supersededClaims)}
+        ${field("Temporal coverage", formatPercent(output.temporal_coverage_rate ?? 1))}
+        ${field("Evidence roots", provenance.independent_root_count ?? "-")}
+        ${field("Provenance coverage", formatPercent(output.provenance_coverage_rate || 0))}
+        ${field("Publication ready", output.publication_ready ? "Yes" : "No", output.publication_ready ? "" : "danger")}`;
+}
+
+function claimMatrixClaims(value) {
+    if (!value || typeof value !== "object" || !Array.isArray(value.rows)) return "";
+    if (!value.rows.length) return jsonBlock(null, "No claims recorded");
+    return value.rows.map((row) => {
+        const supports = (row.relations || []).filter((item) => item.relation === "supports");
+        const supersession = row.superseded_by || (row.resolved_supersessions || [])[0] || {};
+        const evidence = supports.length ? supports.map((item) => `
+            <li>
+                <strong>${escapeHtml(item.domain || item.url || "source")}</strong>
+                <span>${escapeHtml(item.authority_role || "unknown")} / authority ${escapeHtml(item.authority_score ?? 0)} / ${escapeHtml(item.temporal_status || "not assessed")}</span>
+                <small>root: ${escapeHtml(item.evidence_root || item.url || "-")}</small>
+                ${item.source_date ? `<small>source date: ${escapeHtml(item.source_date)}${item.source_age_days != null ? ` / age ${escapeHtml(item.source_age_days)} days` : ""}</small>` : ""}
+            </li>`).join("") : "<li>No supporting evidence</li>";
+        return `
+            <article class="trajectory-diagnosis-card ${row.false_corroboration || (row.time_sensitive && !row.temporal_ready && row.status !== "superseded") ? "severity-warning" : ""}">
+                <span>${escapeHtml(row.status || "unsupported")} / ${escapeHtml(row.provenance_status || "no provenance")} / temporal ${escapeHtml(row.temporal_status || "not applicable")}</span>
+                <h4>${escapeHtml(row.claim || "Unnamed claim")}</h4>
+                <p>${escapeHtml(row.independent_support_domains || 0)} domains / ${escapeHtml(row.independent_support_roots || 0)} independent roots</p>
+                ${row.false_corroboration ? "<strong>Different domains share the same original evidence root.</strong>" : ""}
+                ${row.time_sensitive && !row.temporal_ready && row.status !== "superseded" ? `<strong>Current evidence required within ${escapeHtml(row.freshness_window_days || "?")} days.</strong>` : ""}
+                ${row.status === "superseded" ? `<p><strong>Superseded by:</strong> ${escapeHtml(supersession.new_claim || "newer claim")}<br><small>effective ${escapeHtml(supersession.effective_at || supersession.new_source_date || "unknown date")} · history preserved</small></p>` : ""}
+                <ul>${evidence}</ul>
+                ${row.repair_query ? `<p><strong>Repair:</strong> ${escapeHtml(row.repair_query)}</p>` : ""}
+            </article>`;
+    }).join("");
+}
+
+function claimLifecycleSummaryFields(record) {
+    const output = record?.output;
+    if (!output || output.type !== "claim_lifecycle") return "";
+    const summary = output.summary || {};
+    const lastRun = output.last_run || {};
+    const pending = Number(summary.pending_changes || 0);
+    return `
+        ${field("Tracked claim subjects", summary.tracked_subjects || 0)}
+        ${field("Confirmed transitions", summary.confirmed_transitions || 0)}
+        ${field("Pending changes", pending, pending ? "danger" : "")}
+        ${field("Observed this run", lastRun.observed_claims || 0)}
+        ${field("Transitions this run", lastRun.confirmed_transitions || 0)}
+        ${field("Lifecycle scope", output.scope_key || "-")}
+        ${summary.trajectory_window_truncated ? field("Timeline window", `${summary.returned_subjects || 0}/${summary.tracked_subjects || 0} recent subjects`) : ""}`;
+}
+
+function claimLifecycleClaims(value) {
+    if (!value || value.type !== "claim_lifecycle" || !Array.isArray(value.subjects)) return "";
+    if (!value.subjects.length) return jsonBlock(null, "No mutable claims tracked");
+    return value.subjects.map((subject) => {
+        const current = subject.current || {};
+        const history = Array.isArray(subject.history) ? subject.history : [];
+        const pending = Array.isArray(subject.pending_changes) ? subject.pending_changes : [];
+        const timeline = history.map((event) => `
+            <li class="event-${escapeHtml(event.event_type || "observed")}">
+                <span>${escapeHtml(event.event_type === "confirmed_transition" ? "Confirmed change" : "First seen")}</span>
+                <strong>${escapeHtml(event.to_claim || event.to_value || "Observed value")}</strong>
+                <small>effective ${escapeHtml(event.effective_at || event.observed_at || "unknown")} · ${escapeHtml(event.source_url || "source unavailable")}</small>
+            </li>`).join("");
+        const candidates = pending.map((event) => `
+            <li>
+                <strong>${escapeHtml(event.to_claim || event.to_value || "Changed value")}</strong>
+                <small>${escapeHtml((event.decision_reasons || []).join(" · ") || "confirmation required")}</small>
+            </li>`).join("");
+        return `
+            <article class="trajectory-diagnosis-card ${pending.length ? "severity-warning" : ""}">
+                <span>${pending.length ? "change pending confirmation" : "current fact"}</span>
+                <h4>${escapeHtml(current.claim || "Unnamed mutable claim")}</h4>
+                <p>Current since ${escapeHtml(current.effective_at || current.first_seen || "unknown")} · observed ${escapeHtml(current.observation_count || 1)} time(s)</p>
+                <p>${escapeHtml(current.authority_role || "unknown authority")} / authority ${escapeHtml(current.authority_score ?? 0)} / root ${escapeHtml(current.evidence_root || "-")}</p>
+                <ol class="trajectory-claim-timeline">${timeline}</ol>
+                ${pending.length ? `<strong>Pending candidates did not replace the current fact</strong><ul class="trajectory-claim-pending">${candidates}</ul>` : ""}
+            </article>`;
+    }).join("");
+}
+
 function causalLinks(record) {
     const ids = [];
     if (record.request_id && record.event_id !== record.request_id) ids.push(["Request", record.request_id]);
@@ -2171,6 +2275,8 @@ function summaryContent(record) {
             ${record.details?.step_id ? field("Block ID", record.details.step_id) : ""}
             ${record.details?.definition_hash ? field("Definition", record.details.definition_hash) : ""}
             ${record.details?.steps_run != null ? field("Steps run", record.details.steps_run) : ""}
+            ${claimMatrixSummaryFields(record)}
+            ${claimLifecycleSummaryFields(record)}
             ${record.call_id ? field("Call ID", record.call_id) : ""}
             ${usage.total_tokens != null ? field("Tokens", usage.total_tokens) : ""}
             ${record.error ? field("Error", record.error, "danger") : ""}
@@ -2412,7 +2518,9 @@ function contentForTab(record, tab) {
         Candidates: () => jsonBlock(detail.candidates || record.input),
         Selected: () => jsonBlock(detail.selected || output),
         Provenance: () => jsonBlock(record.source),
-        Claims: () => jsonBlock(output?.claims || record.input?.claims || output),
+        Claims: () => claimLifecycleClaims(output)
+            || claimMatrixClaims(output)
+            || jsonBlock(output?.claims || record.input?.claims || output),
         Verdict: () => jsonBlock(detail.verdict || output),
         Decision: () => jsonBlock(detail.decision || output),
         Task: () => jsonBlock(detail.task || record.input),

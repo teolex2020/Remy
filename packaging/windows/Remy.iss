@@ -54,4 +54,4 @@ Name: "{group}\Remy"; Filename: "{app}\Remy.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\Remy"; Filename: "{app}\Remy.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Remy.exe"; Description: "Launch Remy"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Remy.exe"; Description: "Launch Remy"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent unchecked

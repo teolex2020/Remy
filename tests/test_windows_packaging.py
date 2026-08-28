@@ -20,6 +20,8 @@ def test_pyinstaller_spec_builds_desktop_onedir_with_runtime_assets():
     assert 'collect_data_files("remy")' in spec
     assert 'collect_dynamic_libs("aura")' in spec
     assert '"playwright_runtime.py"' in spec
+    assert '"agent-lab-runtime" / "Dockerfile"' in spec
+    assert '"agent-lab-runtime" / ".dockerignore"' in spec
 
 
 def test_playwright_runtime_uses_bundled_browser_location():
@@ -39,6 +41,7 @@ def test_inno_setup_is_per_user_and_creates_normal_shortcuts():
     assert r'Filename: "{app}\Remy.exe"' in installer
     assert "UninstallDisplayIcon={app}\\Remy.exe" in installer
     assert "runascurrentuser" not in installer.lower()
+    assert "postinstall skipifsilent unchecked" in installer
 
 
 def test_build_script_uses_isolated_environment_and_all_features():

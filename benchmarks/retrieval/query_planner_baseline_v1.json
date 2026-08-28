@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "metrics": {
+    "intent_recall": 1.0,
+    "budget_compliance": 1.0,
+    "length_compliance": 1.0,
+    "priority_accuracy": 1.0,
+    "duplicate_rate": 0.0,
+    "required_text_found": 1.0
+  }
+}

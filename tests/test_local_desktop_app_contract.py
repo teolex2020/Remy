@@ -329,7 +329,7 @@ def test_experiment_canvas_is_lazy_and_exposes_required_research_blocks():
     assert ".self-mod-progress" in css
     assert "#experiments-content {" in css
     assert "overflow-y: auto;" in css.split("#experiments-content {", 1)[1].split("}", 1)[0]
-    assert '/css/main.css?v=1.60' in html
+    assert '/css/main.css?v=1.64' in html
 
 
 def test_sidebar_exposes_project_microbrain_switcher():
@@ -406,7 +406,7 @@ def test_sidebar_is_compact_and_grouped_by_workflow():
     assert "cursor: col-resize;" in css
     assert "getOperatorAlerts" in app_js
     assert "getSystemStatus" not in app_js.split("async function _refreshOperatorAlerts", 1)[1].split("}", 1)[0]
-    assert 'const CACHE_NAME = "remy-v1.77"' in Path(
+    assert 'const CACHE_NAME = "remy-v1.86"' in Path(
         "src/remy/web/static/sw.js"
     ).read_text(encoding="utf-8")
 

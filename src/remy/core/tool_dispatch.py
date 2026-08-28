@@ -5,6 +5,7 @@ Routes tool calls to their handlers with circuit breaker, retry, audit trail,
 health tracking, and trust enforcement.
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -193,9 +194,12 @@ def execute_tool(
     pipeline = ToolPipeline(
         executor=_pipeline_execute,
         provenance=_pipeline_provenance,
+        before_middleware=_pipeline_before_middleware,
         pre_policy=_pipeline_pre_policy_receipt,
         monotonic_guards=_pipeline_monotonic_guards,
         approval=_pipeline_approval,
+        approval_executor=_pipeline_approval_executor,
+        after_middleware=_pipeline_after_middleware,
         post_policy=_pipeline_post_policy_receipt,
         artifact_spill=spill_large_tool_result,
         durable_observation=_pipeline_durable_observation,
@@ -218,6 +222,36 @@ def _pipeline_provenance(ctx) -> dict:
     from remy.core.provenance import _get_provenance
 
     return _get_provenance(ctx.channel or None)
+
+
+def _pipeline_before_middleware(ctx) -> dict | None:
+    from remy.core.tool_middleware import get_tool_middleware_chain, middleware_block_result
+
+    receipt = get_tool_middleware_chain().run_before(ctx)
+    ctx.policy["middleware_before"] = {
+        "mode": "ordered-control-chain",
+        "status": "deny" if receipt.get("blocked") else "allow",
+        "handlers": list(receipt.get("handlers") or []),
+    }
+    if not receipt.get("blocked"):
+        return None
+    reason = str(receipt.get("reason") or "Tool call blocked by middleware")
+    return {
+        "decision": "deny",
+        "reason": reason,
+        "result": middleware_block_result(ctx.resolved_name, reason),
+    }
+
+
+def _pipeline_after_middleware(ctx) -> None:
+    from remy.core.tool_middleware import get_tool_middleware_chain
+
+    receipt = get_tool_middleware_chain().run_after(ctx)
+    ctx.policy["middleware_after"] = {
+        "mode": "ordered-control-chain",
+        "status": "completed",
+        "handlers": list(receipt.get("handlers") or []),
+    }
 
 
 def _pipeline_pre_policy_receipt(ctx) -> dict | None:
@@ -379,27 +413,91 @@ def _pipeline_monotonic_guards(ctx) -> list[dict]:
 
 
 def _pipeline_approval(ctx) -> dict:
-    """Record approval requirements without duplicating handler-owned prompts."""
-    try:
-        from remy.core.approval_queue import approval_queue, needs_approval
+    """Classify and describe approval before any handler side effect."""
+    from remy.core.approval_queue import (
+        approval_queue,
+        build_approval_description,
+        needs_approval,
+    )
 
-        required = bool(
-            needs_approval(
-                ctx.resolved_name,
-                ctx.args,
-                url=str(ctx.args.get("url") or "") or None,
-                channel=ctx.channel or None,
-            )
+    if not approval_queue.enabled:
+        ctx.policy["approval_gate"] = {
+            "mode": "disabled",
+            "required": False,
+            "target_present": False,
+            "description_sha256": "",
+        }
+        return {"required": False, "mode": "not-required"}
+
+    target = str(ctx.args.get("url") or "")
+    if ctx.resolved_name in {"browse_page", "browser_act"}:
+        from remy.core.tool_handlers.browser_dispatch import resolve_browser_approval_url
+
+        target = resolve_browser_approval_url(ctx.resolved_name, ctx.args)
+    required = bool(
+        needs_approval(
+            ctx.resolved_name,
+            ctx.args,
+            url=target or None,
+            channel=ctx.channel or None,
         )
-        if ctx.resolved_name == "shell_exec" and approval_queue.enabled:
-            required = True
-    except Exception as exc:
-        logger.debug("Approval classification skipped for %s: %s", ctx.resolved_name, exc)
-        required = False
+    )
+    if ctx.resolved_name == "shell_exec" and approval_queue.enabled:
+        required = True
+    description = (
+        build_approval_description(ctx.resolved_name, ctx.args, target or None)
+        if required else ""
+    )
+    ctx.policy["approval_gate"] = {
+        "mode": "pipeline-managed" if required else "not-required",
+        "required": required,
+        "target_present": bool(target),
+        "description_sha256": (
+            hashlib.sha256(description.encode("utf-8")).hexdigest()
+            if description else ""
+        ),
+    }
     return {
         "required": required,
-        "mode": "handler-managed" if required else "not-required",
+        "mode": "pipeline-managed" if required else "not-required",
+        "target": target,
+        "description": description,
     }
+
+
+def _pipeline_approval_executor(ctx, executor) -> str:
+    """Pause once, then execute the exact invocation under a context-local grant."""
+    from remy.core.approval_queue import approval_queue, pipeline_approval_grant
+    from remy.core.tool_pipeline import ToolDecision
+
+    executed = False
+
+    def approved_action() -> str:
+        nonlocal executed
+        executed = True
+        with pipeline_approval_grant(ctx.resolved_name, ctx.args):
+            return executor(ctx)
+
+    result = approval_queue.request_approval_sync(
+        ctx.approval_description,
+        approved_action,
+        tool_name=ctx.resolved_name,
+        tool_args=ctx.args,
+        url=ctx.approval_target or None,
+    )
+    if executed:
+        ctx.approval_outcome = "approved"
+        ctx.policy["approval_gate"]["outcome"] = "approved"
+        return result
+    try:
+        error = str((json.loads(result) or {}).get("error") or "")
+    except (TypeError, ValueError, AttributeError):
+        error = "Approval denied"
+    outcome = "timed_out" if "timed out" in error.lower() else "denied"
+    ctx.approval_outcome = outcome
+    ctx.policy["approval_gate"]["outcome"] = outcome
+    ctx.tighten(ToolDecision.DENY, f"pipeline approval {outcome.replace('_', ' ')}")
+    return result
 
 
 def _pipeline_post_policy_receipt(ctx) -> None:
@@ -420,7 +518,7 @@ def _pipeline_post_policy_receipt(ctx) -> None:
             marker in approval_error.lower()
             for marker in ("rejected by user", "timed out", "approval denied")
         )
-        if approval_denied:
+        if approval_denied and ctx.approval_outcome not in {"denied", "timed_out"}:
             from remy.core.tool_pipeline import ToolDecision
 
             ctx.tighten(ToolDecision.DENY, "handler approval denied")
@@ -458,6 +556,15 @@ def _pipeline_durable_observation(ctx) -> None:
                     "policy": ctx.policy,
                     "approval_required": ctx.approval_required,
                     "approval_mode": ctx.approval_mode,
+                    "approval_outcome": ctx.approval_outcome,
+                    "approval_target_sha256": (
+                        hashlib.sha256(ctx.approval_target.encode("utf-8")).hexdigest()
+                        if ctx.approval_target else ""
+                    ),
+                    "approval_description_sha256": (
+                        hashlib.sha256(ctx.approval_description.encode("utf-8")).hexdigest()
+                        if ctx.approval_description else ""
+                    ),
                     "provenance": ctx.provenance,
                     "argument_keys": sorted(str(key) for key in ctx.args),
                     "argument_sha256": hashlib.sha256(
@@ -2574,31 +2681,19 @@ def _execute_tool_inner(
             last_error = None
             for attempt in range(_MAX_RETRIES + 1):
                 try:
-                    from ddgs import DDGS
+                    from remy.core.search_gateway import SearchRequest, get_search_gateway
 
-                    # v9 multi-backend metasearch - skips yandex (429s from UA
-                    # IPs), bing (disabled), and startpage (removed from ddgs).
-                    # Longer timeout since the default 5s lets a single slow
-                    # backend sink the whole call.
-                    raw = DDGS(timeout=15).text(
-                        query,
-                        max_results=10,
-                        backend="duckduckgo,brave,google,mojeek,yahoo",
+                    search_response = get_search_gateway().search(
+                        SearchRequest(query=query, max_results=10)
                     )
-                    grounding_chunks = [
-                        {
-                            "title": r.get("title") or "",
-                            "uri": r.get("href") or "",
-                            "snippet": r.get("body") or "",
-                        }
-                        for r in (raw or [])
-                        if r.get("href")
-                    ]
-
-                    # Phase 2: classify + rerank candidates.
-                    from remy.core.retrieval.source_filter import annotate, rerank
-                    grounding_chunks = annotate(grounding_chunks)
-                    grounding_chunks = rerank(grounding_chunks, drop_classes={"seo"})
+                    grounding_chunks = search_response.candidates
+                    if not grounding_chunks and search_response.attempts and all(
+                        item.status == "error" for item in search_response.attempts
+                    ):
+                        errors = "; ".join(
+                            f"{item.provider}: {item.error}" for item in search_response.attempts
+                        )
+                        raise RuntimeError(errors)
 
                     if grounding_chunks:
                         answer = (
@@ -2617,6 +2712,7 @@ def _execute_tool_inner(
                         "mode": "candidate_discovery",
                         "query": query,
                         "candidate_count": len(grounding_chunks),
+                        "search_diagnostics": search_response.diagnostics(),
                     }
                     if grounding_chunks:
                         result["sources"] = grounding_chunks
@@ -2858,10 +2954,8 @@ def _execute_tool_inner(
                 }
             )
 
-        # ============== EXTRACT CONTENT (Trafilatura) ==============
+        # ============== EXTRACT CONTENT ==============
         elif name == "extract_content":
-            import trafilatura
-
             # Fetch = forward progress; clear the web_search-without-fetch counter.
             try:
                 from remy.core.brain_tools import _reset_web_search_no_fetch
@@ -2877,6 +2971,7 @@ def _execute_tool_inner(
 
             include_links = args.get("include_links", False)
             include_tables = args.get("include_tables", True)
+            force_refresh = bool(args.get("force_refresh", False))
             # Phase 3: optional identity hints. Agent passes these when it
             # wants the fetch cross-checked against an expected page, paper,
             # or resource.
@@ -2886,65 +2981,32 @@ def _execute_tool_inner(
             claim_span = str(args.get("claim_span") or "").strip()
 
             try:
-                downloaded = trafilatura.fetch_url(url)
-                fetch_method = "trafilatura"
-                if not downloaded:
-                    # Some CDNs reject Trafilatura's default downloader while
-                    # serving ordinary browser-like requests normally.
-                    from remy.core.web_content import fetch_html
-
-                    downloaded = fetch_html(url)
-                    fetch_method = "http_fallback"
-
-                text = trafilatura.extract(
-                    downloaded,
-                    include_links=include_links,
-                    include_tables=include_tables,
-                    favor_recall=True,
+                from remy.core.content_fetch_gateway import (
+                    ContentFetchRequest,
+                    get_content_fetch_gateway,
                 )
 
-                # SSR/Next.js landing pages often contain valid visible text
-                # that article-oriented extraction reduces to one small card.
-                # Prefer the server-rendered visible text when it is materially
-                # more complete; it is still direct page evidence.
-                from remy.core.web_content import extract_visible_text
+                fetched = get_content_fetch_gateway().fetch(
+                    ContentFetchRequest(
+                        url=url,
+                        max_chars=16_000,
+                        include_links=include_links,
+                        include_tables=include_tables,
+                        allow_browser=True,
+                        force_refresh=force_refresh,
+                    )
+                )
 
-                visible_text, fallback_title = extract_visible_text(downloaded)
-                if visible_text and len(visible_text) > max(800, len(text or "") * 2):
-                    text = visible_text
-                    extraction_method = f"{fetch_method}+visible_html"
-                else:
-                    extraction_method = f"{fetch_method}+trafilatura"
-
-                if not text:
+                if not fetched.ok:
                     return json.dumps(
                         {
-                            "error": "Could not extract meaningful content (page may be JS-rendered — try browse_page instead)",
+                            "error": fetched.error or "Could not extract meaningful content",
                             "url": url,
-                        }
+                            "fetch_diagnostics": fetched.diagnostics(),
+                        },
+                        ensure_ascii=False,
                     )
-
-                metadata = trafilatura.extract_metadata(downloaded)
-                result = {
-                    "url": url,
-                    "content": text[:16000],
-                    "extraction_method": extraction_method,
-                }
-                if metadata:
-                    if metadata.title:
-                        result["title"] = metadata.title
-                    if metadata.author:
-                        result["author"] = metadata.author
-                    if metadata.date:
-                        result["date"] = metadata.date
-                    if metadata.sitename:
-                        result["site"] = metadata.sitename
-                if not result.get("title") and fallback_title:
-                    result["title"] = fallback_title
-
-                if len(text) > 16000:
-                    result["truncated"] = True
-                    result["total_chars"] = len(text)
+                result = fetched.to_payload(max_chars=16_000)
 
                 # Phase 3: attach EvidencePacket. Always includes source_class
                 # + host; if caller supplied expected_title / expected_identifier
@@ -2976,7 +3038,7 @@ def _execute_tool_inner(
                     record_turn_fetch_evidence(
                         session_id or "",
                         tool="extract_content",
-                        url=url,
+                        url=str(result.get("url") or url),
                         title=str(result.get("title") or ""),
                         site=str(result.get("site") or ""),
                     )

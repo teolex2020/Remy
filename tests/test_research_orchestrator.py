@@ -64,8 +64,8 @@ class TestStartResearch:
                 assert "Sleep quality" in result["query_plan"]
         b.close()
 
-    def test_depth_quick_generates_2_queries(self, tmp_path):
-        """Quick depth generates 2 queries."""
+    def test_depth_quick_generates_3_queries(self, tmp_path):
+        """Quick depth generates at least three source-oriented queries."""
         b = CognitiveMemory(str(tmp_path / "brain"))
 
         with patch("remy.core.brain_tools.brain", b), \
@@ -86,7 +86,7 @@ class TestStartResearch:
 
                 result = json.loads(_start_research({"topic": "test", "depth": "quick"}))
                 assert result["depth"] == "quick"
-                assert result["queries_total"] == 2
+                assert result["queries_total"] == 3
         b.close()
 
     def test_project_stored_in_brain(self, tmp_path):
@@ -308,12 +308,11 @@ class TestCompleteResearch:
             ms.GEMINI_API_KEY = "fake-key"
             ms.SUMMARY_MODEL = "test-model"
 
-            mock_llm = MagicMock()
-            mock_llm.invoke.return_value = MagicMock(
+            mock_response = MagicMock(
                 content="Sleep quality depends on 7-9h of sleep and avoiding blue light before bed."
             )
 
-            with patch("langchain_google_genai.ChatGoogleGenerativeAI", return_value=mock_llm):
+            with patch("remy.core.llm.call_llm", return_value=mock_response):
                 from remy.core.brain_tools import _complete_research
 
                 result = json.loads(_complete_research({"project_id": "rp-sleep"}))
@@ -340,10 +339,9 @@ class TestCompleteResearch:
             ms.GEMINI_API_KEY = "fake-key"
             ms.SUMMARY_MODEL = "test-model"
 
-            mock_llm = MagicMock()
-            mock_llm.invoke.return_value = MagicMock(content="Summary report.")
+            mock_response = MagicMock(content="Summary report.")
 
-            with patch("langchain_google_genai.ChatGoogleGenerativeAI", return_value=mock_llm):
+            with patch("remy.core.llm.call_llm", return_value=mock_response):
                 from remy.core.brain_tools import _complete_research
 
                 _complete_research({"project_id": "rp-sleep"})
@@ -368,10 +366,9 @@ class TestCompleteResearch:
             ms.GEMINI_API_KEY = "fake-key"
             ms.SUMMARY_MODEL = "test-model"
 
-            mock_llm = MagicMock()
-            mock_llm.invoke.return_value = MagicMock(content="Summary report.")
+            mock_response = MagicMock(content="Summary report.")
 
-            with patch("langchain_google_genai.ChatGoogleGenerativeAI", return_value=mock_llm), \
+            with patch("remy.core.llm.call_llm", return_value=mock_response), \
                  patch(
                      "remy.core.verification_gate.run_research_completion_verification_gate",
                      return_value=VerificationResult(
@@ -454,10 +451,7 @@ class TestCompleteResearch:
             ms.GEMINI_API_KEY = "fake-key"
             ms.SUMMARY_MODEL = "test-model"
 
-            mock_llm = MagicMock()
-            mock_llm.invoke.side_effect = Exception("LLM down")
-
-            with patch("langchain_google_genai.ChatGoogleGenerativeAI", return_value=mock_llm):
+            with patch("remy.core.llm.call_llm", side_effect=Exception("LLM down")):
                 from remy.core.brain_tools import _complete_research
 
                 result = json.loads(_complete_research({"project_id": "rp-sleep"}))
@@ -479,13 +473,12 @@ class TestCompleteResearch:
             ms.GEMINI_API_KEY = "fake-key"
             ms.SUMMARY_MODEL = "test-model"
 
-            mock_llm = MagicMock()
-            mock_llm.invoke.return_value = MagicMock(content="Summary report.")
+            mock_response = MagicMock(content="Summary report.")
 
             # Mock Aura Memory (knowledge)
             mock_knowledge = MagicMock()
             
-            with patch("langchain_google_genai.ChatGoogleGenerativeAI", return_value=mock_llm), \
+            with patch("remy.core.llm.call_llm", return_value=mock_response), \
                  patch("remy.core.agent_tools.knowledge", mock_knowledge):
                 
                 from remy.core.brain_tools import _complete_research

@@ -1,7 +1,7 @@
 # Harness Runtime Execution Plan
 
 Date: 2026-03-30
-Status: proposed
+Status: first slice complete; retained as implementation history
 
 This document turns the harness roadmap into an implementation-first plan.
 
@@ -12,6 +12,11 @@ It answers two questions:
 
 This is not the full long-term architecture.
 It is the shortest path to making the runtime harness explicit and operational.
+
+Implementation note (2026-08-25): the first slice is operational. Runtime state
+semantics live in `state_semantics.py` plus `contracts/state_semantics.yaml` rather
+than the originally proposed `runtime_state_schema.py`; System already exposes the
+contract, state registry, incident taxonomy, verification gates, and eval summaries.
 
 ---
 

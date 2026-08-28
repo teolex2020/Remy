@@ -131,23 +131,39 @@ async def _run_llm_call(config: dict) -> str:
     return content or ""
 
 
-async def _fetch_page_text(url: str, max_chars: int = 3000) -> str:
-    """Fetch a URL and extract readable text via trafilatura."""
+async def _fetch_page_evidence(
+    url: str,
+    max_chars: int = 3000,
+    *,
+    force_refresh: bool = False,
+):
+    """Return a structured fetch result for pipeline observability."""
     try:
-        import httpx
-        import trafilatura
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True,
-                                     headers={"User-Agent": "Mozilla/5.0"}) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-        text = await asyncio.to_thread(
-            trafilatura.extract, resp.text,
-            include_comments=False, include_tables=True, no_fallback=False,
+        from remy.core.content_fetch_gateway import (
+            ContentFetchRequest,
+            get_content_fetch_gateway,
         )
-        if text:
-            return text[:max_chars]
+
+        return await asyncio.to_thread(
+            get_content_fetch_gateway().fetch,
+            ContentFetchRequest(
+                url=url,
+                max_chars=max_chars,
+                force_refresh=force_refresh,
+            ),
+        )
     except Exception as exc:
         logger.debug("Page fetch failed for %s: %s", url, exc)
+        return None
+
+
+async def _fetch_page_text(url: str, max_chars: int = 3000) -> str:
+    """Compatibility wrapper returning only readable evidence text."""
+    result = await _fetch_page_evidence(url, max_chars=max_chars)
+    if result is not None and result.ok:
+        return result.content[:max_chars]
+    if result is not None:
+        logger.debug("Page fetch produced no evidence for %s: %s", url, result.error)
     return ""
 
 
@@ -394,11 +410,21 @@ async def _run_web_search(config: dict) -> str:
     if not query:
         return ""
     try:
-        from ddgs import DDGS
+        from remy.core.search_gateway import SearchRequest, get_search_gateway
+
         raw_limit = min(max(num_results * 3, num_results), 20)
-        results = await asyncio.to_thread(
-            lambda: list(DDGS().text(query, max_results=raw_limit))
+        search_response = await asyncio.to_thread(
+            get_search_gateway().search,
+            SearchRequest(query=query, max_results=raw_limit),
         )
+        results = [
+            {
+                **candidate,
+                "href": candidate.get("uri", ""),
+                "body": candidate.get("snippet", ""),
+            }
+            for candidate in search_response.candidates
+        ]
         if not results:
             return "[No search results found]"
         selected = _rank_search_results(query, results, num_results)
@@ -407,35 +433,52 @@ async def _run_web_search(config: dict) -> str:
         # Fetch full content for all results concurrently (respects num_results)
         if fetch_content:
             urls = [r.get("href", "") for r in selected if r.get("href")]
-            page_texts = await asyncio.gather(*[_fetch_page_text(u) for u in urls])
-            url_to_text = dict(zip(urls, page_texts))
+            selected_by_url = {r.get("href", ""): r for r in selected}
+            page_results = await asyncio.gather(
+                *[
+                    _fetch_page_evidence(
+                        url,
+                        force_refresh=bool(
+                            selected_by_url[url].get("force_refresh_recommended")
+                        ),
+                    )
+                    for url in urls
+                ]
+            )
+            url_to_result = dict(zip(urls, page_results))
         else:
-            url_to_text = {}
+            url_to_result = {}
 
         parts.append(
             "WEB SEARCH RESULTS\n"
             f"Query: {query}\n"
             f"Selected sources: {len(selected)} of {len(results)} raw results\n"
+            f"Search providers attempted: {len(search_response.attempts)}\n"
             "Use only the source text below. If sources are mixed or weak, say so explicitly."
         )
         for index, r in enumerate(selected, start=1):
             title   = r.get("title", "")
             snippet = r.get("body", "")
             url     = r.get("href", "")
-            full    = url_to_text.get(url, "")
+            fetch_result = url_to_result.get(url)
+            full = fetch_result.content if fetch_result is not None and fetch_result.ok else ""
             if full:
                 parts.append(
                     f"[{index}] {title}\n"
                     f"URL: {url}\n"
                     "Fetched content: yes\n"
+                    f"Fetch method: {fetch_result.extraction_method}\n"
+                    f"Content quality: {fetch_result.quality_score:.3f}\n"
                     f"Snippet: {snippet}\n\n"
                     f"Content:\n{full}"
                 )
             else:
+                fetch_error = fetch_result.error if fetch_result is not None else ""
                 parts.append(
                     f"[{index}] {title}\n"
                     f"URL: {url}\n"
                     "Fetched content: no\n"
+                    f"Fetch error: {fetch_error or 'not requested or unavailable'}\n"
                     f"Snippet: {snippet}"
                 )
 

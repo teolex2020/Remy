@@ -1295,19 +1295,35 @@ def _check_and_backup_on_version_change(brain_path: Path) -> str | None:
 def _probe_aura_store(path: Path) -> tuple[bool, str]:
     """Open an Aura store in a subprocess so Rust aborts cannot kill the main process."""
     try:
-        probe = subprocess.run(
-            [
+        if getattr(sys, "frozen", False):
+            # In PyInstaller builds sys.executable is Remy.exe, not python.exe.
+            # Re-enter the desktop entrypoint through its private probe mode;
+            # passing ``-c`` would recursively launch the full application.
+            command = [
+                sys.executable,
+                "--remy-internal-aura-probe",
+                str(path),
+            ]
+            timeout = 45
+        else:
+            command = [
                 sys.executable,
                 "-c",
                 (
+                    "import sys; "
                     "from aura import Aura; "
-                    f"Aura(r'{str(path)}'); "
+                    "store = Aura(sys.argv[1]); "
+                    "store.close(); "
                     "print('ok')"
                 ),
-            ],
+                str(path),
+            ]
+            timeout = 20
+        probe = subprocess.run(
+            command,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=timeout,
         )
         if probe.returncode == 0:
             return True, ""

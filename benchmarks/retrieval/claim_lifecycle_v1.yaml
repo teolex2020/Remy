@@ -1,0 +1,125 @@
+version: 1
+runner_schema: 1
+
+thresholds:
+  min_tracked_subject_accuracy: 1.0
+  min_current_value_accuracy: 1.0
+  min_transition_accuracy: 1.0
+  min_pending_accuracy: 1.0
+  min_history_preservation_accuracy: 1.0
+  max_unsafe_transition_rate: 0.0
+
+regression_tolerances:
+  tracked_subject_accuracy: 0.0
+  current_value_accuracy: 0.0
+  transition_accuracy: 0.0
+  pending_accuracy: 0.0
+  history_preservation_accuracy: 0.0
+  unsafe_transition_rate: 0.0
+
+cases:
+  - id: l01_first_price_observation
+    topic: service pricing
+    runs:
+      - observed_at: "2026-08-22T12:00:00+00:00"
+        rows:
+          - claim_id: price-20
+            claim: "The current service price is $20 per month."
+            status: supported
+            relations:
+              - relation: supports
+                url: "https://vendor-one.test/pricing"
+                source_date: "2026-08-21T09:00:00+00:00"
+                evidence_root: "https://vendor-one.test/pricing"
+                authority_role: primary
+                authority_score: 0.9
+                temporally_valid: true
+    expected: {tracked_subjects: 1, current_value: "$20", confirmed_transitions: 0, pending_changes: 0}
+
+  - id: l02_reaffirmed_price_does_not_duplicate_history
+    topic: service pricing
+    runs:
+      - observed_at: "2026-08-22T12:00:00+00:00"
+        rows:
+          - claim_id: price-20-a
+            claim: "The current service price is $20 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor-one.test/pricing", source_date: "2026-08-21T09:00:00+00:00", evidence_root: "https://vendor-one.test/pricing", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+      - observed_at: "2026-08-23T12:00:00+00:00"
+        rows:
+          - claim_id: price-20-b
+            claim: "The current service price is $20 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor-one.test/pricing", source_date: "2026-08-22T09:00:00+00:00", evidence_root: "https://vendor-one.test/pricing", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+    expected: {tracked_subjects: 1, current_value: "$20", confirmed_transitions: 0, pending_changes: 0, history_events: 1}
+
+  - id: l03_independent_new_price_confirms_transition
+    topic: service pricing
+    runs:
+      - observed_at: "2026-08-16T12:00:00+00:00"
+        rows:
+          - claim_id: price-20
+            claim: "The current service price is $20 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://archive.test/pricing", source_date: "2026-08-15T09:00:00+00:00", evidence_root: "https://archive.test/pricing", authority_role: primary, authority_score: 0.85, temporally_valid: true}
+      - observed_at: "2026-08-24T12:00:00+00:00"
+        rows:
+          - claim_id: price-25
+            claim: "The current service price is $25 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor.test/pricing", source_date: "2026-08-23T09:00:00+00:00", evidence_root: "https://vendor.test/pricing", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+    expected: {tracked_subjects: 1, current_value: "$25", confirmed_transitions: 1, pending_changes: 0, history_events: 2}
+
+  - id: l04_same_origin_change_stays_pending
+    topic: service pricing
+    runs:
+      - observed_at: "2026-08-16T12:00:00+00:00"
+        rows:
+          - claim_id: price-20
+            claim: "The current service price is $20 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor.test/pricing", source_date: "2026-08-15T09:00:00+00:00", evidence_root: "https://vendor.test/pricing", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+      - observed_at: "2026-08-24T12:00:00+00:00"
+        rows:
+          - claim_id: price-25
+            claim: "The current service price is $25 per month."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor.test/pricing", source_date: "2026-08-23T09:00:00+00:00", evidence_root: "https://vendor.test/pricing", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+    expected: {tracked_subjects: 1, current_value: "$20", confirmed_transitions: 0, pending_changes: 1, history_events: 1}
+
+  - id: l05_stale_candidate_stays_pending
+    topic: Orion release
+    runs:
+      - observed_at: "2026-08-01T12:00:00+00:00"
+        rows:
+          - claim_id: orion-17
+            claim: "Orion supported release is version 17."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://archive.test/orion", source_date: "2026-07-30T09:00:00+00:00", evidence_root: "https://archive.test/orion", authority_role: primary, authority_score: 0.85, temporally_valid: true}
+      - observed_at: "2026-12-01T12:00:00+00:00"
+        rows:
+          - claim_id: orion-18
+            claim: "Orion supported release is version 18."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://vendor.test/orion", source_date: "2026-08-01T09:00:00+00:00", evidence_root: "https://vendor.test/orion", authority_role: primary, authority_score: 0.9, temporally_valid: false}
+    expected: {tracked_subjects: 1, current_value: "17|supported", confirmed_transitions: 0, pending_changes: 1, history_events: 1}
+
+  - id: l06_immutable_science_is_not_tracked
+    topic: experiment accuracy
+    runs:
+      - observed_at: "2026-08-22T12:00:00+00:00"
+        rows:
+          - claim_id: science-82
+            claim: "The experiment reports accuracy of 82 percent."
+            status: supported
+            relations:
+              - {relation: supports, url: "https://paper.test/result", source_date: "2026-08-20T09:00:00+00:00", evidence_root: "https://paper.test/result", authority_role: primary, authority_score: 0.9, temporally_valid: true}
+    expected: {tracked_subjects: 0, current_value: "", confirmed_transitions: 0, pending_changes: 0, history_events: 0}

@@ -187,6 +187,37 @@ def test_compaction_diagnostics_are_visible_without_prompt_content(tmp_path):
     assert "prompt" not in str(event["input"]).lower()
 
 
+def test_claim_lifecycle_diagnostic_is_recorded_as_verification(tmp_path):
+    store = TrajectoryStore(tmp_path / "trajectory.sqlite3")
+    store.begin_turn(
+        session_id="conversation-lifecycle",
+        project_id="project-1",
+        content="check changing price",
+    )
+    store.record_diagnostics(
+        session_id="conversation-lifecycle",
+        entries=[{
+            "type": "claim_lifecycle",
+            "scope_key": "scope-1",
+            "summary": {"tracked_subjects": 1},
+            "last_run": {"confirmed_transitions": 1},
+            "subjects": [],
+        }],
+    )
+    store.finish_turn(session_id="conversation-lifecycle")
+
+    event = next(
+        record
+        for record in store.list_events(
+            project_id="project-1", session_id="conversation-lifecycle"
+        )
+        if record["kind"] == "VERIFICATION"
+    )
+
+    assert event["output"]["type"] == "claim_lifecycle"
+    assert event["output"]["scope_key"] == "scope-1"
+
+
 def test_self_modification_event_is_project_scoped_and_prompt_redacted(tmp_path):
     store = TrajectoryStore(tmp_path / "trajectory.sqlite3")
     event_id = store.record_self_modification_event(
@@ -292,7 +323,11 @@ def test_pipeline_run_is_a_redacted_causal_trajectory(tmp_path):
 
 @pytest.mark.parametrize(
     ("scope", "event_kind"),
-    [("experiment", "EXPERIMENT_MODEL"), ("automation", "AUTOMATION_STEP")],
+    [
+        ("experiment", "EXPERIMENT_MODEL"),
+        ("automation", "AUTOMATION_STEP"),
+        ("agent_lab", "AGENT_LAB_PHASE"),
+    ],
 )
 def test_execution_run_is_project_scoped_redacted_and_causal(tmp_path, scope, event_kind):
     store = TrajectoryStore(tmp_path / "trajectory.sqlite3")

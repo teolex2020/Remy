@@ -1,0 +1,1563 @@
+{
+  "schema_version": 2,
+  "benchmark_version": 2,
+  "mode": "snapshot",
+  "reranker_enabled": true,
+  "summary": {
+    "case_count": 18,
+    "recall_at_10": 1.0,
+    "ndcg_at_10": 0.9827,
+    "mrr": 0.9444,
+    "target_domain_hit_rate": 1,
+    "independent_domain_rate": 1.0,
+    "duplicate_rate": 0.0,
+    "duplicate_suppression_rate": 0.0361,
+    "local_cache_hit_rate": 0.1111,
+    "external_search_rate": 0.8889,
+    "latency_p50_ms": 3.5,
+    "latency_p95_ms": 5.15,
+    "passed_cases": 18,
+    "failed_cases": 0
+  },
+  "categories": {
+    "adversarial_relevance": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 3.0,
+      "latency_p95_ms": 3.0
+    },
+    "corroboration": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 4.0,
+      "latency_p95_ms": 4.0
+    },
+    "deduplication": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.9721,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.25,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 3.0,
+      "latency_p95_ms": 3.0
+    },
+    "freshness": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 4.0,
+      "latency_p95_ms": 4.0
+    },
+    "implementation": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 4.0,
+      "latency_p95_ms": 4.0
+    },
+    "local_first": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.858,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 1.0,
+      "external_search_rate": 0,
+      "latency_p50_ms": 2.0,
+      "latency_p95_ms": 2.0
+    },
+    "multilingual": {
+      "case_count": 2,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.929,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 4.0,
+      "latency_p95_ms": 4.0
+    },
+    "multilingual_reranking": {
+      "case_count": 2,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 2.0,
+      "latency_p95_ms": 2.0
+    },
+    "no_result": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 0.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 1.0,
+      "latency_p95_ms": 1.0
+    },
+    "noise_filtering": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 5.0,
+      "latency_p95_ms": 5.0
+    },
+    "official_docs": {
+      "case_count": 2,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.1,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 5.5,
+      "latency_p95_ms": 5.95
+    },
+    "operators": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 2.0,
+      "latency_p95_ms": 2.0
+    },
+    "query_correction": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 1.0,
+      "external_search_rate": 0,
+      "latency_p50_ms": 3.0,
+      "latency_p95_ms": 3.0
+    },
+    "research": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.2,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 5.0,
+      "latency_p95_ms": 5.0
+    },
+    "resilience": {
+      "case_count": 1,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "mrr": 1.0,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0,
+      "local_cache_hit_rate": 0.0,
+      "external_search_rate": 1,
+      "latency_p50_ms": 3.0,
+      "latency_p95_ms": 3.0
+    }
+  },
+  "results": [
+    {
+      "id": "q01_python_taskgroup",
+      "category": "official_docs",
+      "language": "en",
+      "query": "python asyncio TaskGroup exception handling",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 1,
+        "duplicate_suppression_rate": 0.2
+      },
+      "duration_ms": 5,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 5,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "python asyncio TaskGroup exception handling",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:duckduckgo",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          },
+          {
+            "provider": "snapshot:brave",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Python TaskGroup official documentation",
+          "uri": "https://docs.python.org/3/library/asyncio-task.html",
+          "score": 5.54,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Asyncio TaskGroup discussion",
+          "uri": "https://discuss.python.org/t/asyncio-taskgroup",
+          "score": 2.524,
+          "source_class": "forum",
+          "grade": 2
+        },
+        {
+          "title": "Structured concurrency with asyncio",
+          "uri": "https://stackoverflow.com/questions/75250788/python-asyncio-taskgroup",
+          "score": 1.5,
+          "source_class": "forum",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q02_rust_result",
+      "category": "official_docs",
+      "language": "en",
+      "query": "rust Result error handling question mark operator",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 6,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 6,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "rust Result error handling question mark operator",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:metasearch",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Recoverable Errors with Result",
+          "uri": "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html",
+          "score": 3.518,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "std::result::Result",
+          "uri": "https://doc.rust-lang.org/std/result",
+          "score": 2.48,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "How do I use the question mark operator?",
+          "uri": "https://stackoverflow.com/questions/42917566/what-is-this-question-mark-operator-about",
+          "score": 1.636,
+          "source_class": "forum",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q03_ukrainian_python_venv",
+      "category": "multilingual",
+      "language": "uk",
+      "query": "як створити віртуальне середовище Python venv",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 4,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 4,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "як створити віртуальне середовище Python venv",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          },
+          {
+            "provider": "snapshot:engine-b",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 1,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "venv — створення віртуальних середовищ",
+          "uri": "https://docs.python.org/uk/3/library/venv.html",
+          "score": 3.803,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Віртуальне середовище Python",
+          "uri": "https://uk.wikibooks.org/wiki/Python/Віртуальне_середовище",
+          "score": 1.682,
+          "source_class": "unknown",
+          "grade": 2
+        },
+        {
+          "title": "Python virtual environments guide",
+          "uri": "https://realpython.com/python-virtual-environments-a-primer",
+          "score": 0.504,
+          "source_class": "unknown",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q04_site_constraint",
+      "category": "operators",
+      "language": "en",
+      "query": "site:docs.python.org pathlib Path read_text",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 1,
+        "relevant_total": 1,
+        "result_count": 1,
+        "independent_domain_count": 1,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 2,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 2,
+        "site_constraint": "docs.python.org",
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "site:docs.python.org pathlib Path read_text",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "pathlib — Object-oriented filesystem paths",
+          "uri": "https://docs.python.org/3/library/pathlib.html",
+          "score": 3.807,
+          "source_class": "official_docs",
+          "grade": 3
+        }
+      ]
+    },
+    {
+      "id": "q05_rag_survey",
+      "category": "research",
+      "language": "en",
+      "query": "retrieval augmented generation survey arxiv",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 4,
+        "independent_domain_count": 4,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 1,
+        "duplicate_suppression_rate": 0.2
+      },
+      "duration_ms": 5,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 5,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "retrieval augmented generation survey arxiv",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:scholar-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          },
+          {
+            "provider": "snapshot:scholar-b",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+          "uri": "https://arxiv.org/abs/2312.10997",
+          "score": 6.752,
+          "source_class": "research",
+          "grade": 3
+        },
+        {
+          "title": "RAG systems overview",
+          "uri": "https://aclanthology.org/2024.rag-overview",
+          "score": 2.492,
+          "source_class": "research",
+          "grade": 2
+        },
+        {
+          "title": "Retrieval-Augmented Generation overview",
+          "uri": "https://huggingface.co/papers/2312.10997",
+          "score": 2.25,
+          "source_class": "publisher",
+          "grade": 2
+        },
+        {
+          "title": "RAG survey paper mirror",
+          "uri": "https://alphaxiv.org/abs/2312.10997",
+          "score": -0.232,
+          "source_class": "mirror",
+          "grade": 0
+        }
+      ]
+    },
+    {
+      "id": "q06_duplicate_fusion",
+      "category": "deduplication",
+      "language": "en",
+      "query": "FastAPI dependency injection documentation",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.9721,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 1,
+        "duplicate_suppression_rate": 0.25
+      },
+      "duration_ms": 3,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 3,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "FastAPI dependency injection documentation",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          },
+          {
+            "provider": "snapshot:engine-b",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Dependencies - FastAPI",
+          "uri": "https://fastapi.tiangolo.com/tutorial/dependencies",
+          "score": 6.683,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "FastAPI dependencies discussion",
+          "uri": "https://stackoverflow.com/questions/68621741/fastapi-dependency-injection",
+          "score": 1.771,
+          "source_class": "forum",
+          "grade": 1
+        },
+        {
+          "title": "FastAPI source",
+          "uri": "https://github.com/fastapi/fastapi",
+          "score": 1.399,
+          "source_class": "github",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q07_seo_noise",
+      "category": "noise_filtering",
+      "language": "en",
+      "query": "kubernetes deployment rolling update strategy",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 5,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 5,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "kubernetes deployment rolling update strategy",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 4,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Deployments",
+          "uri": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment",
+          "score": 4.94,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Performing a Rolling Update",
+          "uri": "https://kubernetes.io/docs/tutorials/kubernetes-basics/update/update-intro",
+          "score": 4.277,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Rolling update troubleshooting",
+          "uri": "https://stackoverflow.com/questions/51624444/kubernetes-deployment-rolling-update",
+          "score": 1.612,
+          "source_class": "forum",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q08_live_freshness_forces_web",
+      "category": "freshness",
+      "language": "uk",
+      "query": "останні новини PostgreSQL сьогодні",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 5,
+        "relevant_total": 5,
+        "result_count": 5,
+        "independent_domain_count": 4,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 4,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 4,
+        "site_constraint": null,
+        "local_result_count": 3,
+        "fresh_local_result_count": 1,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "останні новини PostgreSQL сьогодні",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "local:web-index",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          },
+          {
+            "provider": "snapshot:live",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "PostgreSQL News",
+          "uri": "https://www.postgresql.org/about/news",
+          "score": 2.281,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "PostgreSQL releases",
+          "uri": "https://www.postgresql.org/support/versioning",
+          "score": 2.281,
+          "source_class": "unknown",
+          "grade": 2
+        },
+        {
+          "title": "PostgreSQL минулі новини",
+          "uri": "https://cache-one.test/postgresql",
+          "score": 1.106,
+          "source_class": "unknown",
+          "grade": 1
+        },
+        {
+          "title": "PostgreSQL release archive",
+          "uri": "https://cache-two.test/postgresql",
+          "score": 0.281,
+          "source_class": "unknown",
+          "grade": 1
+        },
+        {
+          "title": "PostgreSQL community archive",
+          "uri": "https://cache-three.test/postgresql",
+          "score": 0.281,
+          "source_class": "unknown",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q09_local_cache_closes_search",
+      "category": "local_first",
+      "language": "en",
+      "query": "sqlite write ahead log concurrency",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.858,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 2,
+      "external_search_used": false,
+      "diagnostics": {
+        "duration_ms": 2,
+        "site_constraint": null,
+        "local_result_count": 3,
+        "fresh_local_result_count": 3,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "sqlite write ahead log concurrency",
+        "external_search_used": false,
+        "attempts": [
+          {
+            "provider": "local:web-index",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "SQLite WAL concurrency notes",
+          "uri": "https://simonwillison.net/2024/Mar/31/optimizing-sqlite-for-servers",
+          "score": 3.444,
+          "source_class": "unknown",
+          "grade": 2
+        },
+        {
+          "title": "SQLite Write-Ahead Logging",
+          "uri": "https://sqlite.org/wal.html",
+          "score": 2.459,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Write-Ahead Logging in SQLite",
+          "uri": "https://fly.io/blog/sqlite-internals-wal",
+          "score": 2.292,
+          "source_class": "unknown",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q10_typo_recovery",
+      "category": "query_correction",
+      "language": "en",
+      "query": "databse replication consistency",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 3,
+      "external_search_used": false,
+      "diagnostics": {
+        "duration_ms": 3,
+        "site_constraint": null,
+        "local_result_count": 3,
+        "fresh_local_result_count": 3,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {
+          "databse": "database"
+        },
+        "effective_query": "database replication consistency",
+        "external_search_used": false,
+        "attempts": [
+          {
+            "provider": "local:web-index",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "PostgreSQL database replication",
+          "uri": "https://postgresql.org/docs/current/warm-standby.html",
+          "score": 4.909,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Database replication consistency",
+          "uri": "https://jepsen.io/consistency",
+          "score": 4.206,
+          "source_class": "unknown",
+          "grade": 2
+        },
+        {
+          "title": "Replication consistency reference",
+          "uri": "https://martin.kleppmann.com/2015/05/27/logs-for-data-infrastructure.html",
+          "score": 3.596,
+          "source_class": "unknown",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q11_source_diversity",
+      "category": "corroboration",
+      "language": "en",
+      "query": "WebAuthn passkey authentication security",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 4,
+        "relevant_total": 4,
+        "result_count": 4,
+        "independent_domain_count": 4,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 4,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 4,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "WebAuthn passkey authentication security",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 4,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Passkeys",
+          "uri": "https://developer.mozilla.org/en-US/docs/Web/Security/Authentication/Passkeys",
+          "score": 5.511,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Web Authentication specification",
+          "uri": "https://www.w3.org/TR/webauthn-3",
+          "score": 2.679,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "WebAuthn source",
+          "uri": "https://github.com/w3c/webauthn",
+          "score": 1.715,
+          "source_class": "github",
+          "grade": 2
+        },
+        {
+          "title": "Passkeys developer guide",
+          "uri": "https://developers.google.com/identity/passkeys",
+          "score": 1.255,
+          "source_class": "unknown",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q12_adversarial_title",
+      "category": "adversarial_relevance",
+      "language": "en",
+      "query": "python packaging dependency groups specification",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 3,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 3,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "python packaging dependency groups specification",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 4,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Dependency Groups",
+          "uri": "https://packaging.python.org/en/latest/specifications/dependency-groups",
+          "score": 2.934,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "PEP 735 – Dependency Groups in pyproject.toml",
+          "uri": "https://peps.python.org/pep-0735",
+          "score": 2.218,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Python Packaging User Guide",
+          "uri": "https://packaging.python.org/en/latest",
+          "score": 1.17,
+          "source_class": "unknown",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q13_ukrainian_gdpr",
+      "category": "multilingual",
+      "language": "uk",
+      "query": "офіційний текст GDPR право на видалення стаття 17",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 0.858,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 4,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 4,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "офіційний текст GDPR право на видалення стаття 17",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "GDPR Article 17",
+          "uri": "https://gdpr-info.eu/art-17-gdpr",
+          "score": 0.344,
+          "source_class": "unknown",
+          "grade": 2
+        },
+        {
+          "title": "Regulation (EU) 2016/679",
+          "uri": "https://eur-lex.europa.eu/eli/reg/2016/679/oj",
+          "score": 0.207,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Right to erasure",
+          "uri": "https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/right-to-erasure",
+          "score": 0.144,
+          "source_class": "unknown",
+          "grade": 2
+        }
+      ]
+    },
+    {
+      "id": "q14_node_fetch_abort",
+      "category": "implementation",
+      "language": "en",
+      "query": "Node.js fetch AbortSignal timeout documentation",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 3,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 4,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 4,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "Node.js fetch AbortSignal timeout documentation",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine-a",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Global objects: fetch and AbortSignal",
+          "uri": "https://nodejs.org/api/globals.html",
+          "score": 4.682,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "AbortSignal timeout",
+          "uri": "https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static",
+          "score": 3.812,
+          "source_class": "official_docs",
+          "grade": 2
+        },
+        {
+          "title": "Using fetch with timeout",
+          "uri": "https://stackoverflow.com/questions/46946380/fetch-api-request-timeout",
+          "score": 0.812,
+          "source_class": "forum",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q15_no_result_noise",
+      "category": "no_result",
+      "language": "en",
+      "query": "xhwgqz flumpernickel snarfblatt reference",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 0.0,
+        "relevant_retrieved": 0,
+        "relevant_total": 0,
+        "result_count": 1,
+        "independent_domain_count": 1,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 1,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 1,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "xhwgqz flumpernickel snarfblatt reference",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 1,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Unrelated shopping result",
+          "uri": "https://shop.test/flumpernickel",
+          "score": 0.191,
+          "source_class": "unknown",
+          "grade": 0
+        }
+      ]
+    },
+    {
+      "id": "q16_provider_failure_recovery",
+      "category": "resilience",
+      "language": "en",
+      "query": "pytest fixture scope documentation",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 3,
+        "relevant_total": 3,
+        "result_count": 3,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 3,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 3,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "pytest fixture scope documentation",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:healthy",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 3,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Fixture scopes",
+          "uri": "https://docs.pytest.org/en/stable/how-to/fixtures.html",
+          "score": 4.658,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Pytest fixtures reference",
+          "uri": "https://docs.pytest.org/en/stable/reference/fixtures.html",
+          "score": 4.363,
+          "source_class": "official_docs",
+          "grade": 3
+        },
+        {
+          "title": "Fixture scope examples",
+          "uri": "https://stackoverflow.com/questions/64643362/pytest-fixture-scope",
+          "score": 1.396,
+          "source_class": "forum",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q17_english_early_typo_rerank",
+      "category": "multilingual_reranking",
+      "language": "en",
+      "query": "daatbase transaction isolation levels",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 2,
+        "relevant_total": 2,
+        "result_count": 2,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 2,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 2,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "daatbase transaction isolation levels",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Database transaction isolation levels",
+          "uri": "https://www.postgresql.org/about/transaction-isolation",
+          "score": 3.089,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Transaction isolation levels",
+          "uri": "https://generic-blog.test/transaction-isolation",
+          "score": 1.914,
+          "source_class": "unknown",
+          "grade": 1
+        }
+      ]
+    },
+    {
+      "id": "q18_ukrainian_transposition_rerank",
+      "category": "multilingual_reranking",
+      "language": "uk",
+      "query": "резревне копіювання postgresql відновлення",
+      "passed": true,
+      "issues": [],
+      "metrics": {
+        "recall_at_10": 1.0,
+        "ndcg_at_10": 1.0,
+        "mrr": 1.0,
+        "relevant_retrieved": 2,
+        "relevant_total": 2,
+        "result_count": 2,
+        "independent_domain_count": 2,
+        "independent_domain_rate": 1.0,
+        "target_domain_hit": true,
+        "duplicate_rate": 0.0,
+        "duplicate_suppressed": 0,
+        "duplicate_suppression_rate": 0.0
+      },
+      "duration_ms": 2,
+      "external_search_used": true,
+      "diagnostics": {
+        "duration_ms": 2,
+        "site_constraint": null,
+        "local_result_count": 0,
+        "fresh_local_result_count": 0,
+        "local_duplicate_suppressed": 0,
+        "local_query_corrections": {},
+        "effective_query": "резревне копіювання postgresql відновлення",
+        "external_search_used": true,
+        "attempts": [
+          {
+            "provider": "snapshot:engine",
+            "status": "ok",
+            "duration_ms": 0,
+            "result_count": 2,
+            "error": ""
+          }
+        ]
+      },
+      "top_results": [
+        {
+          "title": "Резервне копіювання PostgreSQL і відновлення",
+          "uri": "https://www.postgresql.org/about/backup",
+          "score": 3.089,
+          "source_class": "unknown",
+          "grade": 3
+        },
+        {
+          "title": "Копіювання PostgreSQL та відновлення",
+          "uri": "https://generic-blog.test/postgresql-copy",
+          "score": 1.914,
+          "source_class": "unknown",
+          "grade": 1
+        }
+      ]
+    }
+  ],
+  "ab_comparison": {
+    "with_reranker": {
+      "case_count": 18,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.9827,
+      "mrr": 0.9444,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0361,
+      "local_cache_hit_rate": 0.1111,
+      "external_search_rate": 0.8889,
+      "latency_p50_ms": 3.5,
+      "latency_p95_ms": 5.15,
+      "passed_cases": 18,
+      "failed_cases": 0
+    },
+    "without_reranker": {
+      "case_count": 18,
+      "recall_at_10": 1.0,
+      "ndcg_at_10": 0.9412,
+      "mrr": 0.9444,
+      "target_domain_hit_rate": 1,
+      "independent_domain_rate": 1.0,
+      "duplicate_rate": 0.0,
+      "duplicate_suppression_rate": 0.0361,
+      "local_cache_hit_rate": 0.1111,
+      "external_search_rate": 0.8889,
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "passed_cases": 16,
+      "failed_cases": 2
+    },
+    "deltas": {
+      "recall_at_10": 0.0,
+      "ndcg_at_10": 0.0415,
+      "mrr": 0.0
+    },
+    "category_deltas": {
+      "adversarial_relevance": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "corroboration": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0369,
+        "mrr": 0.0
+      },
+      "deduplication": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": -0.0279,
+        "mrr": 0.0
+      },
+      "freshness": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "implementation": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.1572,
+        "mrr": 0.0
+      },
+      "local_first": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "multilingual": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "multilingual_reranking": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.2902,
+        "mrr": 0.0
+      },
+      "no_result": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "noise_filtering": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "official_docs": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "operators": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "query_correction": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "research": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      },
+      "resilience": {
+        "recall_at_10": 0.0,
+        "ndcg_at_10": 0.0,
+        "mrr": 0.0
+      }
+    }
+  }
+}

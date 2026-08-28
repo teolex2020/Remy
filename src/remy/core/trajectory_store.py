@@ -35,6 +35,15 @@ _EXECUTION_EVENT_KINDS = {
     "automation": {
         "AUTOMATION_TRIGGER", "AUTOMATION_STEP", "AUTOMATION_DELIVERY",
     },
+    "agent_lab": {
+        "AGENT_LAB_PHASE", "AGENT_LAB_TEAM", "AGENT_LAB_DECISION",
+        "AGENT_LAB_ARTIFACT", "AGENT_LAB_VERIFICATION",
+    },
+}
+_EXECUTION_SCOPE_MODULES = {
+    "experiment": "remy.core.experiment_lab",
+    "automation": "remy.web.routes.automation_routes",
+    "agent_lab": "remy.core.agent_lab",
 }
 _SELF_MODIFICATION_EVENT_KINDS = {
     "SELF_MOD_PROPOSAL",
@@ -1409,11 +1418,7 @@ class TrajectoryStore:
             turn_id=f"{normalized_scope}-turn-{safe_run_id}",
             source={
                 "kind": normalized_scope,
-                "module": (
-                    "remy.core.experiment_lab"
-                    if normalized_scope == "experiment"
-                    else "remy.web.routes.automation_routes"
-                ),
+                "module": _EXECUTION_SCOPE_MODULES[normalized_scope],
                 "trust_tier": "operator-configured",
                 "source_id": safe_source_id,
                 "run_id": safe_run_id,
@@ -1477,11 +1482,7 @@ class TrajectoryStore:
             parent_id=str(parent_event_id),
             source={
                 "kind": str(source_kind or "execution-stage"),
-                "module": (
-                    "remy.core.experiment_lab"
-                    if scope == "experiment"
-                    else "remy.web.routes.automation_routes"
-                ),
+                "module": _EXECUTION_SCOPE_MODULES.get(scope, "remy.core.agent_lab"),
                 "trust_tier": "internal-derived",
                 "scope": scope,
                 "source_id": str(parent_details.get("source_id") or ""),
@@ -1551,11 +1552,7 @@ class TrajectoryStore:
             parent_id=str(event_id),
             source={
                 "kind": f"{scope}-result",
-                "module": (
-                    "remy.core.experiment_lab"
-                    if scope == "experiment"
-                    else "remy.web.routes.automation_routes"
-                ),
+                "module": _EXECUTION_SCOPE_MODULES.get(scope, "remy.core.agent_lab"),
                 "trust_tier": "internal-derived",
                 "scope": scope,
                 "source_id": str(parent_details.get("source_id") or ""),
@@ -2154,6 +2151,13 @@ class TrajectoryStore:
         now = time.time()
         mapping = {
             "factuality_analysis": "VERIFICATION",
+            "claim_source_matrix": "VERIFICATION",
+            "claim_lifecycle": "VERIFICATION",
+            "research_execution_schedule": "VERIFICATION",
+            "research_same_run_recovery": "VERIFICATION",
+            "research_prefetch_queue": "VERIFICATION",
+            "marginal_evidence_analysis": "VERIFICATION",
+            "source_provenance_graph": "VERIFICATION",
             "epistemic_governance": "POLICY",
             "memory_retrieval": "MEMORY",
             "approval": "APPROVAL",

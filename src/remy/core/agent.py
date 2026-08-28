@@ -456,26 +456,52 @@ def _score_candidate_source(source: dict) -> tuple[int, str]:
     return score, reason
 
 
-def _choose_best_candidate_source(sources: list[dict], query: str = "") -> dict | None:
-    best_source = None
-    best_score = None
-    best_reason = "fallback"
+def _choose_best_candidate_sources(
+    sources: list[dict], query: str = "", *, limit: int = 3
+) -> list[dict]:
+    """Rank candidates and prefer independent domains before same-site results."""
+    from remy.core.search_relevance import assess_query_relevance
+
     candidate_sources = _filter_candidate_sources_for_query(sources, query)
-    for source in candidate_sources or []:
+    scored: list[tuple[int, int, dict]] = []
+    for index, source in enumerate(candidate_sources or []):
         score, reason = _score_candidate_source(source)
         memory_bias, memory_reason = _source_memory_bias(source)
         score += memory_bias
         if memory_reason:
             reason = f"{reason}+{memory_reason}"
-        if best_score is None or score > best_score:
-            best_source = dict(source)
-            best_score = score
-            best_reason = reason
-    if best_source is None:
-        return None
-    best_source["trust_score"] = int(best_score or 0)
-    best_source["trust_reason"] = best_reason
-    return best_source
+        relevance = assess_query_relevance(
+            query,
+            title=str(source.get("title") or ""),
+            snippet=str(source.get("snippet") or ""),
+            url=str(source.get("uri") or ""),
+        )
+        score += round(relevance["score"] * 60)
+        ranked = dict(source)
+        ranked["trust_score"] = int(score)
+        ranked["trust_reason"] = reason
+        ranked["query_relevance"] = relevance
+        scored.append((score, index, ranked))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    diverse: list[dict] = []
+    deferred: list[dict] = []
+    seen_domains: set[str] = set()
+    for _score, _index, source in scored:
+        domain = _domain_root(_source_host(source))
+        if domain and domain in seen_domains:
+            deferred.append(source)
+            continue
+        diverse.append(source)
+        if domain:
+            seen_domains.add(domain)
+    ordered = diverse + deferred
+    return ordered[: max(1, int(limit))]
+
+
+def _choose_best_candidate_source(sources: list[dict], query: str = "") -> dict | None:
+    selected = _choose_best_candidate_sources(sources, query=query, limit=1)
+    return selected[0] if selected else None
 
 
 def _record_fetch_evidence(session_id: str | None, tool_name: str, raw_result, *, explicit_url: str = "") -> None:
@@ -581,6 +607,27 @@ def _store_source_grounding_consequences(
                 )
     except Exception as exc:
         logger.debug("Failed to store source grounding consequence: %s", exc)
+
+
+def _build_claim_source_matrix_event(factuality_report, session_log: list) -> dict | None:
+    """Create a Trajectory-ready claim/source diagnostic for this response."""
+    claims = list(getattr(factuality_report, "claim_details", []) or [])
+    if not claims:
+        return None
+    try:
+        from remy.core.claim_source_matrix import (
+            build_claim_source_matrix,
+            sources_from_session_log,
+        )
+
+        matrix = build_claim_source_matrix(
+            claims,
+            sources_from_session_log(session_log),
+        )
+        return {"type": "claim_source_matrix", **matrix}
+    except Exception as exc:
+        logger.debug("Could not build claim-source matrix: %s", exc)
+        return None
 
 
 def _tool_gate_situation(messages: list, *, session_id: str | None, channel: str) -> str:
@@ -1653,7 +1700,7 @@ def call_tools(state: AgentState) -> dict:
             except Exception as exc:
                 logger.debug("Trajectory tool completion skipped: %s", exc)
 
-        auto_extract_log_entry = None
+        auto_extract_log_entries: list[dict] = []
         if not policy_block:
             _store_tool_consequence(
                 messages=messages,
@@ -1683,7 +1730,12 @@ def call_tools(state: AgentState) -> dict:
                                 "No candidate sources matched the query constraints yet. "
                                 "Nothing is verified. Refine the query or search again."
                             )
-                    selected_source = _choose_best_candidate_source(aligned_sources, query=query)
+                    ranked_sources = _choose_best_candidate_sources(
+                        aligned_sources,
+                        query=query,
+                        limit=5,
+                    )
+                    selected_source = ranked_sources[0] if ranked_sources else None
                     if selected_source:
                         parsed_result["selected_source"] = {
                             "title": selected_source.get("title", ""),
@@ -1691,52 +1743,171 @@ def call_tools(state: AgentState) -> dict:
                             "trust_score": selected_source.get("trust_score", 0),
                             "trust_reason": selected_source.get("trust_reason", "fallback"),
                         }
-                    top_source = selected_source or (aligned_sources[0] if aligned_sources else None)
-                    top_url = str((top_source or {}).get("uri") or "").strip()
                     extract_tool = tool_map.get("extract_content")
-                    if top_url and extract_tool:
-                        try:
-                            extracted = extract_tool.invoke({"url": top_url})
-                            _record_fetch_evidence(session_id, "extract_content", extracted, explicit_url=top_url)
-                            # Auto-fetch counts as forward progress too — clear the
-                            # web_search-without-fetch counter so the agent isn't
-                            # blocked on an already-fetched candidate.
+                    if ranked_sources and extract_tool:
+                        from remy.core.evidence_sufficiency import (
+                            select_diverse_evidence,
+                        )
+                        from remy.core.search_gateway import requires_live_discovery
+                        from remy.core.search_relevance import assess_query_relevance
+
+                        usable_extracts: list[dict] = []
+                        failed_extracts: list[dict] = []
+                        force_live_refresh = requires_live_discovery(query)
+                        for candidate in ranked_sources:
+                            candidate_url = str(candidate.get("uri") or "").strip()
+                            if not candidate_url:
+                                continue
+                            try:
+                                extracted = extract_tool.invoke(
+                                    {
+                                        "url": candidate_url,
+                                        "force_refresh": force_live_refresh,
+                                    }
+                                )
+                                extracted_payload = (
+                                    json.loads(str(extracted))
+                                    if isinstance(extracted, str)
+                                    else extracted
+                                )
+                                if not isinstance(extracted_payload, dict):
+                                    extracted_payload = {"content": str(extracted_payload)}
+                                content = str(extracted_payload.get("content") or "")
+                                relevance = assess_query_relevance(
+                                    query,
+                                    title=str(
+                                        extracted_payload.get("title")
+                                        or candidate.get("title")
+                                        or ""
+                                    ),
+                                    snippet=str(candidate.get("snippet") or ""),
+                                    content=content,
+                                    url=str(extracted_payload.get("url") or candidate_url),
+                                )
+                                compact_payload = dict(extracted_payload)
+                                if len(content) > 8_000:
+                                    compact_payload["content"] = content[:8_000]
+                                    compact_payload["auto_extract_truncated"] = True
+                                    compact_payload["total_chars"] = max(
+                                        int(compact_payload.get("total_chars") or 0),
+                                        len(content),
+                                    )
+                                extract_entry = {
+                                    "url": candidate_url,
+                                    "source": {
+                                        "title": candidate.get("title", ""),
+                                        "uri": candidate_url,
+                                        "trust_score": candidate.get("trust_score", 0),
+                                        "trust_reason": candidate.get(
+                                            "trust_reason", "fallback"
+                                        ),
+                                    },
+                                    "query_relevance": relevance,
+                                    "result": compact_payload,
+                                }
+                                auto_extract_log_entries.append(
+                                    {
+                                        "type": "tool_call",
+                                        "tool": "extract_content",
+                                        "args": {
+                                            "url": candidate_url[:100],
+                                            "force_refresh": force_live_refresh,
+                                        },
+                                        "args_full": {
+                                            "url": candidate_url,
+                                            "force_refresh": force_live_refresh,
+                                        },
+                                        "result": str(extracted)[:200],
+                                        "result_full": str(extracted),
+                                        "auto_follow_from": "web_search",
+                                        "query_relevance": relevance,
+                                    }
+                                )
+                                if extracted_payload.get("error") or len(content.strip()) < 10:
+                                    extract_entry["error"] = str(
+                                        extracted_payload.get("error")
+                                        or "No readable evidence content"
+                                    )
+                                    failed_extracts.append(extract_entry)
+                                    continue
+                                _record_fetch_evidence(
+                                    session_id,
+                                    "extract_content",
+                                    extracted,
+                                    explicit_url=candidate_url,
+                                )
+                                usable_extracts.append(extract_entry)
+                                _provisional, provisional_metrics = (
+                                    select_diverse_evidence(
+                                        query,
+                                        usable_extracts,
+                                        limit=3,
+                                        minimum_sources=3,
+                                    )
+                                )
+                                if provisional_metrics["sufficient"]:
+                                    break
+                            except Exception as follow_err:
+                                failure = {"url": candidate_url, "error": str(follow_err)}
+                                failed_extracts.append(failure)
+                                auto_extract_log_entries.append(
+                                    {
+                                        "type": "tool_call",
+                                        "tool": "extract_content",
+                                        "args": {"url": candidate_url[:100]},
+                                        "args_full": {"url": candidate_url},
+                                        "result": f"Error: {follow_err}"[:200],
+                                        "result_full": f"Error: {follow_err}",
+                                        "auto_follow_from": "web_search",
+                                    }
+                                )
+
+                        analysis_sources, evidence_metrics = select_diverse_evidence(
+                            query,
+                            usable_extracts,
+                            limit=3,
+                            minimum_sources=3,
+                        )
+                        parsed_result["auto_extracts"] = analysis_sources
+                        parsed_result["analysis_source_count"] = len(analysis_sources)
+                        parsed_result["analysis_source_target"] = 3
+                        parsed_result["analysis_source_target_met"] = evidence_metrics[
+                            "sufficient"
+                        ]
+                        parsed_result["evidence_sufficiency"] = evidence_metrics
+                        parsed_result["source_diversity"] = {
+                            "distinct_domains": evidence_metrics["distinct_domains"],
+                            "target": 3,
+                        }
+                        if analysis_sources:
+                            parsed_result["auto_extract"] = analysis_sources[0]
+                            parsed_result["selected_sources"] = [
+                                item["source"] for item in analysis_sources
+                            ]
+                            # Any successful auto-fetch counts as forward progress.
                             try:
                                 from remy.core.brain_tools import _reset_web_search_no_fetch
+
                                 _reset_web_search_no_fetch(session_id)
                             except Exception:
                                 pass
-                            auto_extract_log_entry = {
-                                "type": "tool_call",
-                                "tool": "extract_content",
-                                "args": {"url": str(top_url)[:100]},
-                                "args_full": {"url": str(top_url)},
-                                "result": str(extracted)[:200],
-                                "result_full": str(extracted),
-                                "auto_follow_from": "web_search",
-                            }
-                            parsed_result["auto_extract"] = {
-                                "url": top_url,
-                                "result": json.loads(str(extracted)) if isinstance(extracted, str) else extracted,
-                            }
                             parsed_result["answer"] = (
                                 parsed_result.get("answer", "")
-                                + " Auto-fetched the best trusted candidate with extract_content for evidence-first follow-up."
+                                + f" Auto-fetched {len(analysis_sources)} independent source(s) "
+                                "for evidence-first comparison."
                             ).strip()
-                        except Exception as follow_err:
-                            auto_extract_log_entry = {
-                                "type": "tool_call",
-                                "tool": "extract_content",
-                                "args": {"url": str(top_url)[:100]},
-                                "args_full": {"url": str(top_url)},
-                                "result": f"Error: {follow_err}"[:200],
-                                "result_full": f"Error: {follow_err}",
-                                "auto_follow_from": "web_search",
-                            }
-                            parsed_result["auto_extract"] = {"url": top_url, "error": str(follow_err)}
+                            if not evidence_metrics["sufficient"]:
+                                parsed_result["answer"] += (
+                                    " Evidence target was not fully met: "
+                                    + ", ".join(evidence_metrics["reasons"])
+                                    + "."
+                                )
+                        elif failed_extracts:
+                            parsed_result["auto_extract"] = failed_extracts[0]
                             parsed_result["answer"] = (
                                 parsed_result.get("answer", "")
-                                + " Auto-follow fetch failed; candidate discovery remains unverified until a fetch succeeds."
+                                + " Auto-follow fetches failed; candidate discovery remains "
+                                "unverified until a fetch succeeds."
                             ).strip()
                     result = json.dumps(parsed_result, ensure_ascii=False)
             except Exception as e:
@@ -1769,8 +1940,8 @@ def call_tools(state: AgentState) -> dict:
                 "blocked": True,
                 "policy_hint": policy_block,
             }
-        if auto_extract_log_entry is not None:
-            session_log.append(auto_extract_log_entry)
+        if auto_extract_log_entries:
+            session_log.extend(auto_extract_log_entries)
 
         # Track enable_tools calls — update state so next call_model sees them
         if tool_name in {"enable_tools", "enable_skill", "activate_capability_profile"}:
@@ -2614,6 +2785,11 @@ async def _invoke_agent_inner(
             "unsupported": factuality_report.unsupported,
             "brain_storage_unsafe": factuality_report.brain_storage_unsafe,
         })
+        claim_matrix_event = _build_claim_source_matrix_event(
+            factuality_report, updated_log
+        )
+        if claim_matrix_event:
+            updated_log.append(claim_matrix_event)
     if governance_decision is not None and governance_decision.mode != "none":
         entry = {
             "type": "epistemic_governance",
@@ -3204,6 +3380,11 @@ async def invoke_agent_stream(
             "evidence_record_ids": list(factuality_report.evidence_record_ids),
             "claims": factuality_claims,
         })
+        claim_matrix_event = _build_claim_source_matrix_event(
+            factuality_report, final_session_log
+        )
+        if claim_matrix_event:
+            final_session_log.append(claim_matrix_event)
 
     if channel in ("desktop", "telegram", "voice"):
         try:

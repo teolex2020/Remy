@@ -438,57 +438,36 @@ def _discover(query: str, context: str = "") -> list[dict]:
     results = [{"uri": url.rstrip(".,;"), "title": "Direct source"} for url in direct]
     if results:
         return results[:3]
-    from ddgs import DDGS
-    raw = DDGS(timeout=15).text(
-        query,
-        max_results=6,
-        backend="duckduckgo,brave,google,mojeek,yahoo",
-    )
-    return [
-        {"uri": str(item.get("href") or ""), "title": str(item.get("title") or "")}
-        for item in (raw or []) if item.get("href")
-    ]
+    from remy.core.search_gateway import SearchRequest, get_search_gateway
+
+    response = get_search_gateway().search(SearchRequest(query=query, max_results=6))
+    return response.candidates
 
 
 def _fetch_source(source: dict) -> tuple[str, str, str]:
     from remy.core.cancellation import check_cancelled
-    from remy.core.web_content import extract_visible_text, fetch_html
+    from remy.core.content_fetch_gateway import (
+        ContentFetchRequest,
+        get_content_fetch_gateway,
+    )
 
     check_cancelled()
     url = str(source.get("uri") or "")
-    text = ""
-    page_title = ""
-    try:
-        html = fetch_html(url, timeout=20)
-        text, page_title = extract_visible_text(html)
-    except Exception:
-        logger.debug("Static fetch failed for %s; trying Chromium", url, exc_info=True)
-    if len(text.strip()) < 80:
-        # Isolated Chromium fallback for JavaScript-rendered pages. It does not
-        # reuse or disturb the interactive browser session owned by the user.
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
-            check_cancelled()
-            browser = playwright.chromium.launch(headless=True)
-            try:
-                page = browser.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                page_title = page.title()
-                text = page.locator("body").inner_text(timeout=10000)
-            finally:
-                browser.close()
-        check_cancelled()
-    if len(text.strip()) < 80:
-        raise ValueError("page returned too little visible text")
-    title = page_title or str(source.get("title") or "Untitled source")
+    result = get_content_fetch_gateway().fetch(
+        ContentFetchRequest(
+            url=url,
+            max_chars=2_400,
+            allow_browser=True,
+            force_refresh=bool(source.get("force_refresh_recommended")),
+        )
+    )
+    check_cancelled()
+    if not result.ok:
+        raise ValueError(result.error or "page returned too little visible text")
+    title = result.title or str(source.get("title") or "Untitled source")
     # Keep the finding extractive. Synthesis happens only after all queries.
-    excerpt = re.sub(r"\s+", " ", text).strip()[:2400]
-    return url, title, f"{title}. Extracted page evidence: {excerpt}"
+    excerpt = re.sub(r"\s+", " ", result.content).strip()[:2400]
+    return result.final_url or url, title, f"{title}. Extracted page evidence: {excerpt}"
 
 
 async def _run_query(project_id: str, meta: dict) -> None:
@@ -558,6 +537,33 @@ async def _run_query_in_project(project_id: str, meta: dict) -> None:
             {"event": "query_started", "index": index, "query": query},
         )
         sources = await asyncio.to_thread(_discover, query, discovery_context)
+        from remy.core.search_gateway import canonicalize_url
+
+        prior_urls = [
+            canonicalize_url(str(url))
+            for url in (meta.get("source_urls") or [])
+            if canonicalize_url(str(url))
+        ]
+        prior_url_set = set(prior_urls)
+        prior_domains = {
+            (urlparse(url).hostname or "").lower().removeprefix("www.")
+            for url in prior_urls
+        }
+        unused_sources = [
+            source
+            for source in sources
+            if canonicalize_url(str(source.get("uri") or "")) not in prior_url_set
+        ]
+        if unused_sources:
+            sources = unused_sources
+        sources.sort(
+            key=lambda source: (
+                (urlparse(str(source.get("uri") or "")).hostname or "")
+                .lower()
+                .removeprefix("www.")
+                in prior_domains,
+            )
+        )
         _checkpoint(
             project_id,
             f"query:{index + 1}:fetch",
@@ -590,6 +596,8 @@ async def _run_query_in_project(project_id: str, meta: dict) -> None:
                 errors.append(str(exc))
         if not stored or not stored.get("stored"):
             raise RuntimeError("; ".join(errors[-3:]) or "no fetchable sources found")
+        canonical_used_url = canonicalize_url(used_url) or used_url
+        source_urls = list(dict.fromkeys([*prior_urls, canonical_used_url]))
         latest = _find_project(project_id)
         pause_requested = bool(latest and (latest.metadata or {}).get("pause_requested"))
         next_state = "paused" if pause_requested else "queued"
@@ -601,6 +609,7 @@ async def _run_query_in_project(project_id: str, meta: dict) -> None:
             next_query_index=index + 1,
             queries_done=index + 1,
             queries_succeeded=int(meta.get("queries_succeeded", 0) or 0) + 1,
+            source_urls=source_urls,
             worker_heartbeat=_now(),
         )
         _checkpoint(
@@ -613,7 +622,12 @@ async def _run_query_in_project(project_id: str, meta: dict) -> None:
             get_execution_ledger().append_receipt,
             attempt_id,
             "query_completed",
-            {"index": index, "query": query, "source_url": used_url},
+            {
+                "index": index,
+                "query": query,
+                "source_url": used_url,
+                "distinct_source_count": len(source_urls),
+            },
         )
     except asyncio.CancelledError:
         _append_receipt(

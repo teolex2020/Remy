@@ -15,6 +15,11 @@ from urllib.parse import urlparse
 # Saturation: if this many consecutive cycles add zero new findings → stop early
 _SATURATION_WINDOW = 3
 
+from remy.core.research_query_planner import (
+    build_research_query_plan,
+    format_query_plan,
+    query_texts,
+)
 from remy.core.workers.contracts import WorkerExecutionResult
 
 logger = logging.getLogger("ResearchWorker")
@@ -63,13 +68,6 @@ _MODE_TIMEOUT_LIMITS = {
     "deep": 75,
 }
 
-_SCOPE_HINTS = {
-    "web": (),
-    "discussions": ("reddit", "hacker news", "forum", "discussion", "community"),
-    "papers": ("paper", "arxiv", "research", "preprint", "documentation", "technical"),
-}
-
-
 def _resolve_goal_id(goal: dict) -> str:
     return str(
         (goal or {}).get("todo_id") or (goal or {}).get("goal_id") or (goal or {}).get("id") or ""
@@ -101,6 +99,102 @@ def _extract_completion_threshold(goal: dict) -> int:
             except Exception:
                 continue
     return 5
+
+
+def _claim_matrix_allows_completion(
+    claim_source_matrix: dict | None,
+    *,
+    citation_required: bool,
+) -> bool:
+    """Require verified claim coverage only for citation-bound research."""
+    if not citation_required:
+        return True
+    return bool((claim_source_matrix or {}).get("publication_ready", False))
+
+
+def _contradiction_blocks_completion(contradiction: dict | None) -> bool:
+    """Keep resolved audit history out of the active outcome-evaluation set."""
+    if not isinstance(contradiction, dict):
+        return False
+    return str(
+        contradiction.get("resolution_status")
+        or contradiction.get("status")
+        or "unresolved"
+    ).casefold() not in {
+        "resolved",
+        "superseded",
+        "resolved_by_temporal_supersession",
+        "dismissed",
+    }
+
+
+def _resolve_lifecycle_project_id(goal: dict) -> str:
+    """Use the workspace boundary, never a transient research-project ID."""
+    explicit = str(
+        (goal or {}).get("owner_project_id")
+        or (goal or {}).get("workspace_project_id")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    try:
+        from remy.core.microbrain import current_project_id
+
+        current = str(current_project_id() or "").strip()
+        if current:
+            return current
+    except Exception:
+        pass
+    return str((goal or {}).get("project_id") or "default")
+
+
+def _apply_marginal_evidence_controls(
+    topic: str,
+    evidence: dict[str, Any],
+    execution_schedule: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Prioritize remaining fetches and gate low-value evidence locally."""
+    from remy.core.marginal_evidence_controller import (
+        apply_marginal_evidence_to_schedule,
+        evaluate_marginal_evidence,
+        prioritize_fetch_candidates,
+    )
+
+    source_records = list(evidence.get("source_records") or [])
+    fetched_records = [
+        source
+        for source in source_records
+        if len(re.sub(r"\s+", " ", str(source.get("content") or "")).strip()) >= 120
+    ]
+    prefetch_queue = prioritize_fetch_candidates(
+        topic,
+        source_records,
+        existing_sources=fetched_records,
+        limit=4,
+        per_domain_limit=1,
+    )
+    marginal = evaluate_marginal_evidence(
+        topic,
+        fetched_records,
+        minimum_sources=3,
+        minimum_domains=3,
+    )
+    from remy.core.source_provenance_graph import (
+        apply_provenance_to_marginal_evidence,
+        build_source_provenance_graph,
+    )
+
+    provenance_graph = build_source_provenance_graph(fetched_records)
+    marginal = apply_provenance_to_marginal_evidence(
+        marginal,
+        provenance_graph,
+        minimum_roots=3,
+    )
+    controlled_schedule = apply_marginal_evidence_to_schedule(
+        execution_schedule,
+        marginal,
+    )
+    return controlled_schedule, prefetch_queue, marginal, provenance_graph
 
 
 def _normalize_research_topic(topic: str) -> str:
@@ -163,44 +257,39 @@ def _plan_influencer_queries(
     return queries
 
 
-def _plan_research_queries(goal: dict, config: dict[str, Any]) -> list[str]:
+def _build_research_query_plan(
+    goal: dict,
+    config: dict[str, Any],
+    *,
+    repair_queries: list[str] | None = None,
+) -> dict[str, Any]:
     topic = _goal_topic(goal)
     if not topic:
-        return []
+        return build_research_query_plan("")
     base_topic = _normalize_research_topic(topic)
     seed_queries = _extract_seed_queries(topic)
     handles = _extract_handles(topic)
-    queries = []
     scope = str(config.get("source_scope", "web"))
     domains = list(config.get("source_domains", []) or [])
     if _is_influencer_goal(topic):
-        queries.extend(_plan_influencer_queries(base_topic, seed_queries, handles))
-    elif seed_queries:
-        queries.extend(seed_queries)
-    elif base_topic:
-        queries.append(base_topic)
-    if scope in _SCOPE_HINTS and not _is_influencer_goal(topic):
-        for hint in _SCOPE_HINTS[scope]:
-            seed = base_topic or topic
-            queries.append(f"{seed} {hint}")
-    if "competitor" in topic.lower() or "compare" in topic.lower():
-        seed = base_topic or topic
-        queries.append(f"{seed} pricing features")
-        queries.append(f"{seed} reviews comparison")
-    else:
-        seed = base_topic or topic
-        queries.append(f"{seed} overview")
-        queries.append(f"{seed} latest updates")
-    if scope == "domain":
-        for domain in domains:
-            seed = base_topic or topic
-            queries.append(f"site:{domain} {seed}")
-    seen: list[str] = []
-    for query in queries:
-        q = query.strip()
-        if q and q not in seen:
-            seen.append(q)
-    return seen[: _MODE_QUERY_LIMITS.get(str(config.get("research_mode", "balanced")), 4)]
+        influencer_queries = _plan_influencer_queries(base_topic, seed_queries, handles)
+        seed_queries = influencer_queries if seed_queries else influencer_queries[:1]
+    return build_research_query_plan(
+        base_topic or topic,
+        mode=str(config.get("research_mode", "balanced")),
+        source_scope=scope,
+        source_domains=domains,
+        seed_queries=seed_queries,
+        repair_queries=list(repair_queries or []),
+        max_queries=_MODE_QUERY_LIMITS.get(
+            str(config.get("research_mode", "balanced")), 4
+        ),
+    )
+
+
+def _plan_research_queries(goal: dict, config: dict[str, Any]) -> list[str]:
+    """Compatibility wrapper for callers that still consume string queries."""
+    return query_texts(_build_research_query_plan(goal, config))
 
 
 def _source_scope_score(url: str, scope: str, domains: list[str]) -> int:
@@ -405,7 +494,11 @@ def _rerank_sources(
 
 
 def _store_research_summary_artifact(
-    goal: dict, session_summary: dict, findings: list[dict]
+    goal: dict,
+    session_summary: dict,
+    findings: list[dict],
+    claim_source_matrix: dict | None = None,
+    claim_lifecycle: dict | None = None,
 ) -> str:
     """Store a research session summary artifact.
 
@@ -417,8 +510,15 @@ def _store_research_summary_artifact(
     """
     from remy.core.agent_tools import brain
 
+    matrix = dict(claim_source_matrix or {})
+    lifecycle = dict(claim_lifecycle or {})
+    lifecycle_summary = dict(lifecycle.get("summary") or {})
     has_cited_sources = bool(session_summary.get("accepted_sources_count", 0))
-    citation_complete = has_cited_sources
+    citation_complete = (
+        bool(matrix.get("publication_ready"))
+        if matrix.get("claim_count")
+        else has_cited_sources
+    )
 
     lines = [
         f"Research summary for: {_goal_topic(goal)}",
@@ -437,6 +537,23 @@ def _store_research_summary_artifact(
         else:
             lines.append(f"{idx}. {summary}")
 
+    if matrix.get("claim_count"):
+        from remy.core.claim_source_matrix import matrix_to_markdown
+
+        lines.extend(["", matrix_to_markdown(matrix)])
+    if lifecycle.get("scope_key"):
+        lines.extend(
+            [
+                "",
+                "## Claim lifecycle",
+                "",
+                f"- Tracked subjects: {int(lifecycle_summary.get('tracked_subjects') or 0)}",
+                f"- Confirmed transitions: {int(lifecycle_summary.get('confirmed_transitions') or 0)}",
+                f"- Pending changes: {int(lifecycle_summary.get('pending_changes') or 0)}",
+                f"- Scope: `{lifecycle.get('scope_key')}`",
+            ]
+        )
+
     content = "\n".join(lines).strip()
     try:
         return str(
@@ -450,6 +567,43 @@ def _store_research_summary_artifact(
                     "source_scope": str(session_summary.get("source_scope", "") or ""),
                     "research_mode": str(session_summary.get("research_mode", "") or ""),
                     "citation_complete": citation_complete,
+                    "claim_coverage_rate": float(
+                        matrix.get("claim_coverage_rate") or 0.0
+                    ),
+                    "unsupported_claims": int(matrix.get("unsupported_claims") or 0),
+                    "conflicting_claims": int(matrix.get("conflicting_claims") or 0),
+                    "publication_ready": bool(matrix.get("publication_ready", False)),
+                    "provenance_ready": bool(matrix.get("provenance_ready", False)),
+                    "false_corroborated_claims": int(
+                        matrix.get("false_corroborated_claims") or 0
+                    ),
+                    "temporal_ready": bool(matrix.get("temporal_ready", False)),
+                    "stale_claims": int(matrix.get("stale_claims") or 0),
+                    "undated_temporal_claims": int(
+                        matrix.get("undated_temporal_claims") or 0
+                    ),
+                    "resolved_temporal_conflicts": int(
+                        matrix.get("resolved_temporal_conflicts") or 0
+                    ),
+                    "unresolved_contradictions": int(
+                        matrix.get("unresolved_contradictions") or 0
+                    ),
+                    "superseded_claims": int(
+                        matrix.get("superseded_claims") or 0
+                    ),
+                    "claim_lifecycle_scope": str(
+                        lifecycle.get("scope_key") or ""
+                    ),
+                    "tracked_claim_subjects": int(
+                        lifecycle_summary.get("tracked_subjects") or 0
+                    ),
+                    "claim_transitions": int(
+                        lifecycle_summary.get("confirmed_transitions") or 0
+                    ),
+                    "pending_claim_changes": int(
+                        lifecycle_summary.get("pending_changes") or 0
+                    ),
+                    "claim_source_matrix": matrix,
                     "learning_channel": "internet_evidence",
                     "admission_class": "research_artifact",
                     "requires_promotion": True,
@@ -553,11 +707,14 @@ def build_research_worker_prompt(
             ) + open_qs_text + contradictions_prompt_text
     except Exception:
         pass
-    planned_queries = _plan_research_queries(goal, config)
+    query_plan = _build_research_query_plan(goal, config)
+    planned_queries = query_texts(query_plan)
     planned_query_text = ""
     if planned_queries:
         planned_query_text = (
-            "\nPLANNED QUERIES:\n" + "\n".join(f"- {q}" for q in planned_queries[:7]) + "\n"
+            "\nPLANNED QUERIES (execute complementary evidence lanes):\n"
+            + format_query_plan(query_plan)
+            + "\n"
         )
     mode = str(config.get("research_mode", "balanced") or "balanced")
     scope = str(config.get("source_scope", "web") or "web")
@@ -685,13 +842,40 @@ def _extract_research_evidence(session_log: list[dict], response_text: str) -> d
             url = args.get("url", "")
             if url:
                 sources.append(url)
-                source_records.append(
-                    {
-                        "url": url,
-                        "title": args.get("title", "") or "",
-                        "snippet": args.get("question", "") or "",
-                    }
-                )
+                raw_result = entry.get("result_full") or entry.get("result") or {}
+                if isinstance(raw_result, str):
+                    try:
+                        raw_result = json.loads(raw_result)
+                    except (json.JSONDecodeError, TypeError):
+                        raw_result = {}
+                if not isinstance(raw_result, dict):
+                    raw_result = {}
+                source_record = {
+                    "url": raw_result.get("url") or url,
+                    "title": raw_result.get("title") or args.get("title", "") or "",
+                    "snippet": args.get("question", "") or "",
+                    "content": str(raw_result.get("content") or "")[:20_000],
+                    "evidence_packet": raw_result.get("evidence_packet") or {},
+                }
+                for key in (
+                    "date",
+                    "published_at",
+                    "publication_date",
+                    "date_published",
+                    "datePublished",
+                    "modified_at",
+                    "last_modified",
+                    "dateModified",
+                    "original_url",
+                    "original_source_url",
+                    "canonical_source_url",
+                    "syndicated_from",
+                    "metadata",
+                    "citations",
+                ):
+                    if raw_result.get(key):
+                        source_record[key] = raw_result[key]
+                source_records.append(source_record)
         elif tool == "store":
             content = str(args.get("content", "") or "")
             tags = str(args.get("tags", "") or "").lower()
@@ -961,7 +1145,8 @@ async def run_research_worker(
 
     config = resolve_research_config(goal)
     mode = str(config.get("research_mode", "balanced") or "balanced")
-    planned_queries = _plan_research_queries(goal, config)
+    query_plan = _build_research_query_plan(goal, config)
+    planned_queries = query_texts(query_plan)
 
     # Saturation guard: skip execution if recent cycles produced nothing new
     if _check_saturation(goal_id or session_id):
@@ -990,31 +1175,41 @@ async def run_research_worker(
     # Crок 4: Adaptive query refinement — inject queries from prior outcome evaluation
     if resumed:
         refinement_from_session = [
-            w[len("[refinement] "):].strip()
+            w.split("] ", 1)[1].strip()
             for w in (getattr(session, "warnings", []) or [])
-            if w.startswith("[refinement] ")
+            if w.startswith(("[refinement] ", "[claim-repair] "))
+            and "] " in w
         ]
         if refinement_from_session:
             logger.info(
                 "Adaptive refinement: injecting %d queries from prior outcome evaluation",
                 len(refinement_from_session),
             )
-            # Prepend refinement queries so they take priority over auto-planned ones
-            mode_limit = _MODE_QUERY_LIMITS.get(mode, 4)
-            combined = (refinement_from_session + planned_queries)[:mode_limit]
-            planned_queries = combined
+            query_plan = _build_research_query_plan(
+                goal,
+                config,
+                repair_queries=refinement_from_session,
+            )
+            planned_queries = query_texts(query_plan)
 
     if planned_queries:
         append_queries(session.goal_id, planned_queries)
 
     # Clear consumed refinement queries from session warnings so they don't repeat
-    if resumed and any(w.startswith("[refinement] ") for w in (getattr(session, "warnings", []) or [])):
+    if resumed and any(
+        w.startswith(("[refinement] ", "[claim-repair] "))
+        for w in (getattr(session, "warnings", []) or [])
+    ):
         try:
             from remy.core.research_sessions import save_research_session as _srs, load_research_session as _lrs2
 
             _s2 = _lrs2(session.goal_id)
             if _s2:
-                _s2.warnings = [w for w in (_s2.warnings or []) if not w.startswith("[refinement] ")]
+                _s2.warnings = [
+                    w
+                    for w in (_s2.warnings or [])
+                    if not w.startswith(("[refinement] ", "[claim-repair] "))
+                ]
                 _srs(_s2)
         except Exception as _ce:
             logger.debug("Could not clear refinement tags: %s", _ce)
@@ -1027,6 +1222,15 @@ async def run_research_worker(
         context_parts.append(f"Resume from: {resume_context}")
     if blocked_reason:
         context_parts.append(f"Previous blocker: {blocked_reason}")
+
+    execution_plan_text = format_query_plan(query_plan)
+    if execution_plan_text:
+        instruction = (
+            f"{instruction}\n\nEXECUTION QUERY PLAN:\n{execution_plan_text}\n"
+            "Run these complementary search lanes within the query budget. "
+            "Fetch readable evidence before storing a factual finding. Prefer one "
+            "candidate per publisher and skip duplicate URLs or near-identical snippets."
+        )
 
     task = WorkerTask(
         role="osint",
@@ -1061,6 +1265,99 @@ async def run_research_worker(
     # Convert worker.WorkerResult → WorkerExecutionResult with research evidence
     worker_session_log = list(result.session_log or [])
     evidence = _extract_research_evidence(worker_session_log, result.output)
+    evidence["query_plan"] = query_plan
+    from remy.core.research_execution_scheduler import (
+        build_same_run_recovery,
+        reconcile_execution_schedule,
+    )
+
+    execution_schedule = reconcile_execution_schedule(
+        query_plan,
+        worker_session_log,
+        minimum_sources=3,
+        minimum_domains=3,
+    )
+    execution_schedule, prefetch_queue, marginal_evidence, provenance_graph = (
+        _apply_marginal_evidence_controls(
+            _goal_topic(goal),
+            evidence,
+            execution_schedule,
+        )
+    )
+    initial_execution_schedule = execution_schedule
+    recovery = build_same_run_recovery(
+        execution_schedule,
+        worker_status=str(result.status or ""),
+        enabled=(
+            bool(config.get("citation_required", True))
+            and bool(goal.get("same_run_recovery", True))
+        ),
+        preferred_fetch_urls=list(prefetch_queue.get("selected_urls") or []),
+    )
+    recovery_result_status = "not_run"
+    recovery_tool_calls = 0
+    if recovery.get("should_retry"):
+        recovery_task = WorkerTask(
+            role="osint",
+            instruction=(
+                "SAME-RUN EVIDENCE RECOVERY. Perform only the bounded actions below; "
+                "do not restart the whole research task. Fetch readable evidence before "
+                "recording findings.\n"
+                f'{recovery.get("instruction", "")}'
+            ),
+            context=(
+                f"Original topic: {_goal_topic(goal)}\n"
+                f"Initial result: {str(result.output or '')[:600]}"
+            ),
+            allowed_tools=tuple(sorted(RESEARCH_TOOL_WHITELIST)),
+        )
+        recovery_result = await execute_single_worker(
+            task=recovery_task,
+            session_id=session_id,
+            channel=RESEARCH_WORKER_CHANNEL,
+            step_budget=int(recovery.get("step_budget") or 2),
+            timeout_override=float(recovery.get("timeout_sec") or 30),
+        )
+        recovery_result_status = str(recovery_result.status or "unknown")
+        recovery_tool_calls = int(recovery_result.tool_calls or 0)
+        worker_session_log.extend(list(recovery_result.session_log or []))
+        if recovery_result.status == "success" and recovery_result.output:
+            result.output = (
+                f"{str(result.output or '').strip()}\n"
+                f"Recovery pass: {str(recovery_result.output).strip()}"
+            ).strip()[:4_000]
+        result.tool_calls = int(result.tool_calls or 0) + recovery_tool_calls
+        evidence = _extract_research_evidence(worker_session_log, result.output)
+        evidence["query_plan"] = query_plan
+        execution_schedule = reconcile_execution_schedule(
+            query_plan,
+            worker_session_log,
+            minimum_sources=3,
+            minimum_domains=3,
+        )
+        execution_schedule, prefetch_queue, marginal_evidence, provenance_graph = (
+            _apply_marginal_evidence_controls(
+                _goal_topic(goal),
+                evidence,
+                execution_schedule,
+            )
+        )
+    recovery_trace = {
+        **recovery,
+        "result_status": recovery_result_status,
+        "tool_calls": recovery_tool_calls,
+        "initial_sufficient": bool(initial_execution_schedule.get("sufficient")),
+        "final_sufficient": bool(execution_schedule.get("sufficient")),
+        "resolved": (
+            not bool(initial_execution_schedule.get("sufficient"))
+            and bool(execution_schedule.get("sufficient"))
+        ),
+    }
+    evidence["same_run_recovery"] = recovery_trace
+    evidence["prefetch_queue"] = prefetch_queue
+    evidence["marginal_evidence"] = marginal_evidence
+    evidence["source_provenance_graph"] = provenance_graph
+    evidence["execution_schedule"] = execution_schedule
     status = _derive_research_status(worker_session_log, result.output)
     accepted_sources, rejected_sources = _rerank_sources(
         goal, evidence.get("source_records", []), config
@@ -1101,9 +1398,125 @@ async def run_research_worker(
             enriched.append(entry)
         record_contradictions(session.goal_id, enriched)
 
+    # Bind every finding to the fetched material that actually supports it.
+    # This replaces the misleading accepted_sources/findings coverage ratio.
+    from remy.core.claim_source_matrix import build_claim_source_matrix
+    from remy.core.research_sessions import (
+        record_claim_source_matrix,
+        record_contradiction_resolutions,
+    )
+
+    matrix_session = load_research_session(session.goal_id)
+    matrix_findings = list(
+        getattr(matrix_session, "findings", []) or deduped_findings
+    )
+    matrix_sources = list(
+        getattr(matrix_session, "accepted_sources", [])
+        or accepted_sources
+        or evidence.get("source_records", [])
+    )
+    matrix_contradictions = list(
+        getattr(matrix_session, "contradictions", []) or raw_contradictions
+    )
+    claim_source_matrix = build_claim_source_matrix(
+        matrix_findings,
+        [*matrix_sources, *list(evidence.get("source_records") or [])],
+        contradictions=matrix_contradictions,
+    )
+    record_contradiction_resolutions(
+        session.goal_id,
+        list(claim_source_matrix.get("contradiction_resolutions") or []),
+    )
+    record_claim_source_matrix(session.goal_id, claim_source_matrix)
+    claim_lifecycle: dict[str, Any] = {}
+    try:
+        from remy.core.claim_lifecycle import is_lifecycle_claim, record_claim_lifecycle
+        from remy.core.research_sessions import record_claim_lifecycle_summary
+
+        has_lifecycle_claim = any(
+            row.get("status") == "supported"
+            and is_lifecycle_claim(str(row.get("claim") or ""))
+            for row in claim_source_matrix.get("rows") or []
+            if isinstance(row, dict)
+        )
+        if has_lifecycle_claim:
+            lifecycle_project_id = _resolve_lifecycle_project_id(goal)
+            claim_lifecycle = record_claim_lifecycle(
+                lifecycle_project_id,
+                _goal_topic(goal),
+                claim_source_matrix,
+            )
+            record_claim_lifecycle_summary(session.goal_id, claim_lifecycle)
+    except Exception as exc:
+        logger.warning("Could not update local claim lifecycle: %s", exc)
+    evidence["claim_source_matrix"] = claim_source_matrix
+    evidence["claim_lifecycle"] = claim_lifecycle
+    evidence["claim_coverage_rate"] = claim_source_matrix["claim_coverage_rate"]
+    evidence["unsupported_claims_count"] = claim_source_matrix["unsupported_claims"]
+    evidence["conflicting_claims_count"] = claim_source_matrix["conflicting_claims"]
+    evidence["false_corroborated_claims_count"] = claim_source_matrix[
+        "false_corroborated_claims"
+    ]
+    evidence["claim_provenance_ready"] = claim_source_matrix["provenance_ready"]
+    evidence["stale_claims_count"] = claim_source_matrix["stale_claims"]
+    evidence["undated_temporal_claims_count"] = claim_source_matrix[
+        "undated_temporal_claims"
+    ]
+    evidence["claim_temporal_ready"] = claim_source_matrix["temporal_ready"]
+    evidence["resolved_temporal_conflicts_count"] = claim_source_matrix[
+        "resolved_temporal_conflicts"
+    ]
+    evidence["unresolved_contradictions_count"] = claim_source_matrix[
+        "unresolved_contradictions"
+    ]
+    evidence["superseded_claims_count"] = claim_source_matrix[
+        "superseded_claims"
+    ]
+    lifecycle_summary = dict(claim_lifecycle.get("summary") or {})
+    evidence["tracked_claim_subjects_count"] = int(
+        lifecycle_summary.get("tracked_subjects") or 0
+    )
+    evidence["claim_transitions_count"] = int(
+        lifecycle_summary.get("confirmed_transitions") or 0
+    )
+    evidence["pending_claim_changes_count"] = int(
+        lifecycle_summary.get("pending_changes") or 0
+    )
+    repair_queries = list(
+        dict.fromkeys(
+            [
+                *list(claim_source_matrix.get("repair_queries") or []),
+                *list(execution_schedule.get("repair_queries") or []),
+            ]
+        )
+    )[:8]
+    citation_required = bool(config.get("citation_required", True))
+    matrix_allows_completion = _claim_matrix_allows_completion(
+        claim_source_matrix,
+        citation_required=citation_required,
+    )
+    schedule_allows_completion = (
+        not citation_required or bool(execution_schedule.get("sufficient"))
+    )
+    evidence["execution_schedule_ready"] = schedule_allows_completion
+    evidence["publication_ready"] = bool(claim_source_matrix.get("publication_ready"))
+    evidence["completion_evidence_ready"] = (
+        matrix_allows_completion and schedule_allows_completion
+    )
+
     # Outcome evaluation: ask LLM whether the research goal is sufficiently answered
     # Pass real contradiction objects so the evaluator can generate tie-breaker queries
-    all_contradictions = list(evidence.get("contradictions") or [])
+    evaluated_contradictions = list(
+        claim_source_matrix.get("contradiction_resolutions") or []
+    )
+    all_contradictions = [
+        dict(item)
+        for item in (
+            evaluated_contradictions
+            or list(evidence.get("contradictions") or [])
+        )
+        if _contradiction_blocks_completion(item)
+    ]
     try:
         from remy.core.research_sessions import load_research_session as _lrs_c
         _sess_c = _lrs_c(session.goal_id)
@@ -1111,7 +1524,8 @@ async def run_research_worker(
             # Merge session-level contradictions (may have richer structure)
             seen_ids = {c.get("id") for c in all_contradictions if c.get("id")}
             for sc in _sess_c.contradictions:
-                if sc.get("id") not in seen_ids:
+                active = _contradiction_blocks_completion(sc)
+                if active and sc.get("id") not in seen_ids:
                     all_contradictions.append(sc)
     except Exception:
         pass
@@ -1123,7 +1537,11 @@ async def run_research_worker(
     )
     evidence["outcome_evaluation"] = outcome
     # Store open_questions and refinement_queries in the session for Крок 4
-    if outcome.get("open_questions") or outcome.get("refinement_queries"):
+    if (
+        outcome.get("open_questions")
+        or outcome.get("refinement_queries")
+        or repair_queries
+    ):
         try:
             from remy.core.research_sessions import save_research_session, load_research_session as _lrs
 
@@ -1142,6 +1560,13 @@ async def run_research_worker(
                         tag = f"[refinement] {rq}"
                         if tag not in existing_rq:
                             _sess.warnings.append(tag)
+                existing_repairs = {
+                    w for w in _sess.warnings if w.startswith("[claim-repair] ")
+                }
+                for repair_query in repair_queries:
+                    tag = f"[claim-repair] {repair_query}"
+                    if tag not in existing_repairs:
+                        _sess.warnings.append(tag)
                 save_research_session(_sess)
         except Exception as _e:
             logger.debug("Could not persist outcome evaluation to session: %s", _e)
@@ -1150,6 +1575,8 @@ async def run_research_worker(
     if (
         outcome.get("answered")
         and outcome.get("confidence") == "high"
+        and matrix_allows_completion
+        and schedule_allows_completion
         and status in ("findings_collected", "partial_progress")
     ):
         logger.info(
@@ -1170,6 +1597,10 @@ async def run_research_worker(
             status = "timeout"
     elif result.status == "error":
         status = "error"
+    if status == "completed" and not (
+        matrix_allows_completion and schedule_allows_completion
+    ):
+        status = "partial_progress"
     refreshed_session = (
         reconcile_session_sources(session.goal_id)
         or load_research_session(session.goal_id)
@@ -1186,15 +1617,25 @@ async def run_research_worker(
     if (
         status in ("completed", "findings_collected", "partial_progress")
         and total_findings >= threshold
+        and matrix_allows_completion
+        and schedule_allows_completion
     ):
         if not artifact_id:
             artifact_id = _store_research_summary_artifact(
-                goal, refreshed_session.summary(), list(refreshed_session.findings or [])
+                goal,
+                refreshed_session.summary(),
+                list(refreshed_session.findings or []),
+                dict(getattr(refreshed_session, "claim_source_matrix", {}) or {}),
+                claim_lifecycle,
             )
         mark_session_completed(session.goal_id, final_artifact_id=artifact_id)
         refreshed_session = load_research_session(session.goal_id) or refreshed_session
         status = "completed"
-    elif status == "completed":
+    elif (
+        status == "completed"
+        and matrix_allows_completion
+        and schedule_allows_completion
+    ):
         mark_session_completed(
             session.goal_id, final_artifact_id=str(evidence.get("final_artifact_id", ""))
         )
@@ -1204,7 +1645,9 @@ async def run_research_worker(
     accepted_count = int(session_summary.get("accepted_sources_count", 0) or 0)
     rejected_count = int(session_summary.get("rejected_sources_count", 0) or 0)
     findings_count = int(session_summary.get("findings_count", 0) or 0)
-    citation_coverage_rate = accepted_count / findings_count if findings_count else 0.0
+    citation_coverage_rate = float(
+        session_summary.get("citation_coverage_rate") or 0.0
+    )
     refreshed_accepted = list(getattr(refreshed_session, "accepted_sources", []) or [])
     refreshed_rejected = list(getattr(refreshed_session, "rejected_sources", []) or [])
     evidence.update(
@@ -1219,6 +1662,18 @@ async def run_research_worker(
             "accepted_sources_count": accepted_count,
             "rejected_sources_count": rejected_count,
             "citation_coverage_rate": round(citation_coverage_rate, 3),
+            "claim_coverage_rate": round(
+                float(
+                    (getattr(refreshed_session, "claim_source_matrix", {}) or {}).get(
+                        "claim_coverage_rate", citation_coverage_rate
+                    )
+                ),
+                3,
+            ),
+            "claim_source_matrix": dict(
+                getattr(refreshed_session, "claim_source_matrix", {})
+                or claim_source_matrix
+            ),
             "accepted_sources": refreshed_accepted[:5]
             if refreshed_accepted
             else accepted_sources[:5],
@@ -1238,6 +1693,59 @@ async def run_research_worker(
         evidence=evidence,
         status=status,
         session_id=session_id,
+    )
+    worker_session_log.append(
+        {
+            "type": "claim_source_matrix",
+            "source": "claim_source_matrix",
+            **dict(
+                getattr(refreshed_session, "claim_source_matrix", {})
+                or claim_source_matrix
+            ),
+        }
+    )
+    if claim_lifecycle.get("scope_key"):
+        worker_session_log.append(
+            {
+                "type": "claim_lifecycle",
+                "source": "claim_lifecycle",
+                **claim_lifecycle,
+            }
+        )
+    worker_session_log.append(
+        {
+            "type": "source_provenance_graph",
+            "source": "source_provenance_graph",
+            **provenance_graph,
+        }
+    )
+    worker_session_log.append(
+        {
+            "type": "research_prefetch_queue",
+            "source": "marginal_evidence_controller",
+            **prefetch_queue,
+        }
+    )
+    worker_session_log.append(
+        {
+            "type": "marginal_evidence_analysis",
+            "source": "marginal_evidence_controller",
+            **marginal_evidence,
+        }
+    )
+    worker_session_log.append(
+        {
+            "type": "research_same_run_recovery",
+            "source": "research_execution_scheduler",
+            **recovery_trace,
+        }
+    )
+    worker_session_log.append(
+        {
+            "type": "research_execution_schedule",
+            "source": "research_execution_scheduler",
+            **execution_schedule,
+        }
     )
 
     return WorkerExecutionResult(
